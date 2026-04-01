@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text, func
+from geoalchemy2 import Geometry
+from geoalchemy2.elements import WKBElement
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from packages.domain.database import Base
@@ -102,13 +104,24 @@ class TaskSpecRecord(Base):
 
 class AOIRecord(Base):
     __tablename__ = "aois"
+    __table_args__ = (
+        Index("ix_aois_geom", "geom", postgresql_using="gist"),
+        Index("ix_aois_bbox", "bbox", postgresql_using="gist"),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     task_id: Mapped[str] = mapped_column(ForeignKey("task_runs.id"), unique=True)
     source_file_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     name: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    geometry_wkt: Mapped[str | None] = mapped_column(Text, nullable=True)
-    bbox_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    geom: Mapped[WKBElement | None] = mapped_column(
+        Geometry(geometry_type="MULTIPOLYGON", srid=4326, spatial_index=False),
+        nullable=True,
+    )
+    bbox: Mapped[WKBElement | None] = mapped_column(
+        Geometry(geometry_type="POLYGON", srid=4326, spatial_index=False),
+        nullable=True,
+    )
+    bbox_bounds_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
     area_km2: Mapped[float | None] = mapped_column(Float, nullable=True)
     is_valid: Mapped[bool] = mapped_column(Boolean, default=True)
     validation_message: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -165,4 +178,3 @@ class ArtifactRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     task: Mapped[TaskRunRecord] = relationship(back_populates="artifacts")
-
