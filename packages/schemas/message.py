@@ -13,3 +13,4 @@ class MessageCreateResponse(BaseModel):
     task_status: str
     need_clarification: bool
     missing_fields: list[str] = Field(default_factory=list)
+    clarification_message: str | None = None

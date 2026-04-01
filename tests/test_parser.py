@@ -3,7 +3,7 @@ from packages.domain.services.parser import parse_task_message
 
 def test_parse_time_range_and_outputs() -> None:
     parsed = parse_task_message(
-        "帮我计算 2024 年 6 到 8 月北京西山的 NDVI，并导出地图和 GeoTIFF。",
+        "帮我计算 2024 年 6 到 8 月 bbox(116.1, 39.8, 116.5, 40.1) 的 NDVI，并导出地图和 GeoTIFF。",
         has_upload=False,
     )
 
@@ -13,9 +13,22 @@ def test_parse_time_range_and_outputs() -> None:
     assert parsed.analysis_type == "NDVI"
 
 
+def test_parse_place_alias_sets_named_aoi_source_type() -> None:
+    parsed = parse_task_message("帮我计算 2024 年 6 到 8 月北京西山的 NDVI。", has_upload=False)
+
+    assert parsed.need_confirmation is False
+    assert parsed.aoi_source_type == "place_alias"
+
+
+def test_parse_admin_name_sets_admin_source_type() -> None:
+    parsed = parse_task_message("帮我计算 2024 年 6 到 8 月海淀区的 NDVI。", has_upload=False)
+
+    assert parsed.need_confirmation is False
+    assert parsed.aoi_source_type == "admin_name"
+
+
 def test_parse_missing_time_requires_clarification() -> None:
     parsed = parse_task_message("帮我算北京西山 NDVI。", has_upload=False)
 
     assert parsed.need_confirmation is True
     assert "time_range" in parsed.missing_fields
-

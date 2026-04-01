@@ -4,6 +4,7 @@ import re
 from calendar import monthrange
 from datetime import date
 
+from packages.domain.services.aoi import parse_bbox_text
 from packages.schemas.task import ParsedTaskSpec
 
 
@@ -12,6 +13,20 @@ SEASON_MONTHS = {
     "夏季": (6, 8),
     "秋季": (9, 11),
 }
+
+
+def _infer_aoi_source_type(aoi_input: str | None, *, has_upload: bool, detected_bbox: list[float] | None) -> str | None:
+    if has_upload:
+        return "file_upload"
+    if detected_bbox:
+        return "bbox"
+    if not aoi_input:
+        return None
+
+    compact = re.sub(r"\s+", "", aoi_input)
+    if re.search(r"(自治区|自治州|特别行政区|省|市|区|县|州|盟|旗)$", compact):
+        return "admin_name"
+    return "place_alias"
 
 
 def _month_range(year: int, month: int) -> tuple[str, str]:
@@ -51,7 +66,7 @@ def parse_task_message(message: str, has_upload: bool) -> ParsedTaskSpec:
         user_priority = "temporal"
 
     time_range = None
-    range_match = re.search(r"(\d{4})年\s*(\d{1,2})\s*(?:月)?\s*[到至-]\s*(\d{1,2})\s*月", text)
+    range_match = re.search(r"(\d{4})\s*年\s*(\d{1,2})\s*(?:月)?\s*[到至-]\s*(\d{1,2})\s*月", text)
     if range_match:
         year = int(range_match.group(1))
         start_month = int(range_match.group(2))
@@ -62,14 +77,14 @@ def parse_task_message(message: str, has_upload: bool) -> ParsedTaskSpec:
             "end": f"{year:04d}-{end_month:02d}-{end_day:02d}",
         }
     if time_range is None:
-        month_match = re.search(r"(\d{4})年\s*(\d{1,2})月", text)
+        month_match = re.search(r"(\d{4})\s*年\s*(\d{1,2})\s*月", text)
         if month_match:
             year = int(month_match.group(1))
             month = int(month_match.group(2))
             start, end = _month_range(year, month)
             time_range = {"start": start, "end": end}
     if time_range is None:
-        season_match = re.search(r"(\d{4})年(春季|夏季|秋季|冬季)", text)
+        season_match = re.search(r"(\d{4})\s*年\s*(春季|夏季|秋季|冬季)", text)
         if season_match:
             year = int(season_match.group(1))
             season = season_match.group(2)
@@ -80,16 +95,29 @@ def parse_task_message(message: str, has_upload: bool) -> ParsedTaskSpec:
     cleaned = text
     cleaned = re.sub(r"帮我(?:计算|算|看)?", "", cleaned)
     cleaned = re.sub(r"计算|分析|帮我", "", cleaned)
-    cleaned = re.sub(r"\d{4}年\s*\d{1,2}\s*(?:月)?\s*[到至-]\s*\d{1,2}\s*月", "", cleaned)
-    cleaned = re.sub(r"\d{4}年(?:春季|夏季|秋季|冬季)", "", cleaned)
-    cleaned = re.sub(r"\d{4}年\s*\d{1,2}月", "", cleaned)
+    cleaned = re.sub(r"\d{4}\s*年\s*\d{1,2}\s*(?:月)?\s*[到至-]\s*\d{1,2}\s*月", "", cleaned)
+    cleaned = re.sub(r"\d{4}\s*年\s*(?:春季|夏季|秋季|冬季)", "", cleaned)
+    cleaned = re.sub(r"\d{4}\s*年\s*\d{1,2}\s*月", "", cleaned)
     cleaned = cleaned.replace("的", " ").replace("并导出", " ")
     cleaned = re.sub(r"NDVI|植被情况|植被长势", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"地图|GeoTIFF|方法说明|结果解释|输出|导出|一张图|图和", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"地图和|地图|GeoTIFF|方法说明|结果解释|输出|导出|一张图|图和",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
     aoi_input = re.sub(r"\s+", " ", cleaned).strip(" ，,。")
+
+    detected_bbox = parse_bbox_text(aoi_input) if aoi_input else None
 
     if has_upload and not aoi_input:
         aoi_input = "uploaded_aoi"
+
+    aoi_source_type = _infer_aoi_source_type(
+        aoi_input,
+        has_upload=has_upload,
+        detected_bbox=detected_bbox,
+    )
 
     missing_fields: list[str] = []
     if not aoi_input:
@@ -101,7 +129,7 @@ def parse_task_message(message: str, has_upload: bool) -> ParsedTaskSpec:
 
     return ParsedTaskSpec(
         aoi_input=aoi_input or None,
-        aoi_source_type="file_upload" if has_upload else ("place_alias" if aoi_input else None),
+        aoi_source_type=aoi_source_type,
         time_range=time_range,
         analysis_type=analysis_type,
         preferred_output=list(dict.fromkeys(preferred_output)),
@@ -110,4 +138,3 @@ def parse_task_message(message: str, has_upload: bool) -> ParsedTaskSpec:
         missing_fields=missing_fields,
         created_from=date.today().isoformat(),
     )
-

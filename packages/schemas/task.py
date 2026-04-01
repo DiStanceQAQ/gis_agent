@@ -15,12 +15,14 @@ class ParsedTaskSpec(BaseModel):
     user_priority: str = "balanced"
     need_confirmation: bool = False
     missing_fields: list[str] = Field(default_factory=list)
+    clarification_message: str | None = None
     created_from: str | None = None
 
 
 class RecommendationResponse(BaseModel):
     primary_dataset: str
     backup_dataset: str | None = None
+    scores: dict[str, float] = Field(default_factory=dict)
     reason: str
     risk_note: str | None = None
 
@@ -68,6 +70,7 @@ class TaskDetailResponse(BaseModel):
     requested_time_range: dict[str, str] | None = None
     actual_time_range: dict[str, str] | None = None
     error_message: str | None = None
+    clarification_message: str | None = None
 
 
 class RerunTaskRequest(BaseModel):

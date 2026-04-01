@@ -1,0 +1,22 @@
+{
+  "entries": [
+    {
+      "name": "北京西山",
+      "source_type": "place_alias",
+      "aliases": ["西山", "北京西山风景区"],
+      "bbox": [115.72, 39.86, 116.18, 40.06]
+    },
+    {
+      "name": "北京市海淀区",
+      "source_type": "admin_name",
+      "aliases": ["海淀区"],
+      "bbox": [116.03, 39.92, 116.38, 40.10]
+    },
+    {
+      "name": "北京市",
+      "source_type": "admin_name",
+      "aliases": ["北京"],
+      "bbox": [115.42, 39.44, 117.51, 41.06]
+    }
+  ]
+}
