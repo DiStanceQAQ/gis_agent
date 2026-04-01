@@ -13,7 +13,8 @@ dependencies = [
   "uvicorn[standard]>=0.30,<1.0",
   "sqlalchemy>=2.0,<3.0",
   "alembic>=1.13,<2.0",
-  "psycopg[binary]>=3.2,<4.0",
+  "geoalchemy2>=0.16,<1.0",
+  "psycopg[binary]==3.3.3",
   "pydantic>=2.8,<3.0",
   "pydantic-settings>=2.4,<3.0",
   "python-multipart>=0.0.9,<1.0",
@@ -21,7 +22,9 @@ dependencies = [
   "redis>=5.0,<6.0",
   "numpy>=2.0,<3.0",
   "Pillow>=10.4,<12.0",
-  "rasterio>=1.4,<2.0"
+  "rasterio>=1.4,<2.0",
+  "pyshp>=2.3,<3.0",
+  "shapely>=2.0,<3.0"
 ]
 
 [project.optional-dependencies]
@@ -33,6 +36,9 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["apps*", "packages*"]
+
+[tool.setuptools.package-data]
+"packages.domain" = ["data/*.json"]
 
 [tool.ruff]
 line-length = 100

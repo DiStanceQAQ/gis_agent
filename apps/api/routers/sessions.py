@@ -11,4 +11,3 @@ router = APIRouter(tags=["sessions"])
 @router.post("/sessions", response_model=SessionResponse)
 def create_session_endpoint(db: Session = Depends(get_db)) -> SessionResponse:
     return create_session(db)
-
