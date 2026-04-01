@@ -236,7 +236,8 @@ Web UI
 ```json
 {
   "aoi_id": "aoi_xxx",
-  "geometry_wkt": "MULTIPOLYGON(...)",
+  "geom_wkt": "MULTIPOLYGON(...)",
+  "bbox_wkt": "POLYGON(...)",
   "bbox": [115.7, 39.8, 116.2, 40.1],
   "area_km2": 326.5,
   "is_valid": true

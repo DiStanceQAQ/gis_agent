@@ -267,6 +267,9 @@ export default function App() {
             </article>
           </div>
 
+          {task?.clarification_message && task.status === "waiting_clarification" && (
+            <p className="muted">{task.clarification_message}</p>
+          )}
           {task?.error_message && <p className="error-text">{task.error_message}</p>}
           {!artifactMap.geotiff && task?.status === "success" && (
             <p className="muted">当前结果来自 mock pipeline，后续可替换为真实 STAC + NDVI 工作流。</p>

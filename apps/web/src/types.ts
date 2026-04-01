@@ -16,6 +16,7 @@ export type MessageCreateResponse = {
   task_status: string;
   need_clarification: boolean;
   missing_fields: string[];
+  clarification_message?: string | null;
 };
 
 export type Recommendation = {
@@ -68,5 +69,5 @@ export type TaskDetail = {
   requested_time_range?: Record<string, string> | null;
   actual_time_range?: Record<string, string> | null;
   error_message?: string | null;
+  clarification_message?: string | null;
 };
-
