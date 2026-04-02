@@ -88,6 +88,27 @@ class TaskRunRecord(Base):
     steps: Mapped[list[TaskStepRecord]] = relationship(back_populates="task")
     events: Mapped[list[TaskEventRecord]] = relationship(back_populates="task")
     artifacts: Mapped[list[ArtifactRecord]] = relationship(back_populates="task")
+    llm_calls: Mapped[list[LLMCallLogRecord]] = relationship(back_populates="task")
+
+
+class LLMCallLogRecord(Base):
+    __tablename__ = "llm_call_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_id: Mapped[str | None] = mapped_column(ForeignKey("task_runs.id"), nullable=True, index=True)
+    phase: Mapped[str] = mapped_column(String(32))
+    model_name: Mapped[str] = mapped_column(String(128))
+    request_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    prompt_hash: Mapped[str] = mapped_column(String(64))
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    latency_ms: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(16))
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    task: Mapped[TaskRunRecord | None] = relationship(back_populates="llm_calls")
 
 
 class TaskSpecRecord(Base):
