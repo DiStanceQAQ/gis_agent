@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     llm_parser_legacy_fallback: bool = False
     llm_planner_enabled: bool = True
     llm_planner_schema_retries: int = 2
-    llm_planner_legacy_fallback: bool = True
+    llm_planner_legacy_fallback: bool = False
     llm_recommendation_enabled: bool = True
     llm_recommendation_schema_retries: int = 2
     llm_recommendation_legacy_fallback: bool = True
