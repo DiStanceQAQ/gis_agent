@@ -279,7 +279,7 @@ def _candidate_from_items(
     )
 
 
-def _build_mock_candidates(spec: ParsedTaskSpec, aoi: AOIRecord | None) -> list[CatalogCandidate]:
+def _build_baseline_candidates(spec: ParsedTaskSpec, aoi: AOIRecord | None) -> list[CatalogCandidate]:
     area_km2 = float(aoi.area_km2 or 800.0) if aoi else 800.0
     span_days = _date_span_days(spec)
 
@@ -296,7 +296,7 @@ def _build_mock_candidates(spec: ParsedTaskSpec, aoi: AOIRecord | None) -> list[
             suitability_score=0.84 if spec.user_priority != "temporal" else 0.72,
             recommendation_rank=1 if spec.user_priority != "temporal" else 2,
             summary_json={
-                "source": "mock_catalog",
+                "source": "baseline_catalog",
                 "estimated_area_km2": round(area_km2, 3),
                 "time_range_days": span_days,
             },
@@ -313,7 +313,7 @@ def _build_mock_candidates(spec: ParsedTaskSpec, aoi: AOIRecord | None) -> list[
             suitability_score=0.74 if spec.user_priority != "temporal" else 0.86,
             recommendation_rank=2 if spec.user_priority != "temporal" else 1,
             summary_json={
-                "source": "mock_catalog",
+                "source": "baseline_catalog",
                 "estimated_area_km2": round(area_km2, 3),
                 "time_range_days": span_days,
             },
@@ -411,15 +411,15 @@ def search_candidates(
             return live_candidates
         except (HTTPError, URLError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
             logger.warning("catalog.search.live_failed reason=%s", repr(exc))
-            if not settings.catalog_allow_mock_fallback:
+            if not settings.catalog_allow_baseline_fallback:
                 raise
 
-    mock_candidates = _assign_recommendation_rank(_build_mock_candidates(spec, aoi))
+    baseline_candidates = _assign_recommendation_rank(_build_baseline_candidates(spec, aoi))
     logger.info(
-        "catalog.search.mock_fallback dataset_names=%s",
-        [candidate.dataset_name for candidate in mock_candidates],
+        "catalog.search.baseline_fallback dataset_names=%s",
+        [candidate.dataset_name for candidate in baseline_candidates],
     )
-    return mock_candidates
+    return baseline_candidates
 
 
 def persist_candidates(

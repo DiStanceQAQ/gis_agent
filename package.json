@@ -6,7 +6,12 @@
   ],
   "scripts": {
     "dev:web": "npm --workspace apps/web run dev",
-    "build:web": "npm --workspace apps/web run build"
+    "build:web": "npm --workspace apps/web run build",
+    "check:web": "npm run build:web",
+    "compile:py": "python -m compileall apps packages tests",
+    "lint:py": "ruff check apps packages tests",
+    "test:py": "pytest -q tests",
+    "check:py": "npm run compile:py && npm run lint:py && npm run test:py",
+    "check": "npm run check:py && npm run check:web"
   }
 }
-

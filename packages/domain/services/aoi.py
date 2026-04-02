@@ -406,7 +406,9 @@ def normalize_geojson_file(uploaded_file: UploadedFileRecord) -> NormalizedAOI:
         )
 
     try:
-        payload = json.loads(Path(uploaded_file.storage_key).read_text(encoding="utf-8"))
+        from packages.domain.services.storage import read_storage_text
+
+        payload = json.loads(read_storage_text(uploaded_file.storage_key, encoding="utf-8"))
     except Exception as exc:  # pragma: no cover - defensive file parsing
         raise AppError.bad_request(
             error_code=ErrorCode.AOI_PARSE_FAILED,
@@ -436,8 +438,11 @@ def normalize_shp_zip_file(uploaded_file: UploadedFileRecord) -> NormalizedAOI:
     with tempfile.TemporaryDirectory(prefix="gis-agent-shp-") as temp_dir:
         temp_path = Path(temp_dir)
         try:
-            with zipfile.ZipFile(uploaded_file.storage_key) as archive:
-                archive.extractall(temp_path)
+            from packages.domain.services.storage import materialize_storage_path
+
+            with materialize_storage_path(uploaded_file.storage_key, suffix=".zip") as zip_path:
+                with zipfile.ZipFile(zip_path) as archive:
+                    archive.extractall(temp_path)
         except zipfile.BadZipFile as exc:
             raise AppError.bad_request(
                 error_code=ErrorCode.AOI_PARSE_FAILED,

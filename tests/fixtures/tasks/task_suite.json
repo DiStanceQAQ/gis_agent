@@ -1,0 +1,380 @@
+[
+  {
+    "id": "success_bbox_geotiff",
+    "category": "success",
+    "scenario": "create_and_run",
+    "message": "bbox(116.1,39.8,116.5,40.1) 在 2024-06-01 到 2024-06-30 的 NDVI，并导出 GeoTIFF",
+    "run_pipeline": true,
+    "expected": {
+      "status": "success",
+      "task": {
+        "selected_dataset": "sentinel2",
+        "fallback_used": false
+      },
+      "task_spec": {
+        "aoi_input": "bbox(116.1,39.8,116.5,40.1)",
+        "aoi_source_type": "bbox",
+        "time_range": {
+          "start": "2024-06-01",
+          "end": "2024-06-30"
+        },
+        "preferred_output_contains": ["geotiff"]
+      },
+      "step_status": {
+        "generate_outputs": "success"
+      },
+      "event_types": ["task_completed"],
+      "artifacts_include": ["png_map", "geotiff", "methods_md", "summary_md"]
+    }
+  },
+  {
+    "id": "success_place_alias_summer",
+    "category": "success",
+    "scenario": "create_and_run",
+    "message": "帮我计算 2024 年夏季北京西山的 NDVI",
+    "run_pipeline": true,
+    "expected": {
+      "status": "success",
+      "task": {
+        "selected_dataset": "sentinel2"
+      },
+      "task_spec": {
+        "aoi_input": "北京西山",
+        "aoi_source_type": "place_alias",
+        "time_range": {
+          "start": "2024-06-01",
+          "end": "2024-08-31"
+        }
+      },
+      "event_types": ["task_completed"],
+      "artifacts_include": ["png_map", "methods_md", "summary_md"]
+    }
+  },
+  {
+    "id": "success_admin_name_month",
+    "category": "success",
+    "scenario": "create_and_run",
+    "message": "请分析 2024年6月 海淀区 NDVI",
+    "run_pipeline": true,
+    "expected": {
+      "status": "success",
+      "task": {
+        "selected_dataset": "sentinel2"
+      },
+      "task_spec": {
+        "aoi_input": "海淀区",
+        "aoi_source_type": "admin_name",
+        "time_range": {
+          "start": "2024-06-01",
+          "end": "2024-06-30"
+        }
+      },
+      "event_types": ["task_completed"]
+    }
+  },
+  {
+    "id": "success_city_temporal_priority",
+    "category": "success",
+    "scenario": "create_and_run",
+    "message": "请分析 2024年夏季 北京市 NDVI",
+    "run_pipeline": true,
+    "expected": {
+      "status": "success",
+      "task_spec": {
+        "aoi_input": "北京市",
+        "aoi_source_type": "admin_name",
+        "time_range": {
+          "start": "2024-06-01",
+          "end": "2024-08-31"
+        }
+      },
+      "event_types": ["task_completed"]
+    }
+  },
+  {
+    "id": "success_forced_sentinel2",
+    "category": "success",
+    "scenario": "create_and_run",
+    "message": "帮我分析 2024年6月 北京西山的 Sentinel-2 NDVI",
+    "run_pipeline": true,
+    "expected": {
+      "status": "success",
+      "task": {
+        "selected_dataset": "sentinel2"
+      },
+      "task_spec": {
+        "requested_dataset": "sentinel2"
+      },
+      "event_types": ["task_completed"]
+    }
+  },
+  {
+    "id": "success_forced_landsat_export",
+    "category": "success",
+    "scenario": "create_and_run",
+    "message": "帮我分析 2024年6月 北京西山的 Landsat NDVI，并导出 GeoTIFF",
+    "run_pipeline": true,
+    "expected": {
+      "status": "success",
+      "task": {
+        "selected_dataset": "landsat89"
+      },
+      "task_spec": {
+        "requested_dataset": "landsat89",
+        "preferred_output_contains": ["geotiff"]
+      },
+      "artifacts_include": ["geotiff"],
+      "event_types": ["task_completed"]
+    }
+  },
+  {
+    "id": "success_absolute_date_slash",
+    "category": "success",
+    "scenario": "create_and_run",
+    "message": "请看 2024/06/01 至 2024/06/15 北京西山 NDVI",
+    "run_pipeline": true,
+    "expected": {
+      "status": "success",
+      "task_spec": {
+        "time_range": {
+          "start": "2024-06-01",
+          "end": "2024-06-15"
+        }
+      },
+      "event_types": ["task_completed"]
+    }
+  },
+  {
+    "id": "success_winter_cross_year",
+    "category": "success",
+    "scenario": "create_and_run",
+    "message": "请看 2023年冬季 北京西山 NDVI",
+    "run_pipeline": true,
+    "expected": {
+      "status": "success",
+      "task_spec": {
+        "time_range": {
+          "start": "2023-12-01",
+          "end": "2024-02-29"
+        }
+      },
+      "event_types": ["task_completed"]
+    }
+  },
+  {
+    "id": "clarification_missing_time",
+    "category": "followup",
+    "scenario": "create_only",
+    "message": "帮我算北京西山 NDVI",
+    "expected": {
+      "status": "waiting_clarification",
+      "task_spec": {
+        "aoi_input": "北京西山",
+        "aoi_source_type": "place_alias",
+        "missing_fields_contains": ["time_range"]
+      },
+      "event_types": ["task_waiting_clarification"]
+    }
+  },
+  {
+    "id": "clarification_missing_aoi",
+    "category": "followup",
+    "scenario": "create_only",
+    "message": "请帮我算 2024年6月 的 NDVI",
+    "expected": {
+      "status": "waiting_clarification",
+      "task_spec": {
+        "missing_fields_contains": ["aoi"]
+      },
+      "event_types": ["task_waiting_clarification"]
+    }
+  },
+  {
+    "id": "clarification_unknown_named_aoi",
+    "category": "followup",
+    "scenario": "create_only",
+    "message": "请分析 2024年6月 不存在的研究区 NDVI",
+    "expected": {
+      "status": "waiting_clarification",
+      "task_spec": {
+        "missing_fields_contains": ["aoi_boundary"]
+      },
+      "clarification_message_contains": "请上传 GeoJSON / shp.zip",
+      "event_types": ["task_waiting_clarification"]
+    }
+  },
+  {
+    "id": "followup_time_override",
+    "category": "followup",
+    "scenario": "followup_message",
+    "initial_message": "bbox(116.1,39.8,116.5,40.1) 在 2024-06-01 到 2024-06-30 的 NDVI",
+    "followup_message": "换成 2023 年 6 月",
+    "run_pipeline": true,
+    "expected": {
+      "status": "success",
+      "parent_task": "initial",
+      "task": {
+        "selected_dataset": "sentinel2"
+      },
+      "task_spec": {
+        "time_range": {
+          "start": "2023-06-01",
+          "end": "2023-06-30"
+        }
+      },
+      "event_types": ["task_completed"]
+    }
+  },
+  {
+    "id": "followup_dataset_output_override",
+    "category": "followup",
+    "scenario": "followup_message",
+    "initial_message": "bbox(116.1,39.8,116.5,40.1) 在 2024-06-01 到 2024-06-30 的 NDVI",
+    "followup_message": "改成 Landsat，并重新导出 GeoTIFF",
+    "run_pipeline": true,
+    "expected": {
+      "status": "success",
+      "parent_task": "initial",
+      "task": {
+        "selected_dataset": "landsat89"
+      },
+      "task_spec": {
+        "requested_dataset": "landsat89",
+        "preferred_output_contains": ["png_map", "methods_text", "geotiff"]
+      },
+      "artifacts_include": ["geotiff"],
+      "event_types": ["task_completed"]
+    }
+  },
+  {
+    "id": "followup_bbox_change",
+    "category": "followup",
+    "scenario": "followup_message",
+    "initial_message": "bbox(116.1,39.8,116.5,40.1) 在 2024-06-01 到 2024-06-30 的 NDVI",
+    "followup_message": "换成 bbox(117.0,39.7,117.2,39.9)，并重新跑一遍",
+    "run_pipeline": true,
+    "expected": {
+      "status": "success",
+      "parent_task": "initial",
+      "task_spec": {
+        "aoi_input": "bbox(117.0,39.7,117.2,39.9)",
+        "aoi_source_type": "bbox",
+        "time_range": {
+          "start": "2024-06-01",
+          "end": "2024-06-30"
+        }
+      },
+      "event_types": ["task_completed"]
+    }
+  },
+  {
+    "id": "followup_export_geotiff_only",
+    "category": "export",
+    "scenario": "followup_message",
+    "initial_message": "bbox(116.1,39.8,116.5,40.1) 在 2024-06-01 到 2024-06-30 的 NDVI",
+    "followup_message": "重新导出 GeoTIFF",
+    "run_pipeline": true,
+    "expected": {
+      "status": "success",
+      "parent_task": "initial",
+      "task_spec": {
+        "preferred_output_contains": ["png_map", "methods_text", "geotiff"]
+      },
+      "artifacts_include": ["geotiff"],
+      "event_types": ["task_completed"]
+    }
+  },
+  {
+    "id": "rerun_same_spec",
+    "category": "followup",
+    "scenario": "rerun_task",
+    "initial_message": "bbox(116.1,39.8,116.5,40.1) 在 2024-06-01 到 2024-06-30 的 NDVI",
+    "override": {},
+    "run_pipeline": true,
+    "expected": {
+      "status": "success",
+      "parent_task": "initial",
+      "task_spec": {
+        "time_range": {
+          "start": "2024-06-01",
+          "end": "2024-06-30"
+        }
+      },
+      "event_types": ["task_completed"]
+    }
+  },
+  {
+    "id": "rerun_add_geotiff",
+    "category": "export",
+    "scenario": "rerun_task",
+    "initial_message": "bbox(116.1,39.8,116.5,40.1) 在 2024-06-01 到 2024-06-30 的 NDVI",
+    "override": {
+      "preferred_output": ["png_map", "methods_text", "geotiff"]
+    },
+    "run_pipeline": true,
+    "expected": {
+      "status": "success",
+      "parent_task": "initial",
+      "task_spec": {
+        "preferred_output_contains": ["png_map", "methods_text", "geotiff"]
+      },
+      "artifacts_include": ["geotiff"],
+      "event_types": ["task_completed"]
+    }
+  },
+  {
+    "id": "rerun_change_dataset_landsat",
+    "category": "followup",
+    "scenario": "rerun_task",
+    "initial_message": "bbox(116.1,39.8,116.5,40.1) 在 2024-06-01 到 2024-06-30 的 NDVI",
+    "override": {
+      "requested_dataset": "landsat89"
+    },
+    "run_pipeline": true,
+    "expected": {
+      "status": "success",
+      "parent_task": "initial",
+      "task": {
+        "selected_dataset": "landsat89"
+      },
+      "task_spec": {
+        "requested_dataset": "landsat89"
+      },
+      "event_types": ["task_completed"]
+    }
+  },
+  {
+    "id": "success_methods_text_request",
+    "category": "export",
+    "scenario": "create_and_run",
+    "message": "请分析 2024年6月 北京西山 NDVI，并给出方法说明",
+    "run_pipeline": true,
+    "expected": {
+      "status": "success",
+      "task_spec": {
+        "preferred_output_contains": ["methods_text"]
+      },
+      "artifacts_include": ["methods_md", "summary_md"],
+      "event_types": ["task_completed"]
+    }
+  },
+  {
+    "id": "success_bbox_temporal_priority",
+    "category": "success",
+    "scenario": "create_and_run",
+    "message": "bbox(116.1,39.8,116.5,40.1) 在 2024-06-01 到 2024-08-31 的 NDVI，做连续性对比",
+    "run_pipeline": true,
+    "expected": {
+      "status": "success",
+      "task_spec": {
+        "aoi_source_type": "bbox",
+        "user_priority": "temporal",
+        "time_range": {
+          "start": "2024-06-01",
+          "end": "2024-08-31"
+        }
+      },
+      "event_types": ["task_completed"]
+    }
+  }
+]

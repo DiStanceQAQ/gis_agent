@@ -10,6 +10,7 @@ from rasterio.warp import transform
 import shapefile
 from shapely.wkt import loads as load_wkt
 
+from packages.domain.config import get_settings
 from packages.domain.models import TaskRunRecord, TaskSpecRecord, UploadedFileRecord
 from packages.domain.services.aoi import (
     normalize_bbox_text,
@@ -18,6 +19,17 @@ from packages.domain.services.aoi import (
     parse_bbox_text,
     resolve_named_aoi,
 )
+from packages.domain.services.storage import _get_storage_backend_cached
+
+
+@pytest.fixture(autouse=True)
+def _force_local_storage_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GIS_AGENT_STORAGE_BACKEND", "local")
+    get_settings.cache_clear()
+    _get_storage_backend_cached.cache_clear()
+    yield
+    get_settings.cache_clear()
+    _get_storage_backend_cached.cache_clear()
 
 
 def test_parse_bbox_text_from_literal() -> None:

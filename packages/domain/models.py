@@ -70,6 +70,7 @@ class TaskRunRecord(Base):
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    plan_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     recommendation_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     result_summary_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     methods_text: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -85,6 +86,7 @@ class TaskRunRecord(Base):
     aoi: Mapped[AOIRecord | None] = relationship(back_populates="task", uselist=False)
     candidates: Mapped[list[DatasetCandidateRecord]] = relationship(back_populates="task")
     steps: Mapped[list[TaskStepRecord]] = relationship(back_populates="task")
+    events: Mapped[list[TaskEventRecord]] = relationship(back_populates="task")
     artifacts: Mapped[list[ArtifactRecord]] = relationship(back_populates="task")
 
 
@@ -162,6 +164,20 @@ class TaskStepRecord(Base):
     detail_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     task: Mapped[TaskRunRecord] = relationship(back_populates="steps")
+
+
+class TaskEventRecord(Base):
+    __tablename__ = "task_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_id: Mapped[str] = mapped_column(ForeignKey("task_runs.id"), index=True)
+    event_type: Mapped[str] = mapped_column(String(64))
+    step_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    detail_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    task: Mapped[TaskRunRecord] = relationship(back_populates="events")
 
 
 class ArtifactRecord(Base):

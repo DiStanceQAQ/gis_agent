@@ -17,17 +17,20 @@ services:
 
   redis:
     image: ${REDIS_IMAGE:-docker.1panel.live/library/redis:7}
-    profiles: ["async"]
     ports:
       - "6379:6379"
 
   minio:
     image: ${MINIO_IMAGE:-docker.1panel.live/minio/minio:latest}
-    profiles: ["storage"]
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -47,12 +50,52 @@ services:
     environment:
       GIS_AGENT_DATABASE_URL: postgresql+psycopg://gis_agent:gis_agent@postgres:5432/gis_agent
       GIS_AGENT_STORAGE_ROOT: /app/.data
-      GIS_AGENT_EXECUTION_MODE: ${GIS_AGENT_EXECUTION_MODE:-inline_mock}
+      GIS_AGENT_STORAGE_BACKEND: ${GIS_AGENT_STORAGE_BACKEND:-s3}
+      GIS_AGENT_S3_ENDPOINT_URL: ${GIS_AGENT_S3_ENDPOINT_URL:-http://minio:9000}
+      GIS_AGENT_S3_BUCKET: ${GIS_AGENT_S3_BUCKET:-gis-agent}
+      GIS_AGENT_S3_ACCESS_KEY_ID: ${GIS_AGENT_S3_ACCESS_KEY_ID:-minioadmin}
+      GIS_AGENT_S3_SECRET_ACCESS_KEY: ${GIS_AGENT_S3_SECRET_ACCESS_KEY:-minioadmin}
+      GIS_AGENT_S3_REGION: ${GIS_AGENT_S3_REGION:-us-east-1}
+      GIS_AGENT_S3_ADDRESSING_STYLE: ${GIS_AGENT_S3_ADDRESSING_STYLE:-path}
+      GIS_AGENT_AOI_REGISTRY_PATH: ${GIS_AGENT_AOI_REGISTRY_PATH:-}
+      GIS_AGENT_EXECUTION_MODE: ${GIS_AGENT_EXECUTION_MODE:-celery_agent}
       GIS_AGENT_CELERY_BROKER_URL: redis://redis:6379/0
       GIS_AGENT_CELERY_RESULT_BACKEND: redis://redis:6379/1
+      GIS_AGENT_CATALOG_STAC_URL: ${GIS_AGENT_CATALOG_STAC_URL:-https://planetarycomputer.microsoft.com/api/stac/v1}
+      GIS_AGENT_CATALOG_LIVE_SEARCH: ${GIS_AGENT_CATALOG_LIVE_SEARCH:-true}
+      GIS_AGENT_CATALOG_ALLOW_BASELINE_FALLBACK: ${GIS_AGENT_CATALOG_ALLOW_BASELINE_FALLBACK:-true}
+      GIS_AGENT_CATALOG_TIMEOUT_SECONDS: ${GIS_AGENT_CATALOG_TIMEOUT_SECONDS:-20}
+      GIS_AGENT_CATALOG_PAGE_SIZE: ${GIS_AGENT_CATALOG_PAGE_SIZE:-50}
+      GIS_AGENT_CATALOG_MAX_ITEMS: ${GIS_AGENT_CATALOG_MAX_ITEMS:-100}
+      GIS_AGENT_REAL_PIPELINE_ENABLED: ${GIS_AGENT_REAL_PIPELINE_ENABLED:-true}
+      GIS_AGENT_REAL_PIPELINE_MAX_ITEMS: ${GIS_AGENT_REAL_PIPELINE_MAX_ITEMS:-2}
+      GIS_AGENT_REAL_PIPELINE_MAX_DIMENSION: ${GIS_AGENT_REAL_PIPELINE_MAX_DIMENSION:-256}
+      GIS_AGENT_LLM_PROVIDER: ${GIS_AGENT_LLM_PROVIDER:-openai_compatible}
+      GIS_AGENT_LLM_BASE_URL: ${GIS_AGENT_LLM_BASE_URL:-https://api.openai.com/v1}
+      GIS_AGENT_LLM_API_KEY: ${GIS_AGENT_LLM_API_KEY:-}
+      GIS_AGENT_LLM_MODEL: ${GIS_AGENT_LLM_MODEL:-gpt-4o-mini}
+      GIS_AGENT_LLM_TIMEOUT_SECONDS: ${GIS_AGENT_LLM_TIMEOUT_SECONDS:-60}
+      GIS_AGENT_LLM_MAX_RETRIES: ${GIS_AGENT_LLM_MAX_RETRIES:-2}
+      GIS_AGENT_LLM_TEMPERATURE: ${GIS_AGENT_LLM_TEMPERATURE:-0.2}
+      GIS_AGENT_LLM_PARSER_ENABLED: ${GIS_AGENT_LLM_PARSER_ENABLED:-true}
+      GIS_AGENT_LLM_PARSER_SCHEMA_RETRIES: ${GIS_AGENT_LLM_PARSER_SCHEMA_RETRIES:-2}
+      GIS_AGENT_LLM_PARSER_LEGACY_FALLBACK: ${GIS_AGENT_LLM_PARSER_LEGACY_FALLBACK:-false}
+      GIS_AGENT_LLM_PLANNER_ENABLED: ${GIS_AGENT_LLM_PLANNER_ENABLED:-true}
+      GIS_AGENT_LLM_PLANNER_SCHEMA_RETRIES: ${GIS_AGENT_LLM_PLANNER_SCHEMA_RETRIES:-2}
+      GIS_AGENT_LLM_PLANNER_LEGACY_FALLBACK: ${GIS_AGENT_LLM_PLANNER_LEGACY_FALLBACK:-true}
+      GIS_AGENT_LLM_RECOMMENDATION_ENABLED: ${GIS_AGENT_LLM_RECOMMENDATION_ENABLED:-true}
+      GIS_AGENT_LLM_RECOMMENDATION_SCHEMA_RETRIES: ${GIS_AGENT_LLM_RECOMMENDATION_SCHEMA_RETRIES:-2}
+      GIS_AGENT_LLM_RECOMMENDATION_LEGACY_FALLBACK: ${GIS_AGENT_LLM_RECOMMENDATION_LEGACY_FALLBACK:-true}
+      GIS_AGENT_AGENT_MAX_STEPS: ${GIS_AGENT_AGENT_MAX_STEPS:-12}
+      GIS_AGENT_AGENT_MAX_TOOL_CALLS: ${GIS_AGENT_AGENT_MAX_TOOL_CALLS:-24}
+      GIS_AGENT_AGENT_RUNTIME_TIMEOUT_SECONDS: ${GIS_AGENT_AGENT_RUNTIME_TIMEOUT_SECONDS:-900}
       GIS_AGENT_ALLOWED_ORIGINS: http://localhost:5173,http://127.0.0.1:5173,http://web:5173
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      minio:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health')"]
@@ -66,7 +109,6 @@ services:
       - .:/app
 
   worker:
-    profiles: ["async"]
     build:
       context: .
       dockerfile: infra/docker/python.Dockerfile
@@ -79,14 +121,52 @@ services:
     environment:
       GIS_AGENT_DATABASE_URL: postgresql+psycopg://gis_agent:gis_agent@postgres:5432/gis_agent
       GIS_AGENT_STORAGE_ROOT: /app/.data
-      GIS_AGENT_EXECUTION_MODE: celery_mock
+      GIS_AGENT_STORAGE_BACKEND: ${GIS_AGENT_STORAGE_BACKEND:-s3}
+      GIS_AGENT_S3_ENDPOINT_URL: ${GIS_AGENT_S3_ENDPOINT_URL:-http://minio:9000}
+      GIS_AGENT_S3_BUCKET: ${GIS_AGENT_S3_BUCKET:-gis-agent}
+      GIS_AGENT_S3_ACCESS_KEY_ID: ${GIS_AGENT_S3_ACCESS_KEY_ID:-minioadmin}
+      GIS_AGENT_S3_SECRET_ACCESS_KEY: ${GIS_AGENT_S3_SECRET_ACCESS_KEY:-minioadmin}
+      GIS_AGENT_S3_REGION: ${GIS_AGENT_S3_REGION:-us-east-1}
+      GIS_AGENT_S3_ADDRESSING_STYLE: ${GIS_AGENT_S3_ADDRESSING_STYLE:-path}
+      GIS_AGENT_AOI_REGISTRY_PATH: ${GIS_AGENT_AOI_REGISTRY_PATH:-}
+      GIS_AGENT_EXECUTION_MODE: celery_agent
       GIS_AGENT_CELERY_BROKER_URL: redis://redis:6379/0
       GIS_AGENT_CELERY_RESULT_BACKEND: redis://redis:6379/1
+      GIS_AGENT_CATALOG_STAC_URL: ${GIS_AGENT_CATALOG_STAC_URL:-https://planetarycomputer.microsoft.com/api/stac/v1}
+      GIS_AGENT_CATALOG_LIVE_SEARCH: ${GIS_AGENT_CATALOG_LIVE_SEARCH:-true}
+      GIS_AGENT_CATALOG_ALLOW_BASELINE_FALLBACK: ${GIS_AGENT_CATALOG_ALLOW_BASELINE_FALLBACK:-true}
+      GIS_AGENT_CATALOG_TIMEOUT_SECONDS: ${GIS_AGENT_CATALOG_TIMEOUT_SECONDS:-20}
+      GIS_AGENT_CATALOG_PAGE_SIZE: ${GIS_AGENT_CATALOG_PAGE_SIZE:-50}
+      GIS_AGENT_CATALOG_MAX_ITEMS: ${GIS_AGENT_CATALOG_MAX_ITEMS:-100}
+      GIS_AGENT_REAL_PIPELINE_ENABLED: ${GIS_AGENT_REAL_PIPELINE_ENABLED:-true}
+      GIS_AGENT_REAL_PIPELINE_MAX_ITEMS: ${GIS_AGENT_REAL_PIPELINE_MAX_ITEMS:-2}
+      GIS_AGENT_REAL_PIPELINE_MAX_DIMENSION: ${GIS_AGENT_REAL_PIPELINE_MAX_DIMENSION:-256}
+      GIS_AGENT_LLM_PROVIDER: ${GIS_AGENT_LLM_PROVIDER:-openai_compatible}
+      GIS_AGENT_LLM_BASE_URL: ${GIS_AGENT_LLM_BASE_URL:-https://api.openai.com/v1}
+      GIS_AGENT_LLM_API_KEY: ${GIS_AGENT_LLM_API_KEY:-}
+      GIS_AGENT_LLM_MODEL: ${GIS_AGENT_LLM_MODEL:-gpt-4o-mini}
+      GIS_AGENT_LLM_TIMEOUT_SECONDS: ${GIS_AGENT_LLM_TIMEOUT_SECONDS:-60}
+      GIS_AGENT_LLM_MAX_RETRIES: ${GIS_AGENT_LLM_MAX_RETRIES:-2}
+      GIS_AGENT_LLM_TEMPERATURE: ${GIS_AGENT_LLM_TEMPERATURE:-0.2}
+      GIS_AGENT_LLM_PARSER_ENABLED: ${GIS_AGENT_LLM_PARSER_ENABLED:-true}
+      GIS_AGENT_LLM_PARSER_SCHEMA_RETRIES: ${GIS_AGENT_LLM_PARSER_SCHEMA_RETRIES:-2}
+      GIS_AGENT_LLM_PARSER_LEGACY_FALLBACK: ${GIS_AGENT_LLM_PARSER_LEGACY_FALLBACK:-false}
+      GIS_AGENT_LLM_PLANNER_ENABLED: ${GIS_AGENT_LLM_PLANNER_ENABLED:-true}
+      GIS_AGENT_LLM_PLANNER_SCHEMA_RETRIES: ${GIS_AGENT_LLM_PLANNER_SCHEMA_RETRIES:-2}
+      GIS_AGENT_LLM_PLANNER_LEGACY_FALLBACK: ${GIS_AGENT_LLM_PLANNER_LEGACY_FALLBACK:-true}
+      GIS_AGENT_LLM_RECOMMENDATION_ENABLED: ${GIS_AGENT_LLM_RECOMMENDATION_ENABLED:-true}
+      GIS_AGENT_LLM_RECOMMENDATION_SCHEMA_RETRIES: ${GIS_AGENT_LLM_RECOMMENDATION_SCHEMA_RETRIES:-2}
+      GIS_AGENT_LLM_RECOMMENDATION_LEGACY_FALLBACK: ${GIS_AGENT_LLM_RECOMMENDATION_LEGACY_FALLBACK:-true}
+      GIS_AGENT_AGENT_MAX_STEPS: ${GIS_AGENT_AGENT_MAX_STEPS:-12}
+      GIS_AGENT_AGENT_MAX_TOOL_CALLS: ${GIS_AGENT_AGENT_MAX_TOOL_CALLS:-24}
+      GIS_AGENT_AGENT_RUNTIME_TIMEOUT_SECONDS: ${GIS_AGENT_AGENT_RUNTIME_TIMEOUT_SECONDS:-900}
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_started
+      minio:
+        condition: service_healthy
       api:
         condition: service_healthy
     volumes:
@@ -99,9 +179,15 @@ services:
       args:
         WEB_BASE_IMAGE: ${WEB_BASE_IMAGE:-docker.1panel.live/library/node:24-alpine}
         NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
-    command: sh -c "if [ ! -d node_modules ] || [ -z \"$(ls -A node_modules 2>/dev/null)\" ]; then npm install --registry $$npm_config_registry; fi && npm --workspace apps/web run dev -- --host 0.0.0.0 --port 5173"
+    command: >-
+      sh -c "LOCK_HASH=$$(sha256sum package-lock.json | awk '{print $$1}');
+      STORED_HASH=$$(cat node_modules/.package-lock.sha256 2>/dev/null || true);
+      if [ ! -d node_modules ] || [ -z \"$$(ls -A node_modules 2>/dev/null)\" ] || [ \"$$LOCK_HASH\" != \"$$STORED_HASH\" ];
+      then npm install --registry $$npm_config_registry && printf '%s' \"$$LOCK_HASH\" > node_modules/.package-lock.sha256; fi
+      && npm --workspace apps/web run dev -- --host 0.0.0.0 --port 5173"
     environment:
       npm_config_registry: ${NPM_REGISTRY:-https://registry.npmmirror.com}
+      VITE_PROXY_TARGET: ${VITE_PROXY_TARGET:-http://api:8000}
     depends_on:
       - api
     ports:

@@ -23,7 +23,18 @@ class ErrorCode:
     AOI_INVALID_BBOX = "aoi_invalid_bbox"
     AOI_AREA_TOO_LARGE = "aoi_area_too_large"
 
-    MOCK_PIPELINE_FAILED = "mock_pipeline_failed"
+    TASK_RUNTIME_FAILED = "task_runtime_failed"
+    TASK_RUNTIME_UNKNOWN_TOOL = "task_runtime_unknown_tool"
+    TASK_RUNTIME_INVALID_STATE_TRANSITION = "task_runtime_invalid_state_transition"
+    TASK_RUNTIME_TIMEOUT = "task_runtime_timeout"
+    TASK_RUNTIME_MAX_STEPS_EXCEEDED = "task_runtime_max_steps_exceeded"
+    TASK_RUNTIME_MAX_TOOL_CALLS_EXCEEDED = "task_runtime_max_tool_calls_exceeded"
+    TASK_LLM_PARSER_SCHEMA_VALIDATION_FAILED = "task_llm_parser_schema_validation_failed"
+    TASK_LLM_PARSER_FAILED = "task_llm_parser_failed"
+    TASK_LLM_PLANNER_SCHEMA_VALIDATION_FAILED = "task_llm_planner_schema_validation_failed"
+    TASK_LLM_PLANNER_FAILED = "task_llm_planner_failed"
+    TASK_LLM_RECOMMENDATION_SCHEMA_VALIDATION_FAILED = "task_llm_recommendation_schema_validation_failed"
+    TASK_LLM_RECOMMENDATION_FAILED = "task_llm_recommendation_failed"
 
 
 class AppError(Exception):

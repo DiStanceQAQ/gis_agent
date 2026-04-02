@@ -1,0 +1,20 @@
+{
+  "id": "failure_generate_outputs",
+  "scenario": "generate_outputs_failure",
+  "message": "bbox(116.1,39.8,116.5,40.1) 在 2024-06-01 到 2024-06-30 的 NDVI",
+  "expected": {
+    "status": "failed",
+    "error_code": "task_runtime_failed",
+    "step_status": {
+      "generate_outputs": "failed"
+    },
+    "event_types": [
+      "task_failed"
+    ],
+    "event_detail": {
+      "task_failed": {
+        "failed_step": "generate_outputs"
+      }
+    }
+  }
+}

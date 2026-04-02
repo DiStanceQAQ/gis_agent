@@ -4,17 +4,18 @@ GIS Agent 的第一版工程骨架。当前这套代码优先解决三件事：
 
 - 按照 PRD 把前后端、Worker、共享模型和本地运行方式搭起来
 - 固定 API 契约、任务状态机和数据模型，减少后续返工
-- 用一个可运行的 mock pipeline 跑通任务创建、状态推进和结果展示
+- 用一个可运行的 baseline pipeline 跑通任务创建、状态推进和结果展示
 
 ## 当前状态
 
-这不是完整的 GIS 实现，当前默认是 `inline_mock` 执行模式，数据库默认已切到 PostgreSQL / PostGIS：
+这不是完整的 GIS 实现，当前默认是 `celery_agent` 执行模式，数据库默认已切到 PostgreSQL / PostGIS：
 
 - 会创建会话、消息、任务、步骤、产物记录
-- 会生成 mock 的 PNG、GeoTIFF、方法说明和结果摘要
+- 会生成 baseline 的 PNG、GeoTIFF、方法说明和结果摘要
 - 会输出 Sentinel-2 / Landsat 的候选对比和推荐结果
+- 前端结果页已支持主推 / 备选数据源的细粒度对比卡，可直接查看云量、景数、分辨率和目录来源
 - AOI 已改为使用 PostGIS 几何字段存储，并支持“已配置 AOI 注册表”里的行政区名 / 别名确定性解析
-- 仓库里已经带有真实 STAC 检索、AOI 标准化和 NDVI pipeline，但默认仍保持关闭，需要显式开启
+- 仓库里已经带有真实 STAC 检索、AOI 标准化和 NDVI pipeline，默认会优先尝试真实链路
 
 当前推荐按这份执行清单推进开发：
 
@@ -39,10 +40,13 @@ infra/
 默认推荐直接用 Docker Compose。当前默认启动链路是：
 
 - `postgres`
+- `redis`
+- `minio`
 - `api`
+- `worker`
 - `web`
 
-这条链路不依赖 Redis / Worker / MinIO，足够跑通当前的 `inline_mock` 工程骨架。
+这条链路默认走 Celery 队列执行，任务创建会先入队，再由 `worker` 推进状态和产物生成。当前 Docker 开发默认也会把产物和上传文件写入 MinIO。
 
 当前默认镜像源使用 `docker.1panel.live` 代理，以适配 Docker Hub / GHCR 拉取较慢的网络环境。
 Python 依赖默认走清华 PyPI，前端依赖默认走 `npmmirror`。
@@ -64,34 +68,21 @@ export NPM_REGISTRY=https://registry.npmjs.org
 
 ```bash
 cp .env.example .env
-docker compose --profile async --profile storage up -d --build
+docker compose up -d --build
 ```
 
 ### 2. 查看状态
 
 ```bash
 docker compose ps
-docker compose logs -f api web
+docker compose logs -f api worker web
 ```
 
 ### 3. 访问地址
 
 - 前端: `http://localhost:5173`
 - API 健康检查: `http://localhost:8000/api/v1/health`
-
-### 4. 可选服务
-
-如果后面要切到异步任务模式，再额外启动：
-
-```bash
-docker compose --profile async up -d redis worker
-```
-
-如果后面要补对象存储，再额外启动：
-
-```bash
-docker compose --profile storage up -d minio
-```
+- MinIO Console: `http://localhost:9001`
 
 ## 本地开发
 
@@ -109,7 +100,13 @@ cp .env.example .env
 本地直接起 API 之前，先保证数据库已启动：
 
 ```bash
-docker compose up -d postgres
+docker compose up -d postgres minio
+```
+
+如果你本机直跑 API 时不想启 MinIO，也可以在启动前切回本地文件存储：
+
+```bash
+export GIS_AGENT_STORAGE_BACKEND=local
 ```
 
 ### 3. 前端依赖
@@ -136,22 +133,21 @@ uvicorn apps.api.main:app --reload
 npm --workspace apps/web run dev
 ```
 
-### 6. 启动 Worker（可选）
+### 6. 启动 Worker
 
-默认模式是 `inline_mock`，不需要 Celery。若要改成异步模式：
+本地直接跑服务时，默认模式已经是 `celery_agent`，需要同时起 Worker：
 
 ```bash
-export GIS_AGENT_EXECUTION_MODE=celery_mock
 celery -A apps.worker.celery_app.celery_app worker --loglevel=info
 ```
 
-### 7. 开启真实目录搜索与真实 NDVI
+### 7. 真实目录搜索与真实 NDVI
 
-默认配置为了本地开发稳定性，关闭了 live catalog 和 real pipeline。要显式开启时：
+默认配置会优先开启 live catalog 和 real pipeline；如需要临时切回 baseline 路径：
 
 ```bash
-export GIS_AGENT_CATALOG_LIVE_SEARCH=true
-export GIS_AGENT_REAL_PIPELINE_ENABLED=true
+export GIS_AGENT_CATALOG_LIVE_SEARCH=false
+export GIS_AGENT_REAL_PIPELINE_ENABLED=false
 ```
 
 ### 8. 配置本地 AOI 注册表
@@ -174,6 +170,24 @@ export GIS_AGENT_AOI_REGISTRY_PATH=/absolute/path/to/aoi_registry.json
 
 `aliases` 是可选的。当前策略是“命中注册表就直接解析，没命中就要求澄清”，不会再静默猜测自然地名。
 
+### 9. 配置 LLM 基础参数
+
+当前仓库已经补齐 LLM 客户端与配置项（后续会接入 parser / planner / recommendation 主链）：
+
+```bash
+export GIS_AGENT_LLM_PROVIDER=openai_compatible
+export GIS_AGENT_LLM_BASE_URL=https://api.openai.com/v1
+export GIS_AGENT_LLM_API_KEY=<your_api_key>
+export GIS_AGENT_LLM_MODEL=gpt-4o-mini
+export GIS_AGENT_LLM_TIMEOUT_SECONDS=60
+export GIS_AGENT_LLM_MAX_RETRIES=2
+export GIS_AGENT_LLM_TEMPERATURE=0.2
+export GIS_AGENT_AGENT_MAX_STEPS=12
+export GIS_AGENT_AGENT_MAX_TOOL_CALLS=24
+```
+
+建议把这些变量写入 `.env`，并按你实际供应商调整 `GIS_AGENT_LLM_BASE_URL` 与 `GIS_AGENT_LLM_MODEL`。
+
 ## Docker Compose
 
 ```bash
@@ -183,19 +197,80 @@ docker compose up -d --build
 默认会拉起：
 
 - `postgres`
+- `redis`
+- `minio`
 - `api`
+- `worker`
 - `web`
 
-按 profile 启动的可选服务：
+## 检查与 CI
 
-- `redis`
-- `worker`
-- `minio`
+仓库现在已经带了基础 CI：
+
+- [ci.yml](/Users/ljn/gis_agent/.github/workflows/ci.yml)
+
+GitHub Actions 里会跑两段：
+
+- 后端：`python -m compileall apps packages tests`、`ruff check apps packages tests`、`pytest -q tests`
+- 前端：`npm run check:web`
+
+如果你继续用 Docker 开发，最稳的本地检查方式是：
+
+```bash
+docker exec gis_agent-api-1 python -m compileall apps packages tests
+docker exec gis_agent-api-1 ruff check apps packages tests
+docker exec gis_agent-api-1 pytest -q tests
+npm run check:web
+```
+
+如果你切到本机虚拟环境，也可以直接跑：
+
+```bash
+npm run check:py
+npm run check:web
+```
+
+当前也已经补了第一批端到端任务样例夹具：
+
+- [tests/fixtures/tasks/task_suite.json](/Users/ljn/gis_agent/tests/fixtures/tasks/task_suite.json)
+- [tests/fixtures/tasks/fallback_real_pipeline_to_baseline.json](/Users/ljn/gis_agent/tests/fixtures/tasks/fallback_real_pipeline_to_baseline.json)
+- [tests/fixtures/tasks/failure_generate_outputs.json](/Users/ljn/gis_agent/tests/fixtures/tasks/failure_generate_outputs.json)
+
+对应回归在：
+
+- [test_task_samples.py](/Users/ljn/gis_agent/tests/test_task_samples.py)
+- [test_ndvi_pipeline.py](/Users/ljn/gis_agent/tests/test_ndvi_pipeline.py)
+
+当前样例总数已经到 20 条，覆盖：
+
+- 成功任务
+- 失败任务
+- fallback
+- 追问继承
+- 导出 / 重跑
+
+当前也已经记录了第一版性能基线：
+
+- [docs/perf-baseline.md](/Users/ljn/gis_agent/docs/perf-baseline.md)
+
+当前存储层也已经抽象成统一接口：
+
+- Docker 开发默认：`GIS_AGENT_STORAGE_BACKEND=s3`
+- 本机直跑 API 时，如不启 MinIO，可手动切回 `GIS_AGENT_STORAGE_BACKEND=local`
+- Docker 开发默认是 `GIS_AGENT_CATALOG_LIVE_SEARCH=true` 和 `GIS_AGENT_REAL_PIPELINE_ENABLED=true`
+
+如果要按默认的 MinIO 路径启动，直接执行：
+
+```bash
+docker compose up -d --build
+```
+
+相关环境变量可参考：
+
+- [\.env.example](/Users/ljn/gis_agent/.env.example)
 
 ## 下一步建议
 
-1. 把 `TaskParser` 从基础 regex 继续收口成可继承上下文的结构化解析器
-2. 把 AOI 注册表从示例扩成真实业务区域库
-3. 新建 QC / fallback 模块，把失败和降级显式记录下来
-4. 把本地文件存储抽象成可切换 MinIO / S3 的后端
-5. 补上 CI、样例集和性能基线
+1. 把 AOI 注册表从示例扩成真实业务区域库
+2. 接入 HLS，补第三数据源到同一套候选与推荐框架
+3. 继续扩样例集和性能基线

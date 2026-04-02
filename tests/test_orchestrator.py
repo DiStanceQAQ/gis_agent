@@ -1,7 +1,7 @@
 from geoalchemy2.elements import WKTElement
 
 from packages.domain.models import AOIRecord, TaskRunRecord, TaskSpecRecord
-from packages.domain.services.orchestrator import should_inherit_original_aoi
+from packages.domain.services.orchestrator import _merge_task_spec, should_inherit_original_aoi
 from packages.schemas.task import ParsedTaskSpec
 
 
@@ -62,3 +62,43 @@ def test_should_not_inherit_original_aoi_when_aoi_changes() -> None:
     )
 
     assert should_inherit_original_aoi(original_task, parsed, {"aoi_input": parsed.aoi_input}) is False
+
+
+def test_merge_task_spec_preserves_existing_outputs_when_followup_adds_geotiff() -> None:
+    merged = _merge_task_spec(
+        {
+            "aoi_input": "bbox(116.1,39.8,116.5,40.1)",
+            "aoi_source_type": "bbox",
+            "time_range": {"start": "2024-06-01", "end": "2024-06-30"},
+            "analysis_type": "NDVI",
+            "preferred_output": ["png_map", "methods_text"],
+            "user_priority": "balanced",
+            "need_confirmation": False,
+            "missing_fields": [],
+            "clarification_message": None,
+            "created_from": "2026-04-01",
+        },
+        {"preferred_output": ["geotiff"]},
+    )
+
+    assert merged.preferred_output == ["png_map", "methods_text", "geotiff"]
+
+
+def test_merge_task_spec_applies_followup_time_override() -> None:
+    merged = _merge_task_spec(
+        {
+            "aoi_input": "bbox(116.1,39.8,116.5,40.1)",
+            "aoi_source_type": "bbox",
+            "time_range": {"start": "2024-06-01", "end": "2024-06-30"},
+            "analysis_type": "NDVI",
+            "preferred_output": ["png_map", "methods_text"],
+            "user_priority": "balanced",
+            "need_confirmation": False,
+            "missing_fields": [],
+            "clarification_message": None,
+            "created_from": "2026-04-01",
+        },
+        {"time_range": {"start": "2023-06-01", "end": "2023-06-30"}},
+    )
+
+    assert merged.time_range == {"start": "2023-06-01", "end": "2023-06-30"}

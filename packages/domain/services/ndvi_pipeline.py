@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
@@ -19,6 +20,7 @@ from rasterio.windows import from_bounds as window_from_bounds
 from shapely.geometry import box, mapping
 
 from packages.domain.config import get_settings
+from packages.domain.services.explanation import ExplanationContext, build_methods_text, build_summary_text
 from packages.domain.logging import get_logger
 from packages.domain.models import AOIRecord
 from packages.domain.services.catalog import get_collection_profile, search_items_for_dataset
@@ -44,6 +46,9 @@ class NDVIPipelineResult:
     ndvi_min: float
     ndvi_max: float
     ndvi_mean: float
+    output_width: int
+    output_height: int
+    output_crs: str
     mode: str
 
 
@@ -253,7 +258,7 @@ def _render_png(ndvi_array: np.ndarray, png_path: str) -> None:
     rgb[..., 1] = normalized
     rgb[..., 0] = (255 - normalized) // 3
     rgb[..., 2] = 60
-    Image.fromarray(rgb, mode="RGB").save(png_path)
+    Image.fromarray(rgb).save(png_path)
 
 
 def _write_tif(ndvi_array: np.ndarray, *, tif_path: str, grid: TargetGrid) -> None:
@@ -340,7 +345,8 @@ def run_real_ndvi_pipeline(
         raise ValueError(f"Failed to build NDVI layers for dataset {dataset_name}.")
 
     stack = np.stack(ndvi_layers, axis=0)
-    with np.errstate(all="ignore"):
+    with np.errstate(all="ignore"), warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="All-NaN slice encountered", category=RuntimeWarning)
         ndvi_composite = np.nanmedian(stack, axis=0).astype("float32")
     ndvi_composite = np.where(aoi_mask, ndvi_composite, np.nan).astype("float32")
 
@@ -370,16 +376,25 @@ def run_real_ndvi_pipeline(
             "end": source_dates[-1][:10],
         }
 
-    methods_text = (
-        f"本次任务使用 {dataset_name} 的真实 STAC 候选影像执行 NDVI 流程，"
-        f"按目标网格窗口读取红光/近红外波段，完成基础质量掩膜、逐景 NDVI 计算和中位数合成。"
-        f"本次共使用 {len(selected_item_ids)} 景影像，输出网格尺寸约为 {grid.width}x{grid.height}，输出 CRS 为 {grid.crs}。"
+    explanation_context = ExplanationContext(
+        dataset_name=dataset_name,
+        mode="real",
+        aoi_input=spec.aoi_input,
+        requested_time_range=spec.time_range,
+        actual_time_range=actual_time_range,
+        preferred_output=spec.preferred_output,
+        output_artifact_types=["png_map", "geotiff", "methods_md", "summary_md"],
+        item_count=len(selected_item_ids),
+        valid_pixel_ratio=valid_pixel_ratio,
+        ndvi_min=ndvi_min,
+        ndvi_max=ndvi_max,
+        ndvi_mean=ndvi_mean,
+        output_width=grid.width,
+        output_height=grid.height,
+        output_crs=grid.crs,
     )
-    summary_text = (
-        f"真实 NDVI 合成已完成。共使用 {len(selected_item_ids)} 景影像，"
-        f"有效像元占比约 {valid_pixel_ratio:.2%}，NDVI 均值 {ndvi_mean:.3f}，"
-        f"最小值 {ndvi_min:.3f}，最大值 {ndvi_max:.3f}。"
-    )
+    methods_text = build_methods_text(explanation_context)
+    summary_text = build_summary_text(explanation_context)
     logger.info(
         "ndvi_pipeline.completed task_id=%s dataset=%s item_count=%s valid_pixel_ratio=%.3f",
         task_id,
@@ -399,5 +414,8 @@ def run_real_ndvi_pipeline(
         ndvi_min=round(ndvi_min, 4),
         ndvi_max=round(ndvi_max, 4),
         ndvi_mean=round(ndvi_mean, 4),
+        output_width=grid.width,
+        output_height=grid.height,
+        output_crs=grid.crs,
         mode="real",
     )
