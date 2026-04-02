@@ -14,7 +14,19 @@ from packages.domain.services.task_state import STEP_STATUS_RUNNING, STEP_STATUS
 from packages.schemas.task import ParsedTaskSpec
 
 
-def test_build_task_plan_for_ready_request() -> None:
+@pytest.fixture
+def _legacy_planner_mode_for_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GIS_AGENT_LLM_API_KEY", raising=False)
+    monkeypatch.setenv("GIS_AGENT_LLM_PLANNER_ENABLED", "true")
+    monkeypatch.setenv("GIS_AGENT_LLM_PLANNER_LEGACY_FALLBACK", "true")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+def test_build_task_plan_for_ready_request(
+    _legacy_planner_mode_for_tests: None,
+) -> None:
     parsed = ParsedTaskSpec(
         aoi_input="bbox(116.1,39.8,116.5,40.1)",
         aoi_source_type="bbox",
@@ -32,7 +44,9 @@ def test_build_task_plan_for_ready_request() -> None:
     assert "landsat89" in plan.objective
 
 
-def test_build_task_plan_for_clarification_request() -> None:
+def test_build_task_plan_for_clarification_request(
+    _legacy_planner_mode_for_tests: None,
+) -> None:
     parsed = ParsedTaskSpec(
         aoi_input="北京西山",
         aoi_source_type="place_alias",
@@ -46,7 +60,9 @@ def test_build_task_plan_for_clarification_request() -> None:
     assert plan.missing_fields == ["aoi_boundary"]
 
 
-def test_set_task_plan_step_status_updates_plan_payload() -> None:
+def test_set_task_plan_step_status_updates_plan_payload(
+    _legacy_planner_mode_for_tests: None,
+) -> None:
     plan = build_task_plan(
         ParsedTaskSpec(
             aoi_input="bbox(116.1,39.8,116.5,40.1)",
@@ -207,12 +223,9 @@ def test_build_task_plan_retries_on_schema_validation_error(monkeypatch: pytest.
     get_settings.cache_clear()
 
 
-def test_build_task_plan_falls_back_to_legacy_when_llm_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("GIS_AGENT_LLM_API_KEY", raising=False)
-    monkeypatch.setenv("GIS_AGENT_LLM_PLANNER_ENABLED", "true")
-    monkeypatch.setenv("GIS_AGENT_LLM_PLANNER_LEGACY_FALLBACK", "true")
-    get_settings.cache_clear()
-
+def test_build_task_plan_falls_back_to_legacy_when_llm_unavailable(
+    _legacy_planner_mode_for_tests: None,
+) -> None:
     parsed = ParsedTaskSpec(
         aoi_input="bbox(116.1,39.8,116.5,40.1)",
         aoi_source_type="bbox",
@@ -222,7 +235,6 @@ def test_build_task_plan_falls_back_to_legacy_when_llm_unavailable(monkeypatch: 
 
     assert plan.mode == "agent_driven_gis_workspace"
     assert plan.status == PLAN_STATUS_READY
-    get_settings.cache_clear()
 
 
 def test_build_task_plan_returns_error_code_when_schema_validation_exhausted(
