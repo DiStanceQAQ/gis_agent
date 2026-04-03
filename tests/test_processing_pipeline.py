@@ -206,3 +206,75 @@ def test_run_processing_pipeline_supports_phase2_terrain_and_mosaic_ops(tmp_path
     assert outputs["output_crs"] == "EPSG:4326"
     assert outputs["output_width"] is not None and outputs["output_width"] > 0
     assert outputs["output_height"] is not None and outputs["output_height"] > 0
+
+
+def test_run_processing_pipeline_supports_phase3_reclassify_mask_rasterize(tmp_path) -> None:
+    source_raster = tmp_path / "source_phase3.tif"
+    _create_test_raster(source_raster)
+
+    clip_bbox = [116.0, 39.97, 116.02, 40.0]
+    rasterize_bbox = [116.01, 39.96, 116.03, 39.99]
+    plan_nodes = [
+        {
+            "step_id": "clip1",
+            "op_name": "raster.clip",
+            "depends_on": [],
+            "inputs": {},
+            "params": {"source_path": str(source_raster)},
+            "outputs": {"raster": "r_clip"},
+        },
+        {
+            "step_id": "reclass1",
+            "op_name": "raster.reclassify",
+            "depends_on": ["clip1"],
+            "inputs": {"raster": "r_clip"},
+            "params": {
+                "rules": [
+                    {"min": 0, "max": 20, "value": 1},
+                    {"min": 20, "max": 40, "value": 2},
+                    {"min": 40, "max": 64, "value": 3},
+                ],
+                "default_value": 0,
+                "dtype": "float32",
+            },
+            "outputs": {"raster": "r_reclass"},
+        },
+        {
+            "step_id": "mask1",
+            "op_name": "raster.mask",
+            "depends_on": ["reclass1"],
+            "inputs": {"raster": "r_reclass"},
+            "params": {"bbox": clip_bbox, "invert": False, "nodata": -9999},
+            "outputs": {"raster": "r_mask"},
+        },
+        {
+            "step_id": "rasterize1",
+            "op_name": "raster.rasterize",
+            "depends_on": ["mask1"],
+            "inputs": {"raster": "r_mask"},
+            "params": {
+                "bbox": rasterize_bbox,
+                "burn_value": 9,
+                "dtype": "float32",
+                "nodata": 0,
+            },
+            "outputs": {"raster": "r_zone"},
+        },
+        {
+            "step_id": "export1",
+            "op_name": "artifact.export",
+            "depends_on": ["rasterize1"],
+            "inputs": {"primary": "r_zone"},
+            "params": {"formats": ["geotiff", "png_map"]},
+            "outputs": {"artifact": "a_phase3"},
+        },
+    ]
+
+    outputs = run_processing_pipeline(task_id="task_phase3", plan_nodes=plan_nodes, working_dir=tmp_path)
+
+    artifact_types = {item["artifact_type"] for item in outputs["artifacts"]}
+    assert {"geotiff", "png_map"} <= artifact_types
+    assert outputs["output_crs"] == "EPSG:4326"
+    assert outputs["output_width"] is not None and outputs["output_width"] > 0
+    assert outputs["output_height"] is not None and outputs["output_height"] > 0
+    assert outputs["valid_pixel_ratio"] is not None and outputs["valid_pixel_ratio"] > 0

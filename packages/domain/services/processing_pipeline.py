@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 from typing import Any
 
@@ -8,8 +9,10 @@ import numpy as np
 import rasterio
 from rasterio.errors import RasterioIOError
 from rasterio.enums import Resampling
+from rasterio.features import rasterize
 from rasterio.transform import from_origin
 from rasterio.warp import calculate_default_transform, reproject
+from shapely.geometry import box
 
 
 def _pick_primary_raster_reference(references: dict[str, str]) -> str | None:
@@ -151,6 +154,68 @@ def _resolve_raster_sources(
             _create_default_raster(path)
         resolved.append(path)
     return resolved
+
+
+def _load_geojson_geometries(path: Path) -> list[dict[str, Any]]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("type") == "FeatureCollection":
+        geometries = [
+            feature.get("geometry")
+            for feature in payload.get("features") or []
+            if isinstance(feature, dict) and feature.get("geometry")
+        ]
+        return [geometry for geometry in geometries if isinstance(geometry, dict)]
+    if payload.get("type") == "Feature":
+        geometry = payload.get("geometry")
+        return [geometry] if isinstance(geometry, dict) else []
+    if payload.get("type"):
+        return [payload]
+    return []
+
+
+def _resolve_geometry_shapes(
+    *,
+    node: dict[str, Any],
+    references: dict[str, str],
+) -> list[dict[str, Any]]:
+    inputs = node.get("inputs") or {}
+    params = node.get("params") or {}
+    geometries: list[dict[str, Any]] = []
+
+    input_vector = inputs.get("vector")
+    if input_vector:
+        vector_ref = str(input_vector)
+        vector_path = Path(references[vector_ref]) if vector_ref in references else Path(vector_ref)
+        if vector_path.exists() and vector_path.suffix.lower() in {".json", ".geojson"}:
+            geometries.extend(_load_geojson_geometries(vector_path))
+
+    input_vectors = inputs.get("vectors")
+    if isinstance(input_vectors, list):
+        for vector_ref_raw in input_vectors:
+            vector_ref = str(vector_ref_raw)
+            vector_path = Path(references[vector_ref]) if vector_ref in references else Path(vector_ref)
+            if vector_path.exists() and vector_path.suffix.lower() in {".json", ".geojson"}:
+                geometries.extend(_load_geojson_geometries(vector_path))
+
+    geometry = params.get("geometry")
+    if isinstance(geometry, dict):
+        geometries.append(geometry)
+
+    geometries_param = params.get("geometries")
+    if isinstance(geometries_param, list):
+        for item in geometries_param:
+            if isinstance(item, dict):
+                geometries.append(item)
+
+    bbox = params.get("bbox")
+    if isinstance(bbox, list) and len(bbox) == 4:
+        minx, miny, maxx, maxy = [float(value) for value in bbox]
+        geometries.append(box(minx, miny, maxx, maxy).__geo_interface__)
+
+    if not geometries:
+        geometries.append(box(116.0, 39.95, 116.03, 40.0).__geo_interface__)
+
+    return geometries
 
 
 def _compute_raster_metrics(tif_path: str) -> dict[str, object]:
@@ -431,6 +496,143 @@ def run_processing_pipeline(*, task_id: str, plan_nodes: list[dict[str, Any]], w
                 with rasterio.open(output_path, "w", **profile) as dst:
                     dst.write(mosaic.astype("float32"), 1)
 
+                references[output_ref] = str(output_path)
+            elif op_name == "raster.reclassify":
+                output_ref = str(outputs.get("raster") or step_id or "raster_reclassify")
+                output_path = working_dir / f"{step_id or output_ref}.tif"
+                source_path = _resolve_raster_source(node=node, references=references, working_dir=working_dir)
+                rules = params.get("rules") or []
+                if not isinstance(rules, list) or not rules:
+                    raise ValueError("raster.reclassify requires non-empty rules list")
+
+                default_value = float(params.get("default_value", 0.0))
+                output_dtype = str(params.get("dtype") or "float32")
+                with rasterio.open(source_path) as src:
+                    data = src.read(1).astype("float32")
+                    reclassified = np.full(data.shape, default_value, dtype="float32")
+                    for rule in rules:
+                        if isinstance(rule, dict):
+                            min_value = float(rule.get("min", float("-inf")))
+                            max_value = float(rule.get("max", float("inf")))
+                            target_value = float(rule["value"])
+                            include_min = bool(rule.get("include_min", True))
+                            include_max = bool(rule.get("include_max", False))
+                        elif isinstance(rule, (list, tuple)) and len(rule) == 3:
+                            min_value = float(rule[0])
+                            max_value = float(rule[1])
+                            target_value = float(rule[2])
+                            include_min = True
+                            include_max = False
+                        else:
+                            raise ValueError("raster.reclassify rules must be dict or [min,max,value]")
+
+                        min_mask = data >= min_value if include_min else data > min_value
+                        max_mask = data <= max_value if include_max else data < max_value
+                        reclassified[min_mask & max_mask] = target_value
+
+                    profile = src.profile.copy()
+                    profile.update(count=1, dtype=output_dtype)
+                    with rasterio.open(output_path, "w", **profile) as dst:
+                        dst.write(reclassified.astype(output_dtype), 1)
+                references[output_ref] = str(output_path)
+            elif op_name == "raster.mask":
+                output_ref = str(outputs.get("raster") or step_id or "raster_mask")
+                output_path = working_dir / f"{step_id or output_ref}.tif"
+                source_path = _resolve_raster_source(node=node, references=references, working_dir=working_dir)
+                geometries = _resolve_geometry_shapes(node=node, references=references)
+                invert = bool(params.get("invert", False))
+                with rasterio.open(source_path) as src:
+                    all_touched = bool(params.get("all_touched", False))
+                    mask_uint8 = rasterize(
+                        [(geometry, 1) for geometry in geometries],
+                        out_shape=(src.height, src.width),
+                        transform=src.transform,
+                        fill=0,
+                        all_touched=all_touched,
+                        dtype="uint8",
+                    )
+                    mask_bool = mask_uint8.astype(bool)
+                    if invert:
+                        mask_bool = ~mask_bool
+
+                    profile = src.profile.copy()
+                    output_data = src.read()
+                    nodata = (
+                        float(params.get("nodata"))
+                        if params.get("nodata") is not None
+                        else src.nodata
+                    )
+                    if nodata is None:
+                        nodata = -9999.0 if np.issubdtype(output_data.dtype, np.floating) else 0
+
+                    for band_idx in range(output_data.shape[0]):
+                        band = output_data[band_idx]
+                        band[~mask_bool] = nodata
+                        output_data[band_idx] = band
+
+                    profile.update(nodata=nodata)
+                    with rasterio.open(output_path, "w", **profile) as dst:
+                        dst.write(output_data)
+                references[output_ref] = str(output_path)
+            elif op_name == "raster.rasterize":
+                output_ref = str(outputs.get("raster") or step_id or "raster_rasterize")
+                output_path = working_dir / f"{step_id or output_ref}.tif"
+                geometries = _resolve_geometry_shapes(node=node, references=references)
+                burn_value = float(params.get("burn_value", 1.0))
+                nodata = float(params.get("nodata", 0.0))
+                output_dtype = str(params.get("dtype") or "float32")
+
+                template_ref = str(inputs.get("raster") or "")
+                template_path = (
+                    Path(references[template_ref])
+                    if template_ref and template_ref in references
+                    else None
+                )
+                if template_path is None and params.get("template_raster_path"):
+                    template_path = Path(str(params.get("template_raster_path")))
+
+                if template_path is not None and _is_supported_raster(template_path):
+                    with rasterio.open(template_path) as src:
+                        width = src.width
+                        height = src.height
+                        transform = src.transform
+                        crs = src.crs
+                else:
+                    width = int(params.get("width") or 256)
+                    height = int(params.get("height") or 256)
+                    if width <= 0 or height <= 0:
+                        raise ValueError("raster.rasterize width/height must be positive")
+
+                    if isinstance(params.get("bounds"), list) and len(params["bounds"]) == 4:
+                        minx, miny, maxx, maxy = [float(value) for value in params["bounds"]]
+                    else:
+                        minx, miny, maxx, maxy = 116.0, 39.9, 116.1, 40.0
+                    x_res = (maxx - minx) / width
+                    y_res = (maxy - miny) / height
+                    transform = from_origin(minx, maxy, x_res, y_res)
+                    crs = str(params.get("target_crs") or "EPSG:4326")
+
+                burned = rasterize(
+                    [(geometry, burn_value) for geometry in geometries],
+                    out_shape=(height, width),
+                    transform=transform,
+                    fill=nodata,
+                    all_touched=bool(params.get("all_touched", False)),
+                    dtype=output_dtype,
+                )
+                with rasterio.open(
+                    output_path,
+                    "w",
+                    driver="GTiff",
+                    height=height,
+                    width=width,
+                    count=1,
+                    dtype=output_dtype,
+                    crs=crs,
+                    transform=transform,
+                    nodata=nodata,
+                ) as dst:
+                    dst.write(burned, 1)
                 references[output_ref] = str(output_path)
             elif op_name == "artifact.export":
                 source_ref = str(inputs.get("primary") or "")

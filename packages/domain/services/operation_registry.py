@@ -92,6 +92,27 @@ OPERATION_SPECS: dict[str, OperationSpec] = {
         default_params={},
         executor_name="_op_raster_mosaic",
     ),
+    "raster.reclassify": OperationSpec(
+        op_name="raster.reclassify",
+        input_types={"raster": "raster"},
+        output_types={"raster": "raster"},
+        default_params={"rules": [{"min": 0.0, "max": 1.0, "value": 1.0}]},
+        executor_name="_op_raster_reclassify",
+    ),
+    "raster.mask": OperationSpec(
+        op_name="raster.mask",
+        input_types={"raster": "raster", "vector": "vector"},
+        output_types={"raster": "raster"},
+        default_params={"invert": False},
+        executor_name="_op_raster_mask",
+    ),
+    "raster.rasterize": OperationSpec(
+        op_name="raster.rasterize",
+        input_types={"vector": "vector", "raster": "raster"},
+        output_types={"raster": "raster"},
+        default_params={"burn_value": 1.0},
+        executor_name="_op_raster_rasterize",
+    ),
     "vector.buffer": OperationSpec(
         op_name="vector.buffer",
         input_types={"vector": "vector"},
