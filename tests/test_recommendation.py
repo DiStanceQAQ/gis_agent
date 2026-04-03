@@ -5,7 +5,7 @@ import pytest
 from packages.domain.config import get_settings
 from packages.domain.errors import ErrorCode
 from packages.domain.services.catalog import CatalogCandidate
-from packages.domain.services.llm_client import LLMResponse, LLMUsage
+from packages.domain.services.llm_client import LLMClientError, LLMResponse, LLMUsage
 from packages.domain.services.recommendation import build_recommendation
 
 
@@ -348,4 +348,114 @@ def test_build_recommendation_returns_error_code_when_llm_schema_validation_exha
     assert recommendation["primary_dataset"] == "unknown"
     assert recommendation["error_code"] == ErrorCode.TASK_LLM_RECOMMENDATION_SCHEMA_VALIDATION_FAILED
     assert recommendation["error_message"] is not None
+    get_settings.cache_clear()
+
+
+def test_build_recommendation_normalizes_llm_payload_to_stable_structure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GIS_AGENT_LLM_API_KEY", "test_key")
+    monkeypatch.setenv("GIS_AGENT_LLM_RECOMMENDATION_ENABLED", "true")
+    monkeypatch.setenv("GIS_AGENT_LLM_RECOMMENDATION_LEGACY_FALLBACK", "false")
+    monkeypatch.setenv("GIS_AGENT_LLM_RECOMMENDATION_SCHEMA_RETRIES", "0")
+    get_settings.cache_clear()
+
+    llm_payload = {
+        "primary_dataset": "sentinel2",
+        "backup_dataset": "sentinel2",
+        "scores": {"sentinel2": 0.88, "landsat89": 0.77, "modis": 0.61},
+        "reason": " ",
+        "risk_note": "",
+        "confidence": 0.91,
+    }
+
+    def _fake_chat_json(self, **kwargs):  # noqa: ANN001
+        del self, kwargs
+        return _mock_llm_recommendation_response(llm_payload)
+
+    monkeypatch.setattr("packages.domain.services.recommendation.LLMClient.chat_json", _fake_chat_json)
+    recommendation = build_recommendation(
+        [
+            _candidate(
+                dataset_name="sentinel2",
+                scene_count=18,
+                effective_pixel_ratio_estimate=0.83,
+                cloud_median=10.0,
+                spatial_resolution=10,
+                suitability_score=0.89,
+            ),
+            _candidate(
+                dataset_name="landsat89",
+                scene_count=12,
+                effective_pixel_ratio_estimate=0.77,
+                cloud_median=14.0,
+                spatial_resolution=30,
+                suitability_score=0.76,
+            ),
+        ],
+        user_priority="balanced",
+        requested_dataset="landsat89",
+    )
+
+    assert set(recommendation.keys()) == {
+        "primary_dataset",
+        "backup_dataset",
+        "scores",
+        "reason",
+        "risk_note",
+        "confidence",
+    }
+    assert recommendation["primary_dataset"] == "landsat89"
+    assert recommendation["backup_dataset"] == "sentinel2"
+    assert set(recommendation["scores"].keys()) == {"sentinel2", "landsat89"}
+    assert recommendation["reason"]
+    assert recommendation["risk_note"]
+    assert recommendation["confidence"] == 0.91
+    get_settings.cache_clear()
+
+
+def test_build_recommendation_returns_failure_payload_when_llm_client_errors_without_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GIS_AGENT_LLM_API_KEY", "test_key")
+    monkeypatch.setenv("GIS_AGENT_LLM_RECOMMENDATION_ENABLED", "true")
+    monkeypatch.setenv("GIS_AGENT_LLM_RECOMMENDATION_LEGACY_FALLBACK", "false")
+    get_settings.cache_clear()
+
+    def _raise_llm_client_error(self, **kwargs):  # noqa: ANN001
+        del self, kwargs
+        raise LLMClientError("simulated upstream outage", detail={"source": "tests"})
+
+    monkeypatch.setattr(
+        "packages.domain.services.recommendation.LLMClient.chat_json",
+        _raise_llm_client_error,
+    )
+    recommendation = build_recommendation(
+        [
+            _candidate(
+                dataset_name="sentinel2",
+                scene_count=9,
+                effective_pixel_ratio_estimate=0.79,
+                cloud_median=18.0,
+                spatial_resolution=10,
+                suitability_score=0.84,
+            ),
+            _candidate(
+                dataset_name="landsat89",
+                scene_count=8,
+                effective_pixel_ratio_estimate=0.74,
+                cloud_median=19.0,
+                spatial_resolution=30,
+                suitability_score=0.78,
+            ),
+        ],
+        user_priority="balanced",
+    )
+
+    assert recommendation["primary_dataset"] == "unknown"
+    assert recommendation["backup_dataset"] is None
+    assert recommendation["scores"] == {}
+    assert recommendation["error_code"] == ErrorCode.TASK_LLM_RECOMMENDATION_FAILED
+    assert recommendation["error_message"] is not None
+    assert recommendation["confidence"] is None
     get_settings.cache_clear()
