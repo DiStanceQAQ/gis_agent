@@ -86,6 +86,23 @@ def _build_task_spec_raw_payload(
     return payload
 
 
+def _validate_operation_plan_for_edit(plan: OperationPlan) -> OperationPlan:
+    try:
+        return validate_operation_plan(plan)
+    except AppError as exc:
+        if exc.error_code in {ErrorCode.PLAN_SCHEMA_INVALID, ErrorCode.PLAN_DEPENDENCY_CYCLE}:
+            raise AppError.bad_request(
+                error_code=ErrorCode.PLAN_EDIT_INVALID,
+                message="Edited plan failed validation.",
+                detail={
+                    "cause_error_code": exc.error_code,
+                    "cause_message": exc.message,
+                    "cause_detail": exc.detail,
+                },
+            ) from exc
+        raise
+
+
 def create_session(db: Session) -> SessionResponse:
     record = SessionRecord(id=make_id("ses"), status="active")
     db.add(record)
@@ -576,7 +593,7 @@ def update_task_plan_draft(db: Session, task_id: str, plan: OperationPlan) -> Ta
             detail={"task_id": task_id, "latest_version": latest_version, "patched_version": plan.version},
         )
 
-    draft_plan = validate_operation_plan(plan)
+    draft_plan = _validate_operation_plan_for_edit(plan)
     task.plan_json = {
         **task.plan_json,
         "operation_plan": draft_plan.model_dump(),
@@ -610,7 +627,7 @@ def approve_task_plan(db: Session, task_id: str, approved_version: int) -> TaskD
             detail={"task_id": task_id},
         )
 
-    validated_plan = validate_operation_plan(OperationPlan(**operation_plan_data))
+    validated_plan = _validate_operation_plan_for_edit(OperationPlan(**operation_plan_data))
     if validated_plan.version != approved_version:
         raise AppError.bad_request(
             error_code=ErrorCode.PLAN_EDIT_INVALID,

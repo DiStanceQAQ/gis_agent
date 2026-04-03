@@ -35,8 +35,15 @@ class ErrorCode:
     TASK_LLM_PLANNER_FAILED = "task_llm_planner_failed"
     TASK_LLM_RECOMMENDATION_SCHEMA_VALIDATION_FAILED = "task_llm_recommendation_schema_validation_failed"
     TASK_LLM_RECOMMENDATION_FAILED = "task_llm_recommendation_failed"
+    PLAN_SLOT_MISSING = "plan_slot_missing"
+    PLAN_SCHEMA_INVALID = "plan_schema_invalid"
+    PLAN_DEPENDENCY_CYCLE = "plan_dependency_cycle"
     PLAN_APPROVAL_REQUIRED = "plan_approval_required"
     PLAN_EDIT_INVALID = "plan_edit_invalid"
+    OP_INPUT_TYPE_MISMATCH = "op_input_type_mismatch"
+    OP_PARAM_INVALID = "op_param_invalid"
+    OP_RUNTIME_FAILED = "op_runtime_failed"
+    ARTIFACT_EXPORT_FAILED = "artifact_export_failed"
 
 
 class AppError(Exception):
