@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from time import perf_counter
 
 import pytest
@@ -76,3 +77,9 @@ def test_run_task_runtime_delegates_to_graph_runner(monkeypatch: pytest.MonkeyPa
 
 def test_agent_runtime_no_longer_exposes_legacy_runtime_entry() -> None:
     assert not hasattr(agent_runtime, "run_task_runtime_legacy")
+
+
+def test_agent_runtime_is_thin_compat_layer() -> None:
+    source = inspect.getsource(agent_runtime)
+    assert "def _run_task_runtime_legacy" not in source
+    assert "def _tool_normalize_aoi" not in source
