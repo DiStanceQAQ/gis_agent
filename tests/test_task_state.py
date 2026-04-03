@@ -17,17 +17,12 @@ from packages.domain.services.task_state import (
     can_transition,
     ensure_step_status_transition,
     ensure_task_status_transition,
+    TASK_STATUS_TRANSITIONS,
 )
 
 
 def test_can_transition_allows_valid_task_status_change() -> None:
-    assert can_transition(
-        {
-            TASK_STATUS_DRAFT: {TASK_STATUS_QUEUED, TASK_STATUS_WAITING_CLARIFICATION},
-        },
-        TASK_STATUS_DRAFT,
-        TASK_STATUS_QUEUED,
-    )
+    assert can_transition(TASK_STATUS_TRANSITIONS, TASK_STATUS_DRAFT, TASK_STATUS_QUEUED)
 
 
 @pytest.mark.parametrize(
@@ -38,11 +33,13 @@ def test_can_transition_allows_valid_task_status_change() -> None:
         (TASK_STATUS_WAITING_CLARIFICATION, TASK_STATUS_FAILED),
         (TASK_STATUS_WAITING_CLARIFICATION, TASK_STATUS_CANCELLED),
         (TASK_STATUS_QUEUED, TASK_STATUS_WAITING_CLARIFICATION),
+        (TASK_STATUS_QUEUED, TASK_STATUS_CANCELLED),
         (TASK_STATUS_AWAITING_APPROVAL, TASK_STATUS_APPROVED),
         (TASK_STATUS_AWAITING_APPROVAL, TASK_STATUS_CANCELLED),
         (TASK_STATUS_AWAITING_APPROVAL, TASK_STATUS_FAILED),
         (TASK_STATUS_APPROVED, TASK_STATUS_QUEUED),
         (TASK_STATUS_APPROVED, TASK_STATUS_CANCELLED),
+        (TASK_STATUS_RUNNING, TASK_STATUS_CANCELLED),
         (TASK_STATUS_APPROVED, TASK_STATUS_FAILED),
     ],
 )
@@ -59,6 +56,11 @@ def test_approval_state_allows_expected_transitions(current: str, target: str) -
         (TASK_STATUS_APPROVED, TASK_STATUS_RUNNING),
         (TASK_STATUS_APPROVED, TASK_STATUS_SUCCESS),
         (TASK_STATUS_CANCELLED, TASK_STATUS_QUEUED),
+        (TASK_STATUS_CANCELLED, TASK_STATUS_RUNNING),
+        (TASK_STATUS_CANCELLED, TASK_STATUS_SUCCESS),
+        (TASK_STATUS_CANCELLED, TASK_STATUS_FAILED),
+        (TASK_STATUS_CANCELLED, TASK_STATUS_WAITING_CLARIFICATION),
+        (TASK_STATUS_CANCELLED, TASK_STATUS_APPROVED),
     ],
 )
 def test_approval_state_rejects_invalid_transitions(current: str, target: str) -> None:
