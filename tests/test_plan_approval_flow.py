@@ -261,3 +261,106 @@ def test_approve_task_plan_rejects_version_mismatch_with_plan_edit_invalid(clien
         assert body["error"]["code"] == "plan_edit_invalid"
     finally:
         _cleanup_session(session_id)
+
+
+def test_patch_task_plan_rejects_unknown_dependency_with_plan_edit_invalid(client: TestClient) -> None:
+    session_id = _create_session()
+    try:
+        payload = _create_message(client, session_id)
+        detail = client.get(f"/api/v1/tasks/{payload['task_id']}").json()
+        operation_plan = detail["operation_plan"]
+        assert operation_plan is not None
+
+        response = client.patch(
+            f"/api/v1/tasks/{payload['task_id']}/plan",
+            json={
+                "operation_plan": {
+                    "version": operation_plan["version"] + 1,
+                    "status": "draft",
+                    "missing_fields": [],
+                    "nodes": [
+                        {
+                            "step_id": "export_1",
+                            "op_name": "artifact.export",
+                            "depends_on": ["missing_step"],
+                            "inputs": {},
+                            "params": {"format": "geotiff"},
+                            "outputs": {"artifact": "output_1"},
+                            "retry_policy": {"max_retries": 0},
+                        }
+                    ],
+                }
+            },
+        )
+
+        assert response.status_code == 400
+        body = response.json()
+        assert body["error"]["code"] == "plan_edit_invalid"
+    finally:
+        _cleanup_session(session_id)
+
+
+def test_patch_task_plan_rejects_cycle_with_plan_edit_invalid(client: TestClient) -> None:
+    session_id = _create_session()
+    try:
+        payload = _create_message(client, session_id)
+        detail = client.get(f"/api/v1/tasks/{payload['task_id']}").json()
+        operation_plan = detail["operation_plan"]
+        assert operation_plan is not None
+
+        response = client.patch(
+            f"/api/v1/tasks/{payload['task_id']}/plan",
+            json={
+                "operation_plan": {
+                    "version": operation_plan["version"] + 1,
+                    "status": "draft",
+                    "missing_fields": [],
+                    "nodes": [
+                        {
+                            "step_id": "a",
+                            "op_name": "input.upload_raster",
+                            "depends_on": ["b"],
+                            "inputs": {"upload_id": "file-a"},
+                            "params": {},
+                            "outputs": {"raster": "raster-a"},
+                            "retry_policy": {"max_retries": 0},
+                        },
+                        {
+                            "step_id": "b",
+                            "op_name": "artifact.export",
+                            "depends_on": ["a"],
+                            "inputs": {"primary": "raster-a"},
+                            "params": {"format": "geotiff"},
+                            "outputs": {"artifact": "output-b"},
+                            "retry_policy": {"max_retries": 0},
+                        },
+                    ],
+                }
+            },
+        )
+
+        assert response.status_code == 400
+        body = response.json()
+        assert body["error"]["code"] == "plan_edit_invalid"
+    finally:
+        _cleanup_session(session_id)
+
+
+def test_patch_task_plan_rejects_non_incremental_version(client: TestClient) -> None:
+    session_id = _create_session()
+    try:
+        payload = _create_message(client, session_id)
+        detail = client.get(f"/api/v1/tasks/{payload['task_id']}").json()
+        operation_plan = detail["operation_plan"]
+        assert operation_plan is not None
+
+        response = client.patch(
+            f"/api/v1/tasks/{payload['task_id']}/plan",
+            json={"operation_plan": operation_plan},
+        )
+
+        assert response.status_code == 400
+        body = response.json()
+        assert body["error"]["code"] == "plan_edit_invalid"
+    finally:
+        _cleanup_session(session_id)

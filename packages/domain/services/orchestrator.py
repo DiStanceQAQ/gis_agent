@@ -31,6 +31,7 @@ from packages.domain.services.parser import (
     parse_followup_override_message,
     parse_task_message,
 )
+from packages.domain.services.plan_guard import validate_operation_plan
 from packages.domain.services.storage import detect_file_type, write_upload_file
 from packages.domain.services.task_events import append_task_event, list_task_events
 from packages.domain.services.task_state import (
@@ -232,6 +233,7 @@ def _build_task(
     uploaded_files: list[UploadedFileRecord] | None = None,
     parent_task_id: str | None = None,
     inherited_aoi: AOIRecord | None = None,
+    require_approval: bool = False,
 ) -> TaskRunRecord:
     safe_parsed = parsed
     parser_error_code, parser_error_message = extract_parser_failure_error(safe_parsed)
@@ -300,24 +302,16 @@ def _build_task(
         task_spec.raw_spec_json = safe_parsed.model_dump()
     task.plan_json = task_plan.model_dump()
 
-    initial_operation_plan = _build_initial_operation_plan(TaskPlanResponse(**task.plan_json))
-    if not safe_parsed.need_confirmation:
+    if require_approval and not safe_parsed.need_confirmation:
+        initial_operation_plan = _build_initial_operation_plan(TaskPlanResponse(**task.plan_json))
         task.plan_json = {
             **(task.plan_json or {}),
             "operation_plan": initial_operation_plan.model_dump(),
+            "operation_plan_version": initial_operation_plan.version,
         }
-        set_task_status(
-            db,
-            task,
-            TASK_STATUS_AWAITING_APPROVAL,
-            current_step="awaiting_approval",
-            event_type="task_plan_drafted",
-            detail={"operation_plan_version": initial_operation_plan.version},
-            force=True,
-        )
+        task.status = TASK_STATUS_AWAITING_APPROVAL
+        task.current_step = "awaiting_approval"
 
-    db.commit()
-    db.refresh(task)
     append_task_event(
         db,
         task_id=task.id,
@@ -341,7 +335,15 @@ def _build_task(
             "error_code": (task.plan_json or {}).get("error_code"),
         },
     )
-    db.commit()
+    if require_approval and not safe_parsed.need_confirmation:
+        append_task_event(
+            db,
+            task_id=task.id,
+            event_type="task_plan_drafted",
+            status=task.status,
+            step_name="awaiting_approval",
+            detail={"operation_plan_version": (task.plan_json or {}).get("operation_plan_version")},
+        )
     return task
 
 
@@ -402,6 +404,7 @@ def create_message_and_task(db: Session, payload: MessageCreateRequest) -> Messa
             if parent_task is not None and should_inherit_original_aoi(parent_task, parsed, override)
             else None
         ),
+        require_approval=True,
     )
 
     message.linked_task_id = task.id
@@ -426,7 +429,7 @@ def create_message_and_task(db: Session, payload: MessageCreateRequest) -> Messa
             status=task.status,
             detail={"missing_fields": list(response_spec.get("missing_fields", []))},
         )
-        db.commit()
+    db.commit()
 
     return MessageCreateResponse(
         message_id=message.id,
@@ -553,15 +556,24 @@ def update_task_plan_draft(db: Session, task_id: str, plan: OperationPlan) -> Ta
             detail={"task_id": task_id},
         )
 
-    draft_plan = plan.model_copy(update={"status": "validated"})
+    latest_version = int((task.plan_json or {}).get("operation_plan_version") or 0)
+    if plan.version <= latest_version:
+        raise AppError.bad_request(
+            error_code=ErrorCode.PLAN_EDIT_INVALID,
+            message="Patched plan version must be greater than current draft version.",
+            detail={"task_id": task_id, "latest_version": latest_version, "patched_version": plan.version},
+        )
+
+    draft_plan = validate_operation_plan(plan)
     task.plan_json = {
         **task.plan_json,
         "operation_plan": draft_plan.model_dump(),
+        "operation_plan_version": draft_plan.version,
     }
     append_task_event(
         db,
         task_id=task.id,
-        event_type="task_plan_updated",
+        event_type="task_plan_validated",
         status=task.status,
         detail={"operation_plan_version": draft_plan.version},
     )
@@ -579,17 +591,26 @@ def approve_task_plan(db: Session, task_id: str, approved_version: int) -> TaskD
         )
 
     operation_plan_data = task.plan_json.get("operation_plan") or {}
-    if int(operation_plan_data.get("version", 0)) != approved_version:
+    if not operation_plan_data:
+        raise AppError.bad_request(
+            error_code=ErrorCode.PLAN_APPROVAL_REQUIRED,
+            message="Task plan is missing an editable operation plan.",
+            detail={"task_id": task_id},
+        )
+
+    validated_plan = validate_operation_plan(OperationPlan(**operation_plan_data))
+    if validated_plan.version != approved_version:
         raise AppError.bad_request(
             error_code=ErrorCode.PLAN_EDIT_INVALID,
             message="Approved version does not match latest draft plan.",
             detail={"task_id": task_id, "approved_version": approved_version},
         )
 
-    approved_plan = OperationPlan(**operation_plan_data).model_copy(update={"status": "approved"})
+    approved_plan = validated_plan.model_copy(update={"status": "approved"})
     task.plan_json = {
         **task.plan_json,
         "operation_plan": approved_plan.model_dump(),
+        "operation_plan_version": approved_plan.version,
     }
     set_task_status(
         db,
@@ -710,6 +731,7 @@ def rerun_task(db: Session, task_id: str, override: dict | None) -> TaskDetailRe
             status=task.status,
             detail={"execution_mode": get_settings().execution_mode, "rerun": True},
         )
-        db.commit()
+    db.commit()
+    if task.task_spec is not None and not task.task_spec.need_confirmation:
         _queue_or_run(task.id)
     return get_task_detail(db=db, task_id=task.id)
