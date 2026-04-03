@@ -6,6 +6,8 @@ from .state import GISAgentState
 def _route_after_step(state: GISAgentState, *, success_next: str) -> str:
     if state.get("need_clarification"):
         return "waiting_clarification"
+    if state.get("plan_status") == "approval_required":
+        return "approval_required"
     if state.get("plan_status") == "failed":
         return "failed"
     return success_next

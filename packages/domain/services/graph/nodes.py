@@ -7,6 +7,7 @@ from packages.domain.errors import ErrorCode
 from packages.domain.logging import get_logger
 from packages.domain.models import TaskRunRecord
 from packages.domain.services.planner import (
+    PLAN_STATUS_READY,
     PLAN_STATUS_FAILED,
     PLAN_STATUS_NEEDS_CLARIFICATION,
     PLAN_STATUS_RUNNING,
@@ -15,6 +16,7 @@ from packages.domain.services.planner import (
     set_task_plan_status,
 )
 from packages.domain.services.task_state import (
+    TASK_STATUS_AWAITING_APPROVAL,
     TASK_STATUS_FAILED,
     TASK_STATUS_RUNNING,
     TASK_STATUS_SUCCESS,
@@ -30,6 +32,7 @@ from . import runtime_helpers
 from .state import GISAgentState
 
 logger = get_logger(__name__)
+PLAN_STATUS_APPROVAL_REQUIRED = "approval_required"
 
 
 def _build_missing_task_state(task_id: str) -> GISAgentState:
@@ -62,6 +65,28 @@ def plan_task_node(state: GISAgentState) -> GISAgentState:
             return _build_missing_task_state(task_id)
 
         parsed = ParsedTaskSpec(**task.task_spec.raw_spec_json)
+        operation_plan_payload = (task.plan_json or {}).get("operation_plan")
+        operation_plan_status = None
+        if isinstance(operation_plan_payload, dict):
+            operation_plan_status = operation_plan_payload.get("status")
+
+        if task.status == TASK_STATUS_AWAITING_APPROVAL or operation_plan_status in {"draft", "validated"}:
+            return {
+                "need_clarification": False,
+                "plan_status": PLAN_STATUS_APPROVAL_REQUIRED,
+                "error_code": ErrorCode.PLAN_APPROVAL_REQUIRED,
+                "error_message": "Task plan requires approval before execution.",
+            }
+
+        if operation_plan_status == "approved":
+            return {
+                "need_clarification": False,
+                "plan_status": (task.plan_json or {}).get("status", PLAN_STATUS_READY),
+                "runtime_started_at": perf_counter(),
+                "tool_calls": 0,
+                "runtime_context": runtime_helpers.PipelineExecutionContext(parsed_spec=parsed),
+            }
+
         plan = build_task_plan(parsed, task_id=task_id)
         task.plan_json = plan.model_dump()
         db.commit()
@@ -303,6 +328,24 @@ def finalize_failed_node(state: GISAgentState) -> GISAgentState:
                 TASK_STATUS_FAILED,
                 current_step=task.current_step,
                 event_type="task_failed",
+                detail={"source": "langgraph"},
+                force=True,
+            )
+            db.commit()
+    return state
+
+
+def finalize_approval_required_node(state: GISAgentState) -> GISAgentState:
+    task_id = state["task_id"]
+    with SessionLocal() as db:
+        task = db.get(TaskRunRecord, task_id)
+        if task is not None and task.status != TASK_STATUS_AWAITING_APPROVAL:
+            set_task_status(
+                db,
+                task,
+                TASK_STATUS_AWAITING_APPROVAL,
+                current_step="awaiting_approval",
+                event_type="task_approval_required",
                 detail={"source": "langgraph"},
                 force=True,
             )

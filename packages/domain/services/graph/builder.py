@@ -3,6 +3,7 @@ from __future__ import annotations
 from langgraph.graph import END, StateGraph
 
 from .nodes import (
+    finalize_approval_required_node,
     finalize_failed_node,
     finalize_success_node,
     generate_outputs_node,
@@ -35,6 +36,7 @@ def build_task_graph():
     graph.add_node("run_ndvi_pipeline", run_ndvi_pipeline_node)
     graph.add_node("generate_outputs", generate_outputs_node)
     graph.add_node("waiting_clarification", finalize_success_node)
+    graph.add_node("approval_required", finalize_approval_required_node)
     graph.add_node("failed", finalize_failed_node)
     graph.add_node("success", finalize_success_node)
 
@@ -43,6 +45,7 @@ def build_task_graph():
         "parse",
         route_after_parse,
         {
+            "approval_required": "approval_required",
             "failed": "failed",
             "waiting_clarification": "waiting_clarification",
             "plan": "plan",
@@ -52,6 +55,7 @@ def build_task_graph():
         "plan",
         route_after_plan,
         {
+            "approval_required": "approval_required",
             "waiting_clarification": "waiting_clarification",
             "failed": "failed",
             "normalize_aoi": "normalize_aoi",
@@ -61,6 +65,7 @@ def build_task_graph():
         "normalize_aoi",
         route_after_normalize_aoi,
         {
+            "approval_required": "approval_required",
             "waiting_clarification": "waiting_clarification",
             "failed": "failed",
             "search_candidates": "search_candidates",
@@ -70,6 +75,7 @@ def build_task_graph():
         "search_candidates",
         route_after_search_candidates,
         {
+            "approval_required": "approval_required",
             "waiting_clarification": "waiting_clarification",
             "failed": "failed",
             "recommend_dataset": "recommend_dataset",
@@ -79,6 +85,7 @@ def build_task_graph():
         "recommend_dataset",
         route_after_recommend_dataset,
         {
+            "approval_required": "approval_required",
             "waiting_clarification": "waiting_clarification",
             "failed": "failed",
             "run_ndvi_pipeline": "run_ndvi_pipeline",
@@ -88,6 +95,7 @@ def build_task_graph():
         "run_ndvi_pipeline",
         route_after_run_ndvi_pipeline,
         {
+            "approval_required": "approval_required",
             "waiting_clarification": "waiting_clarification",
             "failed": "failed",
             "generate_outputs": "generate_outputs",
@@ -97,6 +105,7 @@ def build_task_graph():
         "generate_outputs",
         route_after_generate_outputs,
         {
+            "approval_required": "approval_required",
             "waiting_clarification": "waiting_clarification",
             "failed": "failed",
             "success": "success",
@@ -104,6 +113,7 @@ def build_task_graph():
     )
     graph.add_edge("success", END)
     graph.add_edge("waiting_clarification", END)
+    graph.add_edge("approval_required", END)
     graph.add_edge("failed", END)
 
     return graph.compile()

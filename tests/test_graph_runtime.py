@@ -14,6 +14,7 @@ from packages.domain.services.graph.routes import (
     route_after_run_ndvi_pipeline,
     route_after_search_candidates,
 )
+from packages.domain.services.task_state import TASK_STATUS_AWAITING_APPROVAL, TASK_STATUS_QUEUED
 
 
 def test_route_after_parse_to_clarification() -> None:
@@ -24,6 +25,11 @@ def test_route_after_parse_to_clarification() -> None:
 def test_route_after_plan_to_normalize_aoi() -> None:
     state = {"need_clarification": False, "plan_status": "ready"}
     assert route_after_plan(state) == "normalize_aoi"
+
+
+def test_route_after_plan_to_approval_required() -> None:
+    state = {"need_clarification": False, "plan_status": "approval_required"}
+    assert route_after_plan(state) == "approval_required"
 
 
 def test_route_after_generate_outputs_to_failed() -> None:
@@ -188,3 +194,73 @@ def test_build_task_graph_routes_to_failed_terminal(monkeypatch) -> None:  # noq
 
     assert calls == ["parse", "plan", "failed"]
     assert result.get("plan_status") == "failed"
+
+
+def test_plan_task_node_blocks_unapproved_operation_plan(monkeypatch) -> None:  # noqa: ANN001
+    class _TaskSpec:
+        raw_spec_json = {"analysis_type": "NDVI"}
+
+    class _Task:
+        id = "task_approval"
+        status = TASK_STATUS_AWAITING_APPROVAL
+        task_spec = _TaskSpec()
+        plan_json = {"status": "ready", "operation_plan": {"status": "draft", "version": 1, "nodes": []}}
+
+    class _FakeSession:
+        def __enter__(self):  # noqa: ANN204
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            del exc_type, exc, tb
+
+        def get(self, model, task_id):  # noqa: ANN001
+            del model, task_id
+            return _Task()
+
+        def commit(self) -> None:
+            raise AssertionError("unapproved plan should be blocked before any commit")
+
+    monkeypatch.setattr("packages.domain.services.graph.nodes.SessionLocal", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "packages.domain.services.graph.nodes.build_task_plan",
+        lambda parsed, task_id=None: (_ for _ in ()).throw(AssertionError("must not rebuild unapproved plans")),
+    )
+
+    result = graph_nodes.plan_task_node({"task_id": "task_approval"})
+    assert result["plan_status"] == "approval_required"
+    assert result["error_code"] == ErrorCode.PLAN_APPROVAL_REQUIRED
+
+
+def test_plan_task_node_preserves_approved_operation_plan(monkeypatch) -> None:  # noqa: ANN001
+    class _TaskSpec:
+        raw_spec_json = {"analysis_type": "NDVI"}
+
+    class _Task:
+        id = "task_approved"
+        status = TASK_STATUS_QUEUED
+        task_spec = _TaskSpec()
+        plan_json = {"status": "ready", "operation_plan": {"status": "approved", "version": 2, "nodes": []}}
+
+    class _FakeSession:
+        def __enter__(self):  # noqa: ANN204
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            del exc_type, exc, tb
+
+        def get(self, model, task_id):  # noqa: ANN001
+            del model, task_id
+            return _Task()
+
+        def commit(self) -> None:
+            raise AssertionError("approved plans should not be overwritten in plan node")
+
+    monkeypatch.setattr("packages.domain.services.graph.nodes.SessionLocal", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "packages.domain.services.graph.nodes.build_task_plan",
+        lambda parsed, task_id=None: (_ for _ in ()).throw(AssertionError("must not rebuild approved plans")),
+    )
+
+    result = graph_nodes.plan_task_node({"task_id": "task_approved"})
+    assert result["plan_status"] == "ready"
+    assert result["need_clarification"] is False
