@@ -1,6 +1,10 @@
 from packages.domain.errors import ErrorCode
 from packages.domain.services.graph.builder import build_task_graph
-from packages.domain.services.graph.routes import route_after_execute, route_after_parse, route_after_plan
+from packages.domain.services.graph.routes import (
+    route_after_generate_outputs,
+    route_after_parse,
+    route_after_plan,
+)
 
 
 def test_route_after_parse_to_clarification() -> None:
@@ -8,14 +12,14 @@ def test_route_after_parse_to_clarification() -> None:
     assert route_after_parse(state) == "waiting_clarification"
 
 
-def test_route_after_plan_to_execute() -> None:
+def test_route_after_plan_to_normalize_aoi() -> None:
     state = {"need_clarification": False, "plan_status": "ready"}
-    assert route_after_plan(state) == "execute"
+    assert route_after_plan(state) == "normalize_aoi"
 
 
-def test_route_after_execute_to_failed() -> None:
+def test_route_after_generate_outputs_to_failed() -> None:
     state = {"need_clarification": False, "plan_status": "failed"}
-    assert route_after_execute(state) == "failed"
+    assert route_after_generate_outputs(state) == "failed"
 
 
 def test_run_task_graph_marks_failed_for_missing_task(monkeypatch) -> None:  # noqa: ANN001
