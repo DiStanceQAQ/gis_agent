@@ -34,7 +34,7 @@ from packages.schemas.task import ParsedTaskSpec
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "tasks"
 TASK_SUITE_PATH = FIXTURES_DIR / "task_suite.json"
 LEGACY_SAMPLE_FILES = {
-    "fallback_real_pipeline_to_baseline.json": "fallback",
+    "fallback_real_pipeline_to_baseline.json": "success",
     "failure_generate_outputs.json": "failure",
 }
 
@@ -145,19 +145,10 @@ def _patch_sample_environment(
         )
 
     if scenario == "real_pipeline_to_baseline_fallback":
-        for module in (agent_runtime, runtime_helpers):
-            monkeypatch.setattr(
-                module,
-                "get_settings",
-                lambda: SimpleNamespace(real_pipeline_enabled=True),
-            )
-
-        def _raise_real_pipeline(**_: object) -> object:
-            raise RuntimeError("simulated real pipeline failure")
-
-        monkeypatch.setattr(agent_runtime, "run_real_ndvi_pipeline", _raise_real_pipeline)
-        monkeypatch.setattr(runtime_helpers, "run_real_ndvi_pipeline", _raise_real_pipeline)
-    elif scenario == "generate_outputs_failure":
+        # Legacy NDVI compatibility has been removed. Keep the fixture scenario id
+        # for regression continuity, but do not inject any fallback behavior.
+        return
+    if scenario == "generate_outputs_failure":
 
         def _raise_persist_artifact_file(
             task_id: str,
@@ -379,7 +370,7 @@ def test_task_sample_suite_has_required_coverage() -> None:
             analysis_types.add(str(raw_analysis_type).strip().upper().replace("-", "_"))
 
     assert len(suite) + len(LEGACY_SAMPLE_FILES) >= 20
-    assert {"success", "failure", "fallback", "followup", "export"}.issubset(categories)
+    assert {"success", "failure", "followup", "export"}.issubset(categories)
     assert {"NDWI", "SLOPE_ASPECT", "BUFFER"}.issubset(analysis_types)
 
 
@@ -392,8 +383,22 @@ def test_task_sample_suite(sample_task_runner, sample: dict[str, Any]) -> None:
 def test_sample_task_fallback_real_pipeline_to_baseline(sample_task_runner) -> None:
     result = sample_task_runner("fallback_real_pipeline_to_baseline.json")
     _assert_expected(result)
-    assert "fallback" in (result["detail"].methods_text or "").lower()
-    assert "fallback" in (result["detail"].summary_text or "").lower()
+    assert result["task"]["fallback_used"] is False
+    assert "task_fallback_applied" not in result["event_types"]
+
+
+def test_runtime_no_longer_uses_legacy_ndvi_fallback(sample_task_runner) -> None:
+    sample = _load_task_sample("fallback_real_pipeline_to_baseline.json")
+    sample = {
+        **sample,
+        "expected": {
+            "status": "success",
+        },
+    }
+
+    result = sample_task_runner(sample)
+    assert result["task"]["fallback_used"] is False
+    assert "task_fallback_applied" not in result["event_types"]
 
 
 def test_sample_task_failure_generate_outputs(sample_task_runner) -> None:

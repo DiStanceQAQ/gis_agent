@@ -4,21 +4,14 @@
   "message": "bbox(116.1,39.8,116.5,40.1) 在 2024-06-01 到 2024-06-30 的 NDVI，并导出 GeoTIFF",
   "expected": {
     "status": "success",
-    "fallback_used": true,
+    "fallback_used": false,
     "selected_dataset": "sentinel2",
     "step_status": {
       "run_processing_pipeline": "success",
       "generate_outputs": "success"
     },
     "event_types": [
-      "task_fallback_applied",
       "task_completed"
-    ],
-    "event_detail": {
-      "task_fallback_applied": {
-        "strategy": "real_pipeline_to_baseline",
-        "to_mode": "baseline"
-      }
-    }
+    ]
   }
 }

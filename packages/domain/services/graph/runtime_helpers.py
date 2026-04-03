@@ -4,10 +4,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
 
-import numpy as np
-import rasterio
-from PIL import Image
-from rasterio.transform import from_bounds
 from sqlalchemy.orm import Session
 
 from packages.domain.config import get_settings
@@ -16,13 +12,12 @@ from packages.domain.logging import get_logger
 from packages.domain.models import ArtifactRecord, TaskRunRecord
 from packages.domain.services.catalog import persist_candidates, search_candidates
 from packages.domain.services.explanation import ExplanationContext, build_methods_text, build_summary_text
-from packages.domain.services.ndvi_pipeline import run_real_ndvi_pipeline
 from packages.domain.services.processing_pipeline import run_processing_pipeline
 from packages.domain.services.planner import (
     ensure_task_plan,
     set_task_plan_step_status,
 )
-from packages.domain.services.qc import build_fallback_detail, evaluate_candidate_qc
+from packages.domain.services.qc import evaluate_candidate_qc
 from packages.domain.services.recommendation import build_recommendation
 from packages.domain.services.storage import build_artifact_path, persist_artifact_file
 from packages.domain.services.task_events import append_task_event
@@ -68,58 +63,6 @@ def _require_task_bbox(task: TaskRunRecord) -> list[float]:
     if task.aoi and task.aoi.bbox_bounds_json:
         return [float(value) for value in task.aoi.bbox_bounds_json]
     raise ValueError("Task AOI was not normalized; refusing to run pipeline without a normalized AOI bbox.")
-
-
-def _write_baseline_raster(task_id: str, bbox: list[float]) -> tuple[str, str, np.ndarray]:
-    width = 96
-    height = 96
-    xv = np.linspace(-1.0, 1.0, width)
-    yv = np.linspace(-1.0, 1.0, height)
-    xx, yy = np.meshgrid(xv, yv)
-    data = np.clip(0.55 + 0.25 * np.sin(xx * 3) - 0.18 * np.cos(yy * 4), -1.0, 1.0).astype("float32")
-
-    tif_path = build_artifact_path(task_id, "ndvi_baseline.tif")
-    transform = from_bounds(*bbox, width=width, height=height)
-    with rasterio.open(
-        tif_path,
-        "w",
-        driver="GTiff",
-        height=height,
-        width=width,
-        count=1,
-        dtype="float32",
-        crs="EPSG:4326",
-        transform=transform,
-        nodata=-9999.0,
-    ) as dataset:
-        dataset.write(data, 1)
-
-    normalized = ((data + 1.0) / 2.0 * 255.0).astype("uint8")
-    rgb = np.zeros((height, width, 3), dtype="uint8")
-    rgb[..., 1] = normalized
-    rgb[..., 0] = (255 - normalized) // 3
-    rgb[..., 2] = 60
-    png_path = build_artifact_path(task_id, "map_baseline.png")
-    Image.fromarray(rgb).save(png_path)
-    return tif_path, png_path, data
-
-
-def _build_baseline_pipeline_outputs(task: TaskRunRecord, bbox: list[float]) -> dict[str, object]:
-    tif_path, png_path, data = _write_baseline_raster(task.id, bbox)
-    return {
-        "tif_path": tif_path,
-        "png_path": png_path,
-        "actual_time_range": task.requested_time_range,
-        "mode": "baseline",
-        "selected_item_ids": [],
-        "valid_pixel_ratio": float(np.isfinite(data).sum() / data.size),
-        "ndvi_min": float(np.nanmin(data)),
-        "ndvi_max": float(np.nanmax(data)),
-        "ndvi_mean": float(np.nanmean(data)),
-        "output_width": int(data.shape[1]),
-        "output_height": int(data.shape[0]),
-        "output_crs": "EPSG:4326",
-    }
 
 
 def _tool_plan_task(db: Session, task: TaskRunRecord, context: PipelineExecutionContext) -> dict[str, object]:
@@ -192,75 +135,14 @@ def _tool_recommend_dataset(db: Session, task: TaskRunRecord, context: PipelineE
     return recommendation
 
 
-def _tool_run_ndvi_pipeline_legacy(
-    db: Session,
-    task: TaskRunRecord,
-    context: PipelineExecutionContext,
-) -> dict[str, object]:
-    settings = get_settings()
-    bbox = context.bbox or _require_task_bbox(task)
-    try:
-        if settings.real_pipeline_enabled and task.aoi is not None:
-            real_result = run_real_ndvi_pipeline(
-                task_id=task.id,
-                dataset_name=task.selected_dataset,
-                spec=context.parsed_spec,
-                aoi=task.aoi,
-            )
-            pipeline_outputs: dict[str, object] = {
-                "tif_path": real_result.tif_path,
-                "png_path": real_result.png_path,
-                "actual_time_range": real_result.actual_time_range,
-                "mode": real_result.mode,
-                "selected_item_ids": real_result.selected_item_ids,
-                "valid_pixel_ratio": real_result.valid_pixel_ratio,
-                "ndvi_min": real_result.ndvi_min,
-                "ndvi_max": real_result.ndvi_max,
-                "ndvi_mean": real_result.ndvi_mean,
-                "output_width": real_result.output_width,
-                "output_height": real_result.output_height,
-                "output_crs": real_result.output_crs,
-            }
-        else:
-            pipeline_outputs = _build_baseline_pipeline_outputs(task, bbox)
-    except Exception as exc:
-        logger.warning("ndvi_pipeline.fallback_to_baseline task_id=%s reason=%r", task.id, exc)
-        task.fallback_used = True
-        fallback_detail = build_fallback_detail(
-            "real_pipeline_to_baseline",
-            reason=repr(exc),
-            from_mode="real",
-            to_mode="baseline",
-        )
-        append_task_event(
-            db,
-            task_id=task.id,
-            event_type="task_fallback_applied",
-            step_name="run_processing_pipeline",
-            status=task.status,
-            detail=fallback_detail,
-        )
-        db.flush()
-        pipeline_outputs = _build_baseline_pipeline_outputs(task, bbox)
-
-    context.pipeline_outputs = pipeline_outputs
-    return {
-        "mode": pipeline_outputs["mode"],
-        "selected_item_ids": pipeline_outputs["selected_item_ids"],
-        "valid_pixel_ratio": pipeline_outputs["valid_pixel_ratio"],
-        "fallback_used": task.fallback_used,
-    }
-
-
 def _tool_run_processing_pipeline(
     db: Session,
     task: TaskRunRecord,
     context: PipelineExecutionContext,
 ) -> dict[str, object]:
+    del db
     operation_plan = ((task.plan_json or {}).get("operation_plan") or {})
     plan_nodes = list(operation_plan.get("nodes") or [])
-    if not plan_nodes:
-        return _tool_run_ndvi_pipeline_legacy(db, task, context)
 
     working_dir = Path(build_artifact_path(task.id, "pipeline_tmp")).parent
     pipeline_outputs = run_processing_pipeline(
