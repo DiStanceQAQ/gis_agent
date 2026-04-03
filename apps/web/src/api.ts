@@ -1,5 +1,6 @@
 import type {
   MessageCreateResponse,
+  OperationPlan,
   SessionResponse,
   SessionTasksResponse,
   TaskDetail,
@@ -72,6 +73,20 @@ export function rerunTask(taskId: string, override: Record<string, unknown>): Pr
   return request<TaskDetail>(`/tasks/${taskId}/rerun`, {
     method: "POST",
     body: JSON.stringify({ override }),
+  });
+}
+
+export function patchTaskPlanDraft(taskId: string, operationPlan: OperationPlan): Promise<TaskDetail> {
+  return request<TaskDetail>(`/tasks/${taskId}/plan`, {
+    method: "PATCH",
+    body: JSON.stringify({ operation_plan: operationPlan }),
+  });
+}
+
+export function approveTaskPlan(taskId: string, approvedVersion: number): Promise<TaskDetail> {
+  return request<TaskDetail>(`/tasks/${taskId}/approve`, {
+    method: "POST",
+    body: JSON.stringify({ approved_version: approvedVersion }),
   });
 }
 

@@ -110,6 +110,23 @@ export type TaskPlan = {
   error_message?: string | null;
 };
 
+export type OperationNode = {
+  step_id: string;
+  op_name: string;
+  depends_on: string[];
+  inputs: Record<string, string>;
+  params: Record<string, unknown>;
+  outputs: Record<string, string>;
+  retry_policy?: Record<string, number>;
+};
+
+export type OperationPlan = {
+  version: number;
+  status: "draft" | "validated" | "approved";
+  missing_fields: string[];
+  nodes: OperationNode[];
+};
+
 export type TaskEvent = {
   event_id: number;
   event_type: string;
@@ -144,6 +161,7 @@ export type TaskDetail = {
   created_at?: string | null;
   task_spec?: TaskSpec | null;
   task_plan?: TaskPlan | null;
+  operation_plan?: OperationPlan | null;
   recommendation?: Recommendation | null;
   candidates: Candidate[];
   steps: TaskStep[];

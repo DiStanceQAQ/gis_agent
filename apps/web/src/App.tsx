@@ -1,7 +1,26 @@
 import { ChangeEvent, FormEvent, startTransition, useDeferredValue, useEffect, useState } from "react";
-import { createMessage, createSession, getSessionTasks, getTask, getTaskEvents, rerunTask, uploadFile } from "./api";
+import {
+  approveTaskPlan,
+  createMessage,
+  createSession,
+  getSessionTasks,
+  getTask,
+  getTaskEvents,
+  patchTaskPlanDraft,
+  rerunTask,
+  uploadFile,
+} from "./api";
 import GISMap from "./components/GISMap";
-import type { Artifact, Candidate, TaskDetail, TaskSpec, TaskStep, TimeRange, UploadResponse } from "./types";
+import type {
+  Artifact,
+  Candidate,
+  OperationPlan,
+  TaskDetail,
+  TaskSpec,
+  TaskStep,
+  TimeRange,
+  UploadResponse,
+} from "./types";
 
 const TERMINAL_STATUSES = new Set(["success", "failed", "waiting_clarification"]);
 const SESSION_STORAGE_KEY = "gis-agent/session-id";
@@ -320,6 +339,10 @@ export default function App() {
   const [taskEventsCount, setTaskEventsCount] = useState(0);
   const [taskHistory, setTaskHistory] = useState<TaskHistoryEntry[]>([]);
   const [layerControls, setLayerControls] = useState<LayerControlMap>(DEFAULT_LAYER_CONTROLS);
+  const [planDraftText, setPlanDraftText] = useState("");
+  const [planError, setPlanError] = useState<string | null>(null);
+  const [isSavingPlan, setIsSavingPlan] = useState(false);
+  const [isApprovingPlan, setIsApprovingPlan] = useState(false);
 
   const deferredTask = useDeferredValue(task);
   const deferredTaskHistory = useDeferredValue(taskHistory);
@@ -447,6 +470,12 @@ export default function App() {
     }
   }, [task?.aoi_bbox_bounds, task?.artifacts, task?.task_id]);
 
+  useEffect(() => {
+    const planText = task?.operation_plan ? JSON.stringify(task.operation_plan, null, 2) : "";
+    setPlanDraftText((current) => (current === planText ? current : planText));
+    setPlanError(null);
+  }, [task?.task_id, task?.operation_plan?.version]);
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!sessionId) {
@@ -538,6 +567,53 @@ export default function App() {
     }));
   }
 
+  async function handleSavePlanDraft() {
+    if (!task?.operation_plan) {
+      return;
+    }
+    setPlanError(null);
+    setSubmitError(null);
+    setNotice(null);
+    setIsSavingPlan(true);
+
+    try {
+      const parsedPlan = JSON.parse(planDraftText) as OperationPlan;
+      const detail = await patchTaskPlanDraft(task.task_id, parsedPlan);
+      startTransition(() => {
+        setTask(detail);
+        setTaskHistory((current) => upsertTaskHistory(current, detail));
+      });
+      setNotice(`计划草稿已保存（v${detail.operation_plan?.version ?? parsedPlan.version}）。`);
+    } catch (error) {
+      setPlanError(error instanceof Error ? error.message : "计划草稿保存失败。");
+    } finally {
+      setIsSavingPlan(false);
+    }
+  }
+
+  async function handleApprovePlan() {
+    if (!task?.operation_plan) {
+      return;
+    }
+    setPlanError(null);
+    setSubmitError(null);
+    setNotice(null);
+    setIsApprovingPlan(true);
+
+    try {
+      const detail = await approveTaskPlan(task.task_id, task.operation_plan.version);
+      startTransition(() => {
+        setTask(detail);
+        setTaskHistory((current) => upsertTaskHistory(current, detail));
+      });
+      setNotice(`计划 v${task.operation_plan.version} 已确认，任务进入执行链路。`);
+    } catch (error) {
+      setPlanError(error instanceof Error ? error.message : "计划审批失败。");
+    } finally {
+      setIsApprovingPlan(false);
+    }
+  }
+
   const currentTask = deferredTask;
   const currentHistory = deferredTaskHistory;
   const overviewItems = getOverviewItems(currentTask?.task_spec, currentTask);
@@ -600,6 +676,8 @@ export default function App() {
         },
       ]
     : [];
+  const canEditOperationPlan = currentTask?.status === "awaiting_approval" && Boolean(currentTask.operation_plan);
+  const canApproveOperationPlan = canEditOperationPlan && !isSavingPlan && !isApprovingPlan;
 
   const layerRows = [
     {
@@ -895,6 +973,56 @@ export default function App() {
             ) : (
               <p className="empty-text">提交任务后，这里会展示 AOI、时间窗、数据源偏好与输出约束。</p>
             )}
+          </section>
+
+          <section className="panel-block">
+            <div className="block-header">
+              <div>
+                <p className="block-kicker">Plan Approval</p>
+                <h2>执行计划审批</h2>
+              </div>
+              <span className={`status-badge status-${formatStatusTone(currentTask?.status)}`}>
+                {currentTask?.operation_plan ? `v${currentTask.operation_plan.version}` : "无计划"}
+              </span>
+            </div>
+
+            {currentTask?.operation_plan ? (
+              <>
+                <p className="info-text">
+                  当前状态：{currentTask.status} · 计划状态：{currentTask.operation_plan.status}
+                </p>
+                <textarea
+                  className="plan-editor"
+                  value={planDraftText}
+                  onChange={(event) => setPlanDraftText(event.target.value)}
+                  spellCheck={false}
+                />
+                <div className="form-actions">
+                  <button
+                    type="button"
+                    disabled={!canEditOperationPlan || isSavingPlan || isApprovingPlan}
+                    onClick={() => {
+                      void handleSavePlanDraft();
+                    }}
+                  >
+                    {isSavingPlan ? "保存中..." : "保存计划草稿"}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!canApproveOperationPlan}
+                    onClick={() => {
+                      void handleApprovePlan();
+                    }}
+                  >
+                    {isApprovingPlan ? "审批中..." : "确认并执行"}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <p className="empty-text">当前任务还没有可审批的 operation plan。</p>
+            )}
+
+            {planError ? <p className="error-text">{planError}</p> : null}
           </section>
 
           <section className="panel-block">

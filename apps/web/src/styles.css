@@ -556,6 +556,25 @@ html[data-theme="light"] .task-form textarea {
   background: rgba(255, 255, 255, 0.88);
 }
 
+.plan-editor {
+  width: 100%;
+  min-height: 180px;
+  margin-top: 8px;
+  resize: vertical;
+  border-radius: 14px;
+  border: 1px solid var(--panel-border);
+  background: rgba(0, 0, 0, 0.14);
+  color: var(--text-primary);
+  padding: 13px 14px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+html[data-theme="light"] .plan-editor {
+  background: rgba(255, 255, 255, 0.88);
+}
+
 .form-label {
   display: block;
   margin-bottom: 9px;
