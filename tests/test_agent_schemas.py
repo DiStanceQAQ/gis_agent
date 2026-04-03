@@ -4,7 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from packages.schemas.agent import LLMParsedSpec, LLMRecommendation, LLMTaskPlan
-from packages.schemas.task import ParsedTaskSpec
+from packages.schemas.task import ParsedTaskSpec, TaskPlanApproveRequest
 
 
 def test_llm_parsed_spec_with_operation_params() -> None:
@@ -76,3 +76,9 @@ def test_llm_recommendation_confidence_range() -> None:
     )
 
     assert payload.confidence == 0.86
+
+
+@pytest.mark.parametrize("approved_version", [0, -1])
+def test_task_plan_approve_request_requires_positive_version(approved_version: int) -> None:
+    with pytest.raises(ValidationError):
+        TaskPlanApproveRequest(approved_version=approved_version)

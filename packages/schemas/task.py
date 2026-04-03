@@ -152,4 +152,4 @@ class TaskPlanPatchRequest(BaseModel):
 
 
 class TaskPlanApproveRequest(BaseModel):
-    approved_version: int
+    approved_version: int = Field(ge=1)

@@ -21,13 +21,13 @@ OperationPlanStatus = Literal["draft", "validated", "approved"]
 
 
 class OperationNode(BaseModel):
-    step_id: str
+    step_id: str = Field(min_length=1)
     op_name: AllowedOperationName
     depends_on: list[str] = Field(default_factory=list)
-    inputs: dict[str, Any] = Field(default_factory=dict)
+    inputs: dict[str, str] = Field(default_factory=dict)
     params: dict[str, Any] = Field(default_factory=dict)
-    outputs: dict[str, Any] = Field(default_factory=dict)
-    retry_policy: dict[str, Any] = Field(default_factory=dict)
+    outputs: dict[str, str] = Field(default_factory=dict)
+    retry_policy: dict[str, int] = Field(default_factory=lambda: {"max_retries": 0})
 
 
 class OperationPlan(BaseModel):
