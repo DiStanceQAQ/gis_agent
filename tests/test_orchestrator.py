@@ -1,6 +1,7 @@
 from geoalchemy2.elements import WKTElement
 
 from packages.domain.models import AOIRecord, TaskRunRecord, TaskSpecRecord
+from packages.domain.services.input_slots import classify_uploaded_inputs
 from packages.domain.services.orchestrator import _merge_task_spec, should_inherit_original_aoi
 from packages.schemas.task import ParsedTaskSpec
 
@@ -102,3 +103,13 @@ def test_merge_task_spec_applies_followup_time_override() -> None:
     )
 
     assert merged.time_range == {"start": "2023-06-01", "end": "2023-06-30"}
+
+
+def test_classify_uploaded_inputs_prefers_raster_and_vector_slots() -> None:
+    files = [
+        type("F", (), {"id": "f1", "file_type": "raster_tiff"})(),
+        type("F", (), {"id": "f2", "file_type": "geojson"})(),
+    ]
+    slots = classify_uploaded_inputs(files)
+    assert slots["input_raster_file_id"] == "f1"
+    assert slots["input_vector_file_id"] == "f2"

@@ -244,6 +244,10 @@ def detect_file_type(filename: str) -> str:
         return "geojson"
     if lower_name.endswith(".zip"):
         return "shp_zip"
+    if lower_name.endswith(".tif") or lower_name.endswith(".tiff"):
+        return "raster_tiff"
+    if lower_name.endswith(".gpkg"):
+        return "vector_gpkg"
     return "other"
 
 

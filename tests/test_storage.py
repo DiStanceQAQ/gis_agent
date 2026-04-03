@@ -115,3 +115,10 @@ def test_s3_storage_backend_uses_object_keys_and_materializes_downloads(
         assert local_path.read_bytes() == b"pretend-geotiff"
 
     assert not any(path.name.startswith("gis-agent-storage-") for path in tmp_path.iterdir())
+
+
+def test_detect_file_type_supports_upload_first_raster_vector() -> None:
+    assert storage.detect_file_type("a.tif") == "raster_tiff"
+    assert storage.detect_file_type("a.tiff") == "raster_tiff"
+    assert storage.detect_file_type("zones.geojson") == "geojson"
+    assert storage.detect_file_type("zones.shp.zip") == "shp_zip"

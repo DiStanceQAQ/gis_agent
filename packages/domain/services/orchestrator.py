@@ -24,6 +24,7 @@ from packages.domain.services.aoi import (
     upsert_task_aoi,
 )
 from packages.domain.services.agent_runtime import run_task_runtime
+from packages.domain.services.input_slots import classify_uploaded_inputs
 from packages.domain.services.planner import PLAN_STATUS_NEEDS_CLARIFICATION, build_task_plan
 from packages.domain.services.parser import (
     extract_parser_failure_error,
@@ -73,6 +74,16 @@ def _require_named_aoi_clarification(parsed: ParsedTaskSpec) -> ParsedTaskSpec:
             "clarification_message": build_named_aoi_clarification_message(parsed.aoi_input or "当前研究区"),
         }
     )
+
+
+def _build_task_spec_raw_payload(
+    parsed: ParsedTaskSpec,
+    upload_slots: dict[str, str],
+) -> dict[str, object]:
+    payload = parsed.model_dump()
+    if upload_slots:
+        payload["upload_slots"] = upload_slots
+    return payload
 
 
 def create_session(db: Session) -> SessionResponse:
@@ -236,6 +247,7 @@ def _build_task(
     require_approval: bool = False,
 ) -> TaskRunRecord:
     safe_parsed = parsed
+    upload_slots = classify_uploaded_inputs(uploaded_files or [])
     parser_error_code, parser_error_message = extract_parser_failure_error(safe_parsed)
     task = TaskRunRecord(
         id=make_id("task"),
@@ -263,7 +275,7 @@ def _build_task(
         preferred_output=safe_parsed.preferred_output,
         user_priority=safe_parsed.user_priority,
         need_confirmation=safe_parsed.need_confirmation,
-        raw_spec_json=safe_parsed.model_dump(),
+        raw_spec_json=_build_task_spec_raw_payload(safe_parsed, upload_slots),
     )
     db.add(task_spec)
     db.flush()
@@ -277,7 +289,7 @@ def _build_task(
         safe_parsed = _require_named_aoi_clarification(safe_parsed)
         task.status = TASK_STATUS_WAITING_CLARIFICATION
         task_spec.need_confirmation = True
-        task_spec.raw_spec_json = safe_parsed.model_dump()
+        task_spec.raw_spec_json = _build_task_spec_raw_payload(safe_parsed, upload_slots)
 
     # The task row is not committed yet at this point, so LLM call logs from
     # planner should not reference task_id to avoid FK races in a separate session.
@@ -299,7 +311,7 @@ def _build_task(
         )
         task.status = TASK_STATUS_WAITING_CLARIFICATION
         task_spec.need_confirmation = True
-        task_spec.raw_spec_json = safe_parsed.model_dump()
+        task_spec.raw_spec_json = _build_task_spec_raw_payload(safe_parsed, upload_slots)
     task.plan_json = task_plan.model_dump()
 
     if require_approval and not safe_parsed.need_confirmation:
