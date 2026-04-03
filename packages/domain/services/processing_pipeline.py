@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import csv
 import json
+import sqlite3
+import struct
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import rasterio
+import shapefile
 from rasterio.errors import RasterioIOError
 from rasterio.enums import Resampling
 from rasterio.features import rasterize
@@ -14,6 +17,7 @@ from rasterio.transform import from_origin
 from rasterio.warp import calculate_default_transform, reproject, transform_geom
 from shapely.geometry import GeometryCollection, box, mapping, shape
 from shapely.ops import unary_union
+from shapely.wkb import dumps as dumps_wkb
 
 
 def _pick_primary_raster_reference(references: dict[str, str]) -> str | None:
@@ -340,6 +344,199 @@ def _shape_to_geometry_list(geom: Any) -> list[dict[str, Any]]:
                 results.append(mapping(part))
         return results
     return [mapping(geom)]
+
+
+def _require_matching_crs(*, left_crs: str, right_crs: str, op_name: str) -> None:
+    if left_crs != right_crs:
+        raise ValueError(f"{op_name} CRS mismatch: {left_crs} vs {right_crs}")
+
+
+def _normalize_epsg_code(crs: str | None) -> int:
+    if not crs:
+        return 0
+    candidate = crs.upper()
+    if candidate.startswith("EPSG:"):
+        try:
+            return int(candidate.split(":", 1)[1])
+        except ValueError:
+            return 0
+    return 0
+
+
+def _geometry_type_name(geometries: list[dict[str, Any]]) -> str:
+    for geometry in geometries:
+        geom_type = str(geometry.get("type") or "").upper()
+        if "POINT" in geom_type:
+            return "POINT"
+        if "LINE" in geom_type:
+            return "LINESTRING"
+        if "POLYGON" in geom_type:
+            return "POLYGON"
+    return "GEOMETRY"
+
+
+def _build_gpkg_geometry_blob(geometry: Any, *, srs_id: int) -> bytes:
+    # GeoPackage binary header + WKB payload (little-endian, no envelope).
+    header = b"GP" + bytes([0, 1]) + struct.pack("<i", int(srs_id))
+    return header + dumps_wkb(geometry, hex=False)
+
+
+def _write_gpkg(path: Path, geometries: list[dict[str, Any]], *, crs: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        path.unlink()
+    srs_id = _normalize_epsg_code(crs)
+    geometry_type = _geometry_type_name(geometries)
+    shapes = _geometry_dicts_to_shapes(geometries)
+
+    with sqlite3.connect(path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            CREATE TABLE gpkg_spatial_ref_sys (
+                srs_name TEXT NOT NULL,
+                srs_id INTEGER NOT NULL PRIMARY KEY,
+                organization TEXT NOT NULL,
+                organization_coordsys_id INTEGER NOT NULL,
+                definition TEXT NOT NULL,
+                description TEXT
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE gpkg_contents (
+                table_name TEXT NOT NULL PRIMARY KEY,
+                data_type TEXT NOT NULL,
+                identifier TEXT UNIQUE,
+                description TEXT DEFAULT '',
+                last_change DATETIME NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                min_x DOUBLE,
+                min_y DOUBLE,
+                max_x DOUBLE,
+                max_y DOUBLE,
+                srs_id INTEGER,
+                CONSTRAINT fk_gc_r_srs_id FOREIGN KEY (srs_id) REFERENCES gpkg_spatial_ref_sys(srs_id)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE gpkg_geometry_columns (
+                table_name TEXT NOT NULL,
+                column_name TEXT NOT NULL,
+                geometry_type_name TEXT NOT NULL,
+                srs_id INTEGER NOT NULL,
+                z TINYINT NOT NULL,
+                m TINYINT NOT NULL,
+                PRIMARY KEY (table_name, column_name),
+                CONSTRAINT fk_ggc_tn FOREIGN KEY (table_name) REFERENCES gpkg_contents(table_name),
+                CONSTRAINT fk_ggc_srs FOREIGN KEY (srs_id) REFERENCES gpkg_spatial_ref_sys(srs_id)
+            )
+            """
+        )
+        cursor.execute(
+            "INSERT INTO gpkg_spatial_ref_sys VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "WGS 84 geodetic",
+                4326,
+                "EPSG",
+                4326,
+                "GEOGCS[\"WGS 84\",DATUM[\"WGS_1984\",SPHEROID[\"WGS 84\",6378137,298.257223563]],"
+                "PRIMEM[\"Greenwich\",0],UNIT[\"degree\",0.0174532925199433]]",
+                "WGS84",
+            ),
+        )
+        if srs_id not in {0, 4326}:
+            cursor.execute(
+                "INSERT INTO gpkg_spatial_ref_sys VALUES (?, ?, ?, ?, ?, ?)",
+                (f"EPSG:{srs_id}", srs_id, "EPSG", srs_id, f"EPSG:{srs_id}", ""),
+            )
+        cursor.execute(
+            """
+            CREATE TABLE features (
+                fid INTEGER PRIMARY KEY AUTOINCREMENT,
+                geom BLOB NOT NULL,
+                properties TEXT
+            )
+            """
+        )
+        cursor.execute(
+            "INSERT INTO gpkg_contents (table_name, data_type, identifier, description, srs_id) VALUES (?, ?, ?, ?, ?)",
+            ("features", "features", "features", "", srs_id),
+        )
+        cursor.execute(
+            "INSERT INTO gpkg_geometry_columns VALUES (?, ?, ?, ?, ?, ?)",
+            ("features", "geom", geometry_type, srs_id, 0, 0),
+        )
+        for geom in shapes:
+            if geom.is_empty:
+                continue
+            blob = _build_gpkg_geometry_blob(geom, srs_id=srs_id)
+            cursor.execute(
+                "INSERT INTO features (geom, properties) VALUES (?, ?)",
+                (blob, "{}"),
+            )
+        conn.commit()
+
+
+def _write_shapefile(path: Path, geometries: list[dict[str, Any]], *, crs: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    shapes = _geometry_dicts_to_shapes(geometries)
+    non_empty = [geom for geom in shapes if not geom.is_empty]
+    if not non_empty:
+        non_empty = [shape(_default_geometry())]
+
+    def _geom_category(geom: Any) -> str:
+        geom_type = geom.geom_type.upper()
+        if "POLYGON" in geom_type:
+            return "polygon"
+        if "LINE" in geom_type:
+            return "line"
+        return "point"
+
+    primary_type = _geom_category(non_empty[0])
+    writer = shapefile.Writer(str(path))
+    writer.field("id", "N")
+    for index, geom in enumerate(non_empty, start=1):
+        geom_type = _geom_category(geom)
+        if geom_type != primary_type:
+            if primary_type == "polygon":
+                geom = geom.buffer(0.0)
+            elif primary_type == "line":
+                geom = geom.boundary
+            else:
+                geom = geom.representative_point()
+
+        if primary_type == "polygon":
+            polygons = [geom] if geom.geom_type == "Polygon" else list(getattr(geom, "geoms", []))
+            for polygon in polygons:
+                parts = [list(polygon.exterior.coords)]
+                parts.extend([list(ring.coords) for ring in polygon.interiors])
+                writer.poly(parts)
+                writer.record(index)
+        elif primary_type == "line":
+            lines = [geom] if geom.geom_type == "LineString" else list(getattr(geom, "geoms", []))
+            for line in lines:
+                writer.line([list(line.coords)])
+                writer.record(index)
+        else:
+            points = [geom] if geom.geom_type == "Point" else list(getattr(geom, "geoms", []))
+            for point in points:
+                writer.point(point.x, point.y)
+                writer.record(index)
+    writer.close()
+
+    prj_path = path.with_suffix(".prj")
+    epsg_code = _normalize_epsg_code(crs)
+    if epsg_code == 4326:
+        prj_path.write_text(
+            'GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563]],'
+            'PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433]]',
+            encoding="utf-8",
+        )
+    else:
+        prj_path.write_text(f"EPSG:{epsg_code}" if epsg_code else crs, encoding="utf-8")
 
 
 def _resolve_geometry_shapes(
@@ -854,6 +1051,120 @@ def run_processing_pipeline(*, task_id: str, plan_nodes: list[dict[str, Any]], w
                     reprojected_geometries = [_default_geometry()]
                 _write_geojson(output_path, reprojected_geometries, crs=target_crs)
                 references[output_ref] = str(output_path)
+            elif op_name == "vector.union":
+                output_ref = str(outputs.get("vector") or step_id or "vector_union")
+                output_path = working_dir / f"{step_id or output_ref}.geojson"
+                left_geometries, source_crs = _resolve_vector_geometries(node=node, references=references)
+                right_geometries, right_crs = _resolve_overlay_geometries(node=node, references=references)
+                _require_matching_crs(left_crs=source_crs, right_crs=right_crs, op_name=op_name)
+                all_shapes = _geometry_dicts_to_shapes(left_geometries) + _geometry_dicts_to_shapes(right_geometries)
+                merged = unary_union(all_shapes)
+                merged_geometries = _shape_to_geometry_list(merged)
+                if not merged_geometries:
+                    merged_geometries = [_default_geometry()]
+                _write_geojson(output_path, merged_geometries, crs=source_crs)
+                references[output_ref] = str(output_path)
+            elif op_name == "vector.erase":
+                output_ref = str(outputs.get("vector") or step_id or "vector_erase")
+                output_path = working_dir / f"{step_id or output_ref}.geojson"
+                left_geometries, source_crs = _resolve_vector_geometries(node=node, references=references)
+                right_geometries, right_crs = _resolve_overlay_geometries(node=node, references=references)
+                _require_matching_crs(left_crs=source_crs, right_crs=right_crs, op_name=op_name)
+                left_shapes = _geometry_dicts_to_shapes(left_geometries)
+                right_union = unary_union(_geometry_dicts_to_shapes(right_geometries))
+
+                erased_geometries: list[dict[str, Any]] = []
+                for left_shape in left_shapes:
+                    erased_geometries.extend(_shape_to_geometry_list(left_shape.difference(right_union)))
+                if not erased_geometries:
+                    erased_geometries = [_default_geometry()]
+                _write_geojson(output_path, erased_geometries, crs=source_crs)
+                references[output_ref] = str(output_path)
+            elif op_name == "vector.simplify":
+                output_ref = str(outputs.get("vector") or step_id or "vector_simplify")
+                output_path = working_dir / f"{step_id or output_ref}.geojson"
+                geometries, source_crs = _resolve_vector_geometries(node=node, references=references)
+                tolerance = float(params.get("tolerance") or 0.0)
+                if tolerance <= 0:
+                    raise ValueError("vector.simplify requires positive tolerance")
+                preserve_topology = bool(params.get("preserve_topology", True))
+                source_shapes = _geometry_dicts_to_shapes(geometries)
+
+                simplified_geometries: list[dict[str, Any]] = []
+                for geom in source_shapes:
+                    simplified_geometries.extend(
+                        _shape_to_geometry_list(geom.simplify(tolerance, preserve_topology=preserve_topology))
+                    )
+                if not simplified_geometries:
+                    simplified_geometries = [_default_geometry()]
+                _write_geojson(output_path, simplified_geometries, crs=source_crs)
+                references[output_ref] = str(output_path)
+            elif op_name == "vector.spatial_join":
+                output_ref = str(outputs.get("vector") or step_id or "vector_spatial_join")
+                output_path = working_dir / f"{step_id or output_ref}.geojson"
+                left_geometries, source_crs = _resolve_vector_geometries(node=node, references=references)
+                right_geometries, right_crs = _resolve_overlay_geometries(node=node, references=references)
+                _require_matching_crs(left_crs=source_crs, right_crs=right_crs, op_name=op_name)
+                left_shapes = _geometry_dicts_to_shapes(left_geometries)
+                right_shapes = _geometry_dicts_to_shapes(right_geometries)
+                predicate = str(params.get("predicate") or "intersects")
+
+                output_features: list[dict[str, Any]] = []
+                for left_shape in left_shapes:
+                    if left_shape.is_empty:
+                        continue
+                    join_count = 0
+                    for right_shape in right_shapes:
+                        if right_shape.is_empty:
+                            continue
+                        if predicate == "contains":
+                            matched = left_shape.contains(right_shape)
+                        elif predicate == "within":
+                            matched = left_shape.within(right_shape)
+                        else:
+                            matched = left_shape.intersects(right_shape)
+                        if matched:
+                            join_count += 1
+                    output_features.append(
+                        {
+                            "type": "Feature",
+                            "properties": {"join_count": join_count, "predicate": predicate},
+                            "geometry": mapping(left_shape),
+                        }
+                    )
+
+                if not output_features:
+                    output_features = [
+                        {
+                            "type": "Feature",
+                            "properties": {"join_count": 0, "predicate": predicate},
+                            "geometry": _default_geometry(),
+                        }
+                    ]
+
+                payload = {
+                    "type": "FeatureCollection",
+                    "features": output_features,
+                    "crs": {"type": "name", "properties": {"name": source_crs}},
+                }
+                output_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+                references[output_ref] = str(output_path)
+            elif op_name == "vector.repair":
+                output_ref = str(outputs.get("vector") or step_id or "vector_repair")
+                output_path = working_dir / f"{step_id or output_ref}.geojson"
+                geometries, source_crs = _resolve_vector_geometries(node=node, references=references)
+                source_shapes = _geometry_dicts_to_shapes(geometries)
+
+                repaired_geometries: list[dict[str, Any]] = []
+                for geom in source_shapes:
+                    if geom.is_empty:
+                        continue
+                    fixed = geom if geom.is_valid else geom.buffer(0)
+                    repaired_geometries.extend(_shape_to_geometry_list(fixed))
+                if not repaired_geometries:
+                    repaired_geometries = [_default_geometry()]
+                _write_geojson(output_path, repaired_geometries, crs=source_crs)
+                references[output_ref] = str(output_path)
             elif op_name == "artifact.export":
                 source_ref = str(inputs.get("primary") or "")
                 source_path = references.get(source_ref)
@@ -910,6 +1221,34 @@ def run_processing_pipeline(*, task_id: str, plan_nodes: list[dict[str, Any]], w
                             _write_geojson(vector_source, [_default_geometry()], crs="EPSG:4326")
                         artifacts.append({"artifact_type": "geojson", "path": str(vector_source)})
                         produced_artifact_path = str(vector_source)
+                    elif fmt_name == "gpkg":
+                        vector_source = Path(source_path)
+                        geometries: list[dict[str, Any]] = []
+                        vector_crs = "EPSG:4326"
+                        if vector_source.exists() and vector_source.suffix.lower() in {".geojson", ".json"}:
+                            geometries, parsed_crs = _load_geojson_geometries(vector_source)
+                            if parsed_crs:
+                                vector_crs = parsed_crs
+                        if not geometries:
+                            geometries = [_default_geometry()]
+                        gpkg_path = working_dir / f"{step_id or 'export'}_vector.gpkg"
+                        _write_gpkg(gpkg_path, geometries, crs=vector_crs)
+                        artifacts.append({"artifact_type": "gpkg", "path": str(gpkg_path)})
+                        produced_artifact_path = str(gpkg_path)
+                    elif fmt_name in {"shapefile", "shp"}:
+                        vector_source = Path(source_path)
+                        geometries: list[dict[str, Any]] = []
+                        vector_crs = "EPSG:4326"
+                        if vector_source.exists() and vector_source.suffix.lower() in {".geojson", ".json"}:
+                            geometries, parsed_crs = _load_geojson_geometries(vector_source)
+                            if parsed_crs:
+                                vector_crs = parsed_crs
+                        if not geometries:
+                            geometries = [_default_geometry()]
+                        shp_path = working_dir / f"{step_id or 'export'}_vector.shp"
+                        _write_shapefile(shp_path, geometries, crs=vector_crs)
+                        artifacts.append({"artifact_type": "shapefile", "path": str(shp_path)})
+                        produced_artifact_path = str(shp_path)
                     else:
                         raise ValueError(f"Unsupported artifact export format: {fmt_name}")
 

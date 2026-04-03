@@ -2,6 +2,7 @@ from pathlib import Path
 
 import json
 import numpy as np
+import pytest
 import rasterio
 from rasterio.transform import from_origin
 
@@ -398,3 +399,176 @@ def test_run_processing_pipeline_supports_phase1_vector_ops(tmp_path) -> None:
     exported_vector = json.loads(geojson_paths[0].read_text(encoding="utf-8"))
     assert exported_vector["type"] == "FeatureCollection"
     assert len(exported_vector["features"]) >= 1
+
+
+def test_run_processing_pipeline_supports_phase2_and_phase3_vector_ops(tmp_path) -> None:
+    source_raster = tmp_path / "source_vector_23.tif"
+    _create_test_raster(source_raster)
+
+    source_vector_a = tmp_path / "source_phase2_a.geojson"
+    source_vector_b = tmp_path / "source_phase2_b.geojson"
+    _write_test_geojson(
+        source_vector_a,
+        [[[116.0, 39.95], [116.025, 39.95], [116.025, 40.0], [116.0, 40.0], [116.0, 39.95]]],
+    )
+    _write_test_geojson(
+        source_vector_b,
+        [[[116.015, 39.96], [116.035, 39.96], [116.035, 40.01], [116.015, 40.01], [116.015, 39.96]]],
+    )
+    invalid_polygon = {
+        "type": "Polygon",
+        "coordinates": [
+            [
+                [116.0, 39.95],
+                [116.02, 39.99],
+                [116.0, 39.99],
+                [116.02, 39.95],
+                [116.0, 39.95],
+            ]
+        ],
+    }
+
+    plan_nodes = [
+        {
+            "step_id": "union1",
+            "op_name": "vector.union",
+            "depends_on": [],
+            "inputs": {"vector": str(source_vector_a), "overlay": str(source_vector_b)},
+            "params": {},
+            "outputs": {"vector": "v_union"},
+        },
+        {
+            "step_id": "erase1",
+            "op_name": "vector.erase",
+            "depends_on": ["union1"],
+            "inputs": {"vector": "v_union", "overlay": str(source_vector_b)},
+            "params": {},
+            "outputs": {"vector": "v_erase"},
+        },
+        {
+            "step_id": "simplify1",
+            "op_name": "vector.simplify",
+            "depends_on": ["erase1"],
+            "inputs": {"vector": "v_erase"},
+            "params": {"tolerance": 0.0001},
+            "outputs": {"vector": "v_simple"},
+        },
+        {
+            "step_id": "spjoin1",
+            "op_name": "vector.spatial_join",
+            "depends_on": ["simplify1"],
+            "inputs": {"vector": "v_simple", "overlay": str(source_vector_b)},
+            "params": {"predicate": "intersects"},
+            "outputs": {"vector": "v_join"},
+        },
+        {
+            "step_id": "repair1",
+            "op_name": "vector.repair",
+            "depends_on": [],
+            "inputs": {},
+            "params": {"geometry": invalid_polygon},
+            "outputs": {"vector": "v_repair"},
+        },
+        {
+            "step_id": "rasterize1",
+            "op_name": "raster.rasterize",
+            "depends_on": ["repair1"],
+            "inputs": {"vector": "v_repair", "raster": str(source_raster)},
+            "params": {"burn_value": 7, "nodata": 0, "dtype": "float32"},
+            "outputs": {"raster": "r_repair_mask"},
+        },
+        {
+            "step_id": "export_vector",
+            "op_name": "artifact.export",
+            "depends_on": ["spjoin1"],
+            "inputs": {"primary": "v_join"},
+            "params": {"formats": ["geojson", "gpkg", "shapefile"]},
+            "outputs": {"artifact": "a_vector"},
+        },
+        {
+            "step_id": "export_raster",
+            "op_name": "artifact.export",
+            "depends_on": ["rasterize1"],
+            "inputs": {"primary": "r_repair_mask"},
+            "params": {"formats": ["geotiff"]},
+            "outputs": {"artifact": "a_raster"},
+        },
+    ]
+
+    outputs = run_processing_pipeline(
+        task_id="task_vector_phase23",
+        plan_nodes=plan_nodes,
+        working_dir=tmp_path,
+    )
+
+    artifact_types = {item["artifact_type"] for item in outputs["artifacts"]}
+    assert {"geojson", "gpkg", "shapefile", "geotiff"} <= artifact_types
+
+    geojson_path = next(Path(item["path"]) for item in outputs["artifacts"] if item["artifact_type"] == "geojson")
+    geojson_payload = json.loads(geojson_path.read_text(encoding="utf-8"))
+    assert geojson_payload["type"] == "FeatureCollection"
+    assert geojson_payload["features"]
+    assert "join_count" in geojson_payload["features"][0]["properties"]
+
+    gpkg_path = next(Path(item["path"]) for item in outputs["artifacts"] if item["artifact_type"] == "gpkg")
+    assert gpkg_path.exists()
+    assert gpkg_path.read_bytes()[:16] == b"SQLite format 3\x00"
+
+    shp_path = next(Path(item["path"]) for item in outputs["artifacts"] if item["artifact_type"] == "shapefile")
+    assert shp_path.exists()
+    assert shp_path.with_suffix(".dbf").exists()
+    assert shp_path.with_suffix(".shx").exists()
+
+
+def test_vector_union_raises_on_crs_mismatch(tmp_path) -> None:
+    geometry = {
+        "type": "Polygon",
+        "coordinates": [
+            [
+                [116.0, 39.95],
+                [116.02, 39.95],
+                [116.02, 39.99],
+                [116.0, 39.99],
+                [116.0, 39.95],
+            ]
+        ],
+    }
+    plan_nodes = [
+        {
+            "step_id": "union_mismatch",
+            "op_name": "vector.union",
+            "depends_on": [],
+            "inputs": {},
+            "params": {
+                "geometry": geometry,
+                "source_crs": "EPSG:4326",
+                "overlay_geometry": geometry,
+                "overlay_crs": "EPSG:3857",
+            },
+            "outputs": {"vector": "v_out"},
+        }
+    ]
+
+    with pytest.raises(ValueError, match="CRS mismatch"):
+        run_processing_pipeline(task_id="task_vector_crs", plan_nodes=plan_nodes, working_dir=tmp_path)
+
+
+def test_vector_simplify_requires_positive_tolerance(tmp_path) -> None:
+    source_vector = tmp_path / "source_simplify.geojson"
+    _write_test_geojson(
+        source_vector,
+        [[[116.0, 39.95], [116.03, 39.95], [116.03, 40.0], [116.0, 40.0], [116.0, 39.95]]],
+    )
+    plan_nodes = [
+        {
+            "step_id": "simplify_invalid",
+            "op_name": "vector.simplify",
+            "depends_on": [],
+            "inputs": {"vector": str(source_vector)},
+            "params": {"tolerance": 0},
+            "outputs": {"vector": "v_out"},
+        }
+    ]
+
+    with pytest.raises(ValueError, match="positive tolerance"):
+        run_processing_pipeline(task_id="task_vector_simplify", plan_nodes=plan_nodes, working_dir=tmp_path)
