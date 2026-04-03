@@ -21,6 +21,12 @@ GIS Agent 的第一版工程骨架。当前这套代码优先解决三件事：
 
 - [开发任务清单.md](/Users/ljn/gis_agent/开发任务清单.md)
 
+## Runtime 架构（LangGraph）
+
+- Worker runtime 已统一通过 [packages/domain/services/graph/runner.py](/Users/ljn/gis_agent/packages/domain/services/graph/runner.py) 执行。
+- [packages/domain/services/agent_runtime.py](/Users/ljn/gis_agent/packages/domain/services/agent_runtime.py) 现在是兼容层入口，不再作为主编排入口。
+- 任务终态统一为 `success`、`failed`、`waiting_clarification`。
+
 ## 目录
 
 ```text
