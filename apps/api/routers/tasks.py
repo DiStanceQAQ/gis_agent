@@ -2,9 +2,21 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from apps.api.deps import get_db
-from packages.domain.services.orchestrator import get_task_detail, get_task_events, rerun_task
+from packages.domain.services.orchestrator import (
+    approve_task_plan,
+    get_task_detail,
+    get_task_events,
+    rerun_task,
+    update_task_plan_draft,
+)
 from packages.schemas.common import ErrorResponse
-from packages.schemas.task import RerunTaskRequest, TaskDetailResponse, TaskEventsResponse
+from packages.schemas.task import (
+    RerunTaskRequest,
+    TaskDetailResponse,
+    TaskEventsResponse,
+    TaskPlanApproveRequest,
+    TaskPlanPatchRequest,
+)
 
 router = APIRouter(tags=["tasks"])
 
@@ -42,3 +54,29 @@ def rerun_task_endpoint(
     db: Session = Depends(get_db),
 ) -> TaskDetailResponse:
     return rerun_task(db=db, task_id=task_id, override=payload.override)
+
+
+@router.patch(
+    "/tasks/{task_id}/plan",
+    response_model=TaskDetailResponse,
+    responses={400: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
+)
+def patch_task_plan_endpoint(
+    task_id: str,
+    payload: TaskPlanPatchRequest,
+    db: Session = Depends(get_db),
+) -> TaskDetailResponse:
+    return update_task_plan_draft(db=db, task_id=task_id, plan=payload.operation_plan)
+
+
+@router.post(
+    "/tasks/{task_id}/approve",
+    response_model=TaskDetailResponse,
+    responses={400: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
+)
+def approve_task_plan_endpoint(
+    task_id: str,
+    payload: TaskPlanApproveRequest,
+    db: Session = Depends(get_db),
+) -> TaskDetailResponse:
+    return approve_task_plan(db=db, task_id=task_id, approved_version=payload.approved_version)

@@ -292,11 +292,27 @@ def sample_task_runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 
             if sample["scenario"] in {"create_only", "create_and_run", "real_pipeline_to_baseline_fallback", "generate_outputs_failure"}:
                 response = _create_task(db, session_id, sample["message"])
+                if response.need_approval:
+                    detail = orchestrator.get_task_detail(db, response.task_id)
+                    assert detail.operation_plan is not None
+                    orchestrator.approve_task_plan(
+                        db,
+                        response.task_id,
+                        approved_version=detail.operation_plan.version,
+                    )
                 target_task_id = response.task_id
             elif sample["scenario"] == "followup_message":
                 initial_response = _create_task(db, session_id, sample["initial_message"])
                 initial_task_id = initial_response.task_id
                 followup_response = _create_task(db, session_id, sample["followup_message"])
+                if followup_response.need_approval:
+                    detail = orchestrator.get_task_detail(db, followup_response.task_id)
+                    assert detail.operation_plan is not None
+                    orchestrator.approve_task_plan(
+                        db,
+                        followup_response.task_id,
+                        approved_version=detail.operation_plan.version,
+                    )
                 target_task_id = followup_response.task_id
             elif sample["scenario"] == "rerun_task":
                 initial_response = _create_task(db, session_id, sample["initial_message"])

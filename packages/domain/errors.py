@@ -35,6 +35,8 @@ class ErrorCode:
     TASK_LLM_PLANNER_FAILED = "task_llm_planner_failed"
     TASK_LLM_RECOMMENDATION_SCHEMA_VALIDATION_FAILED = "task_llm_recommendation_schema_validation_failed"
     TASK_LLM_RECOMMENDATION_FAILED = "task_llm_recommendation_failed"
+    PLAN_APPROVAL_REQUIRED = "plan_approval_required"
+    PLAN_EDIT_INVALID = "plan_edit_invalid"
 
 
 class AppError(Exception):

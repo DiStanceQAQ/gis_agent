@@ -34,13 +34,17 @@ from packages.domain.services.parser import (
 from packages.domain.services.storage import detect_file_type, write_upload_file
 from packages.domain.services.task_events import append_task_event, list_task_events
 from packages.domain.services.task_state import (
+    TASK_STATUS_APPROVED,
+    TASK_STATUS_AWAITING_APPROVAL,
     TASK_STATUS_QUEUED,
     TASK_STATUS_WAITING_CLARIFICATION,
+    set_task_status,
     write_task_error,
 )
 from packages.domain.utils import make_id, merge_dicts
 from packages.schemas.file import UploadedFileResponse
 from packages.schemas.message import MessageCreateRequest, MessageCreateResponse
+from packages.schemas.operation_plan import OperationPlan
 from packages.schemas.session import SessionResponse, SessionTaskItemResponse, SessionTasksResponse
 from packages.schemas.task import (
     ArtifactResponse,
@@ -155,6 +159,15 @@ def _queue_or_run(task_id: str) -> None:
         run_task_async.delay(task_id)
         return
     run_task_runtime(task_id)
+
+
+def _build_initial_operation_plan(task_plan: TaskPlanResponse) -> OperationPlan:
+    return OperationPlan(
+        version=1,
+        status="draft",
+        missing_fields=list(task_plan.missing_fields),
+        nodes=[],
+    )
 
 
 def _load_latest_session_task(db: Session, session_id: str) -> TaskRunRecord | None:
@@ -287,6 +300,22 @@ def _build_task(
         task_spec.raw_spec_json = safe_parsed.model_dump()
     task.plan_json = task_plan.model_dump()
 
+    initial_operation_plan = _build_initial_operation_plan(TaskPlanResponse(**task.plan_json))
+    if not safe_parsed.need_confirmation:
+        task.plan_json = {
+            **(task.plan_json or {}),
+            "operation_plan": initial_operation_plan.model_dump(),
+        }
+        set_task_status(
+            db,
+            task,
+            TASK_STATUS_AWAITING_APPROVAL,
+            current_step="awaiting_approval",
+            event_type="task_plan_drafted",
+            detail={"operation_plan_version": initial_operation_plan.version},
+            force=True,
+        )
+
     db.commit()
     db.refresh(task)
     append_task_event(
@@ -387,18 +416,9 @@ def create_message_and_task(db: Session, payload: MessageCreateRequest) -> Messa
 
     response_spec = task.task_spec.raw_spec_json if task.task_spec else parsed.model_dump()
     need_clarification = bool(response_spec.get("need_confirmation", False))
+    need_approval = not need_clarification
 
-    if not need_clarification:
-        append_task_event(
-            db,
-            task_id=task.id,
-            event_type="task_queued",
-            status=task.status,
-            detail={"execution_mode": get_settings().execution_mode},
-        )
-        db.commit()
-        _queue_or_run(task.id)
-    else:
+    if need_clarification:
         append_task_event(
             db,
             task_id=task.id,
@@ -413,6 +433,7 @@ def create_message_and_task(db: Session, payload: MessageCreateRequest) -> Messa
         task_id=task.id,
         task_status=task.status,
         need_clarification=need_clarification,
+        need_approval=need_approval,
         missing_fields=list(response_spec.get("missing_fields", [])),
         clarification_message=response_spec.get("clarification_message"),
     )
@@ -450,6 +471,9 @@ def get_task_detail(db: Session, task_id: str) -> TaskDetailResponse:
 
     task_spec = task.task_spec.raw_spec_json if task.task_spec else None
     task_plan = TaskPlanResponse(**task.plan_json) if task.plan_json else None
+    operation_plan = None
+    if task.plan_json and task.plan_json.get("operation_plan") is not None:
+        operation_plan = OperationPlan(**task.plan_json["operation_plan"])
 
     artifacts = [
         ArtifactResponse(
@@ -476,6 +500,7 @@ def get_task_detail(db: Session, task_id: str) -> TaskDetailResponse:
         created_at=task.created_at,
         task_spec=task_spec,
         task_plan=task_plan,
+        operation_plan=operation_plan,
         recommendation=recommendation,
         candidates=[
             CandidateResponse(
@@ -517,6 +542,72 @@ def get_task_detail(db: Session, task_id: str) -> TaskDetailResponse:
         error_message=task.error_message,
         clarification_message=(task_spec or {}).get("clarification_message"),
     )
+
+
+def update_task_plan_draft(db: Session, task_id: str, plan: OperationPlan) -> TaskDetailResponse:
+    task = _load_task(db, task_id)
+    if task.status != TASK_STATUS_AWAITING_APPROVAL or not task.plan_json:
+        raise AppError.bad_request(
+            error_code=ErrorCode.PLAN_APPROVAL_REQUIRED,
+            message="Task plan is not awaiting approval.",
+            detail={"task_id": task_id},
+        )
+
+    draft_plan = plan.model_copy(update={"status": "validated"})
+    task.plan_json = {
+        **task.plan_json,
+        "operation_plan": draft_plan.model_dump(),
+    }
+    append_task_event(
+        db,
+        task_id=task.id,
+        event_type="task_plan_updated",
+        status=task.status,
+        detail={"operation_plan_version": draft_plan.version},
+    )
+    db.commit()
+    return get_task_detail(db=db, task_id=task.id)
+
+
+def approve_task_plan(db: Session, task_id: str, approved_version: int) -> TaskDetailResponse:
+    task = _load_task(db, task_id)
+    if task.status != TASK_STATUS_AWAITING_APPROVAL or not task.plan_json:
+        raise AppError.bad_request(
+            error_code=ErrorCode.PLAN_APPROVAL_REQUIRED,
+            message="Task plan is not awaiting approval.",
+            detail={"task_id": task_id},
+        )
+
+    operation_plan_data = task.plan_json.get("operation_plan") or {}
+    if int(operation_plan_data.get("version", 0)) != approved_version:
+        raise AppError.bad_request(
+            error_code=ErrorCode.PLAN_EDIT_INVALID,
+            message="Approved version does not match latest draft plan.",
+            detail={"task_id": task_id, "approved_version": approved_version},
+        )
+
+    approved_plan = OperationPlan(**operation_plan_data).model_copy(update={"status": "approved"})
+    task.plan_json = {
+        **task.plan_json,
+        "operation_plan": approved_plan.model_dump(),
+    }
+    set_task_status(
+        db,
+        task,
+        TASK_STATUS_APPROVED,
+        event_type="task_plan_approved",
+        detail={"approved_version": approved_version},
+    )
+    set_task_status(
+        db,
+        task,
+        TASK_STATUS_QUEUED,
+        event_type="task_queued",
+        detail={"execution_mode": get_settings().execution_mode},
+    )
+    db.commit()
+    _queue_or_run(task.id)
+    return get_task_detail(db=db, task_id=task.id)
 
 
 def get_task_events(db: Session, task_id: str, since_id: int = 0) -> TaskEventsResponse:

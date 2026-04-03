@@ -1,0 +1,263 @@
+from __future__ import annotations
+
+import pytest
+from fastapi.testclient import TestClient
+
+from apps.api.main import app
+from packages.domain.database import SessionLocal
+from packages.domain.models import (
+    AOIRecord,
+    ArtifactRecord,
+    DatasetCandidateRecord,
+    MessageRecord,
+    SessionRecord,
+    TaskEventRecord,
+    TaskRunRecord,
+    TaskSpecRecord,
+    TaskStepRecord,
+    UploadedFileRecord,
+)
+from packages.domain.services import orchestrator
+from packages.domain.services.planner import TaskPlan, TaskPlanStep
+from packages.domain.services.task_state import TASK_STATUS_AWAITING_APPROVAL
+from packages.schemas.operation_plan import OperationNode, OperationPlan
+from packages.schemas.task import ParsedTaskSpec
+
+
+@pytest.fixture(autouse=True)
+def _patched_plan_flow(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(orchestrator, "_queue_or_run", lambda task_id: None)
+    monkeypatch.setattr(
+        orchestrator,
+        "parse_task_message",
+        lambda message, has_upload: ParsedTaskSpec(  # noqa: ARG005
+            aoi_input="bbox(116.1,39.8,116.5,40.1)",
+            aoi_source_type="bbox",
+            time_range={"start": "2024-06-01", "end": "2024-06-30"},
+            requested_dataset="sentinel2",
+            analysis_type="NDVI",
+            preferred_output=["png_map", "methods_text"],
+            user_priority="balanced",
+            operation_params={},
+            need_confirmation=False,
+            missing_fields=[],
+            clarification_message=None,
+            created_from="tests",
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "build_task_plan",
+        lambda parsed, task_id=None: TaskPlan(  # noqa: ARG005
+            version="agent-v2",
+            mode="llm_plan_execute_gis_workspace",
+            status="ready",
+            objective="完成 NDVI 自动处理并发布结果",
+            reasoning_summary="按标准 GIS 计划执行。",
+            missing_fields=[],
+            steps=[
+                TaskPlanStep(
+                    step_name="plan_task",
+                    tool_name="planner.build",
+                    title="规划任务",
+                    purpose="生成任务计划",
+                )
+            ],
+        ),
+    )
+    yield
+
+
+@pytest.fixture
+def client() -> TestClient:
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+def _cleanup_session(session_id: str) -> None:
+    with SessionLocal() as db:
+        task_ids = [
+            task_id
+            for (task_id,) in db.query(TaskRunRecord.id).filter(TaskRunRecord.session_id == session_id).all()
+        ]
+
+        if task_ids:
+            db.query(ArtifactRecord).filter(ArtifactRecord.task_id.in_(task_ids)).delete(
+                synchronize_session=False
+            )
+            db.query(TaskEventRecord).filter(TaskEventRecord.task_id.in_(task_ids)).delete(
+                synchronize_session=False
+            )
+            db.query(TaskStepRecord).filter(TaskStepRecord.task_id.in_(task_ids)).delete(
+                synchronize_session=False
+            )
+            db.query(DatasetCandidateRecord).filter(DatasetCandidateRecord.task_id.in_(task_ids)).delete(
+                synchronize_session=False
+            )
+            db.query(AOIRecord).filter(AOIRecord.task_id.in_(task_ids)).delete(synchronize_session=False)
+            db.query(TaskSpecRecord).filter(TaskSpecRecord.task_id.in_(task_ids)).delete(
+                synchronize_session=False
+            )
+            db.query(TaskRunRecord).filter(TaskRunRecord.id.in_(task_ids)).delete(synchronize_session=False)
+
+        db.query(MessageRecord).filter(MessageRecord.session_id == session_id).delete(synchronize_session=False)
+        db.query(UploadedFileRecord).filter(UploadedFileRecord.session_id == session_id).delete(
+            synchronize_session=False
+        )
+        db.query(SessionRecord).filter(SessionRecord.id == session_id).delete(synchronize_session=False)
+        db.commit()
+
+
+def _create_session() -> str:
+    with SessionLocal() as db:
+        session = orchestrator.create_session(db)
+        db.commit()
+        return session.session_id
+
+
+def _create_message(client: TestClient, session_id: str) -> dict:
+    response = client.post(
+        "/api/v1/messages",
+        json={
+            "session_id": session_id,
+            "content": "帮我把 2024 年 6 月的 NDVI 任务先生成计划再审批",
+            "file_ids": [],
+        },
+    )
+    assert response.status_code == 200
+    return response.json()
+
+
+def test_create_message_stops_at_awaiting_approval_and_skips_queue(client: TestClient) -> None:
+    session_id = _create_session()
+    queued: list[str] = []
+    try:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(orchestrator, "_queue_or_run", lambda task_id: queued.append(task_id))
+            payload = _create_message(client, session_id)
+
+        assert payload["need_approval"] is True
+        assert payload["need_clarification"] is False
+        assert payload["task_status"] == TASK_STATUS_AWAITING_APPROVAL
+        assert queued == []
+
+        detail_response = client.get(f"/api/v1/tasks/{payload['task_id']}")
+        assert detail_response.status_code == 200
+        detail = detail_response.json()
+        assert detail["status"] == TASK_STATUS_AWAITING_APPROVAL
+        assert detail["operation_plan"] is not None
+    finally:
+        _cleanup_session(session_id)
+
+
+def test_patch_task_plan_updates_version_and_content(client: TestClient) -> None:
+    session_id = _create_session()
+    try:
+        payload = _create_message(client, session_id)
+        detail_before = client.get(f"/api/v1/tasks/{payload['task_id']}").json()
+        operation_plan = detail_before["operation_plan"]
+        assert operation_plan is not None
+
+        updated_plan = OperationPlan(
+            version=operation_plan["version"] + 1,
+            status="draft",
+            missing_fields=[],
+            nodes=[
+                OperationNode(
+                    step_id="step-upload",
+                    op_name="input.upload_raster",
+                    depends_on=[],
+                    inputs={"upload_id": "file-1"},
+                    params={},
+                    outputs={"raster": "raster-1"},
+                    retry_policy={"max_retries": 1},
+                ),
+                OperationNode(
+                    step_id="step-export",
+                    op_name="artifact.export",
+                    depends_on=["step-upload"],
+                    inputs={"primary": "raster-1"},
+                    params={"format": "geotiff"},
+                    outputs={"artifact": "artifact-1"},
+                    retry_policy={"max_retries": 0},
+                ),
+            ],
+        )
+
+        patch_response = client.patch(
+            f"/api/v1/tasks/{payload['task_id']}/plan",
+            json={"operation_plan": updated_plan.model_dump()},
+        )
+        assert patch_response.status_code == 200
+        detail = patch_response.json()
+        assert detail["operation_plan"]["version"] == updated_plan.version
+        assert detail["operation_plan"]["nodes"][0]["op_name"] == "input.upload_raster"
+        assert detail["status"] == TASK_STATUS_AWAITING_APPROVAL
+    finally:
+        _cleanup_session(session_id)
+
+
+def test_approve_task_plan_queues_execution(client: TestClient) -> None:
+    session_id = _create_session()
+    queued: list[str] = []
+    try:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(orchestrator, "_queue_or_run", lambda task_id: queued.append(task_id))
+            payload = _create_message(client, session_id)
+            detail_before = client.get(f"/api/v1/tasks/{payload['task_id']}").json()
+            operation_plan = detail_before["operation_plan"]
+            assert operation_plan is not None
+
+            patch_response = client.patch(
+                f"/api/v1/tasks/{payload['task_id']}/plan",
+                json={
+                    "operation_plan": {
+                        "version": operation_plan["version"] + 1,
+                        "status": "draft",
+                        "missing_fields": [],
+                        "nodes": [
+                            {
+                                "step_id": "step-upload",
+                                "op_name": "input.upload_raster",
+                                "depends_on": [],
+                                "inputs": {"upload_id": "file-1"},
+                                "params": {},
+                                "outputs": {"raster": "raster-1"},
+                                "retry_policy": {"max_retries": 1},
+                            }
+                        ],
+                    }
+                },
+            )
+            assert patch_response.status_code == 200
+
+            approve_response = client.post(
+                f"/api/v1/tasks/{payload['task_id']}/approve",
+                json={"approved_version": operation_plan["version"] + 1},
+            )
+        assert approve_response.status_code == 200
+        approved_detail = approve_response.json()
+        assert queued == [payload["task_id"]]
+        assert approved_detail["status"] in {"approved", "queued", "running", "success"}
+    finally:
+        _cleanup_session(session_id)
+
+
+def test_approve_task_plan_rejects_version_mismatch_with_plan_edit_invalid(client: TestClient) -> None:
+    session_id = _create_session()
+    try:
+        payload = _create_message(client, session_id)
+        detail = client.get(f"/api/v1/tasks/{payload['task_id']}").json()
+        operation_plan = detail["operation_plan"]
+        assert operation_plan is not None
+
+        response = client.post(
+            f"/api/v1/tasks/{payload['task_id']}/approve",
+            json={"approved_version": operation_plan["version"] + 1},
+        )
+
+        assert response.status_code == 400
+        body = response.json()
+        assert body["error"]["code"] == "plan_edit_invalid"
+    finally:
+        _cleanup_session(session_id)
