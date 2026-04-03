@@ -24,6 +24,7 @@ from packages.domain.models import (
 )
 from packages.domain.services import agent_runtime, orchestrator
 from packages.domain.services.catalog import CatalogCandidate
+from packages.domain.services.graph.runner import run_task_graph
 from packages.domain.services.planner import PLAN_STATUS_NEEDS_CLARIFICATION, TaskPlan
 from packages.schemas.message import MessageCreateRequest
 from packages.schemas.task import ParsedTaskSpec
@@ -41,6 +42,8 @@ LEGACY_SAMPLE_FILES = {
 def _default_parser_mode_for_task_samples(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GIS_AGENT_LLM_PARSER_ENABLED", "true")
     monkeypatch.setenv("GIS_AGENT_LLM_PARSER_LEGACY_FALLBACK", "true")
+    monkeypatch.setenv("GIS_AGENT_LLM_PLANNER_ENABLED", "true")
+    monkeypatch.setenv("GIS_AGENT_LLM_PLANNER_LEGACY_FALLBACK", "true")
     monkeypatch.delenv("GIS_AGENT_LLM_API_KEY", raising=False)
     get_settings.cache_clear()
     yield
@@ -295,7 +298,7 @@ def sample_task_runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
             sample["scenario"] in {"real_pipeline_to_baseline_fallback", "generate_outputs_failure"},
         )
         if should_run_pipeline:
-            agent_runtime.run_task_runtime(target_task_id)
+            run_task_graph(target_task_id)
 
         snapshot = _capture_task_state(target_task_id)
         snapshot["sample"] = sample
@@ -363,7 +366,7 @@ def test_runtime_skips_clarification_tasks_without_failing(sample_task_runner) -
     result = sample_task_runner(sample)
 
     assert result["detail"].status == "waiting_clarification"
-    assert "task_runtime_skipped" in result["event_types"]
+    assert "task_waiting_clarification" in result["event_types"]
     assert "task_failed" not in result["event_types"]
 
 
@@ -421,7 +424,7 @@ def test_create_task_writes_back_planner_schema_error_code(monkeypatch: pytest.M
         monkeypatch.setattr(
             orchestrator,
             "build_task_plan",
-            lambda parsed: TaskPlan(  # noqa: ARG005
+            lambda parsed, task_id=None: TaskPlan(  # noqa: ARG005
                 version="agent-v2",
                 mode="llm_plan_execute_gis_workspace",
                 status=PLAN_STATUS_NEEDS_CLARIFICATION,

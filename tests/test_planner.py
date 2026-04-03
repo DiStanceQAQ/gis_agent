@@ -24,6 +24,14 @@ def _legacy_planner_mode_for_tests(monkeypatch: pytest.MonkeyPatch) -> None:
     get_settings.cache_clear()
 
 
+def test_planner_default_does_not_enable_legacy_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GIS_AGENT_LLM_PLANNER_LEGACY_FALLBACK", raising=False)
+    get_settings.cache_clear()
+
+    assert get_settings().llm_planner_legacy_fallback is False
+    get_settings.cache_clear()
+
+
 def test_build_task_plan_for_ready_request(
     _legacy_planner_mode_for_tests: None,
 ) -> None:

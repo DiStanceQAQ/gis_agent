@@ -22,6 +22,14 @@ def _default_parser_mode_for_tests(monkeypatch: pytest.MonkeyPatch) -> None:
     get_settings.cache_clear()
 
 
+def test_parser_default_does_not_enable_legacy_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GIS_AGENT_LLM_PARSER_LEGACY_FALLBACK", raising=False)
+    get_settings.cache_clear()
+
+    assert get_settings().llm_parser_legacy_fallback is False
+    get_settings.cache_clear()
+
+
 def test_parse_time_range_and_outputs() -> None:
     parsed = parse_task_message(
         "帮我计算 2024 年 6 到 8 月 bbox(116.1, 39.8, 116.5, 40.1) 的 NDVI，并导出地图和 GeoTIFF。",
