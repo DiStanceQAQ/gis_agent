@@ -30,10 +30,10 @@ def route_after_search_candidates(state: GISAgentState) -> str:
 
 
 def route_after_recommend_dataset(state: GISAgentState) -> str:
-    return _route_after_step(state, success_next="run_ndvi_pipeline")
+    return _route_after_step(state, success_next="run_processing_pipeline")
 
 
-def route_after_run_ndvi_pipeline(state: GISAgentState) -> str:
+def route_after_run_processing_pipeline(state: GISAgentState) -> str:
     return _route_after_step(state, success_next="generate_outputs")
 
 

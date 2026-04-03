@@ -146,8 +146,8 @@ def _valid_plan_payload() -> dict:
                 "depends_on": ["search_candidates"],
             },
             {
-                "step_name": "run_ndvi_pipeline",
-                "tool_name": "ndvi.run",
+                "step_name": "run_processing_pipeline",
+                "tool_name": "processing.run",
                 "title": "执行分析",
                 "purpose": "执行 NDVI 处理",
                 "depends_on": ["recommend_dataset"],
@@ -157,7 +157,7 @@ def _valid_plan_payload() -> dict:
                 "tool_name": "artifacts.publish",
                 "title": "发布结果",
                 "purpose": "发布产物",
-                "depends_on": ["run_ndvi_pipeline"],
+                "depends_on": ["run_processing_pipeline"],
             },
         ],
     }
@@ -191,7 +191,7 @@ def test_build_task_plan_uses_llm_main_chain(monkeypatch: pytest.MonkeyPatch) ->
         "normalize_aoi",
         "search_candidates",
         "recommend_dataset",
-        "run_ndvi_pipeline",
+        "run_processing_pipeline",
         "generate_outputs",
     ]
     get_settings.cache_clear()

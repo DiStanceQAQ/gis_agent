@@ -7,7 +7,7 @@
     "fallback_used": true,
     "selected_dataset": "sentinel2",
     "step_status": {
-      "run_ndvi_pipeline": "success",
+      "run_processing_pipeline": "success",
       "generate_outputs": "success"
     },
     "event_types": [

@@ -284,8 +284,8 @@ def recommend_dataset_node(state: GISAgentState) -> GISAgentState:
     return _run_runtime_step(state, step_name="recommend_dataset")
 
 
-def run_ndvi_pipeline_node(state: GISAgentState) -> GISAgentState:
-    return _run_runtime_step(state, step_name="run_ndvi_pipeline")
+def run_processing_pipeline_node(state: GISAgentState) -> GISAgentState:
+    return _run_runtime_step(state, step_name="run_processing_pipeline")
 
 
 def generate_outputs_node(state: GISAgentState) -> GISAgentState:

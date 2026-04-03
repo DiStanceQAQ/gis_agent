@@ -11,7 +11,7 @@ from .nodes import (
     parse_task_node,
     plan_task_node,
     recommend_dataset_node,
-    run_ndvi_pipeline_node,
+    run_processing_pipeline_node,
     search_candidates_node,
 )
 from .routes import (
@@ -20,7 +20,7 @@ from .routes import (
     route_after_parse,
     route_after_plan,
     route_after_recommend_dataset,
-    route_after_run_ndvi_pipeline,
+    route_after_run_processing_pipeline,
     route_after_search_candidates,
 )
 from .state import GISAgentState
@@ -33,7 +33,7 @@ def build_task_graph():
     graph.add_node("normalize_aoi", normalize_aoi_node)
     graph.add_node("search_candidates", search_candidates_node)
     graph.add_node("recommend_dataset", recommend_dataset_node)
-    graph.add_node("run_ndvi_pipeline", run_ndvi_pipeline_node)
+    graph.add_node("run_processing_pipeline", run_processing_pipeline_node)
     graph.add_node("generate_outputs", generate_outputs_node)
     graph.add_node("waiting_clarification", finalize_success_node)
     graph.add_node("approval_required", finalize_approval_required_node)
@@ -88,12 +88,12 @@ def build_task_graph():
             "approval_required": "approval_required",
             "waiting_clarification": "waiting_clarification",
             "failed": "failed",
-            "run_ndvi_pipeline": "run_ndvi_pipeline",
+            "run_processing_pipeline": "run_processing_pipeline",
         },
     )
     graph.add_conditional_edges(
-        "run_ndvi_pipeline",
-        route_after_run_ndvi_pipeline,
+        "run_processing_pipeline",
+        route_after_run_processing_pipeline,
         {
             "approval_required": "approval_required",
             "waiting_clarification": "waiting_clarification",

@@ -42,6 +42,6 @@ def test_build_fallback_detail_for_real_pipeline_to_baseline() -> None:
     )
 
     assert detail["strategy"] == "real_pipeline_to_baseline"
-    assert detail["step_name"] == "run_ndvi_pipeline"
+    assert detail["step_name"] == "run_processing_pipeline"
     assert detail["from_mode"] == "real"
     assert detail["to_mode"] == "baseline"

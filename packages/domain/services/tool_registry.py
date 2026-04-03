@@ -26,7 +26,7 @@ TOOL_STEP_SEQUENCE = [
     "normalize_aoi",
     "search_candidates",
     "recommend_dataset",
-    "run_ndvi_pipeline",
+    "run_processing_pipeline",
     "generate_outputs",
 ]
 
@@ -115,24 +115,20 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
             },
         ),
     ),
-    "run_ndvi_pipeline": ToolDefinition(
-        step_name="run_ndvi_pipeline",
-        tool_name="ndvi.run",
-        title="执行分析",
-        purpose="执行裁剪、质量过滤、合成和 NDVI 计算。",
-        reasoning="这是核心 GIS 处理步骤，直接决定结果质量。",
+    "run_processing_pipeline": ToolDefinition(
+        step_name="run_processing_pipeline",
+        tool_name="processing.run",
+        title="执行通用处理",
+        purpose="执行操作计划中的栅格/矢量处理步骤。",
+        reasoning="处理逻辑由操作注册表统一调度，避免硬编码单一 NDVI 流程。",
         depends_on=["recommend_dataset"],
         contract=ToolContract(
             input_schema={
-                "selected_dataset": "str",
-                "aoi": "AOIRecord",
-                "task_spec": "ParsedTaskSpec",
+                "operation_plan.nodes": "list[OperationNode]",
             },
             output_schema={
                 "mode": "str",
-                "selected_item_ids": "list[str]",
-                "valid_pixel_ratio": "float",
-                "fallback_used": "bool",
+                "artifact_count": "int",
             },
             error_codes=[
                 ErrorCode.TASK_RUNTIME_TIMEOUT,
@@ -145,7 +141,7 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
         title="发布结果",
         purpose="生成 PNG、GeoTIFF 和说明文本，并发布到工作台。",
         reasoning="结果必须可下载、可预览、可解释，才算完成任务。",
-        depends_on=["run_ndvi_pipeline"],
+        depends_on=["run_processing_pipeline"],
         contract=ToolContract(
             input_schema={
                 "pipeline_outputs": "dict[str, object]",

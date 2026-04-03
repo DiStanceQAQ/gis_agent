@@ -10,8 +10,8 @@ from packages.domain.services.graph.routes import (
     route_after_generate_outputs,
     route_after_parse,
     route_after_plan,
+    route_after_run_processing_pipeline,
     route_after_recommend_dataset,
-    route_after_run_ndvi_pipeline,
     route_after_search_candidates,
 )
 from packages.domain.services.task_state import TASK_STATUS_AWAITING_APPROVAL, TASK_STATUS_QUEUED
@@ -47,14 +47,14 @@ def test_route_after_search_candidates_to_recommend_dataset() -> None:
     assert route_after_search_candidates(state) == "recommend_dataset"
 
 
-def test_route_after_recommend_dataset_to_run_ndvi_pipeline() -> None:
+def test_route_after_recommend_dataset_to_run_processing_pipeline() -> None:
     state = {"need_clarification": False, "plan_status": "running"}
-    assert route_after_recommend_dataset(state) == "run_ndvi_pipeline"
+    assert route_after_recommend_dataset(state) == "run_processing_pipeline"
 
 
-def test_route_after_run_ndvi_pipeline_to_generate_outputs() -> None:
+def test_route_after_run_processing_pipeline_to_generate_outputs() -> None:
     state = {"need_clarification": False, "plan_status": "running"}
-    assert route_after_run_ndvi_pipeline(state) == "generate_outputs"
+    assert route_after_run_processing_pipeline(state) == "generate_outputs"
 
 
 def test_run_task_graph_marks_failed_for_missing_task(monkeypatch) -> None:  # noqa: ANN001
@@ -112,8 +112,8 @@ def test_build_task_graph_executes_full_success_path_in_order(monkeypatch) -> No
         calls.append("recommend_dataset")
         return {"need_clarification": False, "plan_status": "running"}
 
-    def _run_ndvi(state):  # noqa: ANN001
-        calls.append("run_ndvi_pipeline")
+    def _run_processing(state):  # noqa: ANN001
+        calls.append("run_processing_pipeline")
         return {"need_clarification": False, "plan_status": "running"}
 
     def _generate(state):  # noqa: ANN001
@@ -129,7 +129,7 @@ def test_build_task_graph_executes_full_success_path_in_order(monkeypatch) -> No
     monkeypatch.setattr(graph_builder, "normalize_aoi_node", _normalize)
     monkeypatch.setattr(graph_builder, "search_candidates_node", _search)
     monkeypatch.setattr(graph_builder, "recommend_dataset_node", _recommend)
-    monkeypatch.setattr(graph_builder, "run_ndvi_pipeline_node", _run_ndvi)
+    monkeypatch.setattr(graph_builder, "run_processing_pipeline_node", _run_processing)
     monkeypatch.setattr(graph_builder, "generate_outputs_node", _generate)
     monkeypatch.setattr(graph_builder, "finalize_success_node", _success)
 
@@ -142,7 +142,7 @@ def test_build_task_graph_executes_full_success_path_in_order(monkeypatch) -> No
         "normalize_aoi",
         "search_candidates",
         "recommend_dataset",
-        "run_ndvi_pipeline",
+        "run_processing_pipeline",
         "generate_outputs",
         "success",
     ]

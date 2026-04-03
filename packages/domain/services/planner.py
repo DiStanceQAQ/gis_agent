@@ -26,7 +26,7 @@ PLAN_STATUS_SUCCESS = "success"
 PLAN_STATUS_FAILED = "failed"
 
 _STEP_NAME_ALIASES = {
-    "run_processing_pipeline": "run_ndvi_pipeline",
+    "run_ndvi_pipeline": "run_processing_pipeline",
 }
 
 
@@ -240,7 +240,7 @@ def _build_planner_user_prompt(parsed: ParsedTaskSpec) -> str:
             "missing_fields",
             "steps",
         ],
-        "required_step_names": [step_name for step_name in STEP_SEQUENCE if step_name != "run_processing_pipeline"],
+        "required_step_names": list(STEP_SEQUENCE),
         "tool_whitelist": tool_whitelist,
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)

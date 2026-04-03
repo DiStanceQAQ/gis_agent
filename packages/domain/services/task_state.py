@@ -28,7 +28,7 @@ STEP_SEQUENCE = [
     "normalize_aoi",
     "search_candidates",
     "recommend_dataset",
-    "run_ndvi_pipeline",
+    "run_processing_pipeline",
     "generate_outputs",
 ]
 

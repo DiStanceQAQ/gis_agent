@@ -227,7 +227,7 @@ def test_langgraph_runtime_success_event_sequence_is_ordered(
             "normalize_aoi",
             "search_candidates",
             "recommend_dataset",
-            "run_ndvi_pipeline",
+            "run_processing_pipeline",
             "generate_outputs",
         ]
         for step_name in expected_steps:

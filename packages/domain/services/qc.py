@@ -6,7 +6,7 @@ from typing import Any, Iterable
 
 ALLOWED_FALLBACK_STRATEGIES = {
     "real_pipeline_to_baseline": {
-        "step_name": "run_ndvi_pipeline",
+        "step_name": "run_processing_pipeline",
         "description": "真实 NDVI pipeline 失败后，降级为 baseline 输出以保障链路可验证。",
     }
 }

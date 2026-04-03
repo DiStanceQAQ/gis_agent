@@ -17,6 +17,7 @@ from packages.domain.models import ArtifactRecord, TaskRunRecord
 from packages.domain.services.catalog import persist_candidates, search_candidates
 from packages.domain.services.explanation import ExplanationContext, build_methods_text, build_summary_text
 from packages.domain.services.ndvi_pipeline import run_real_ndvi_pipeline
+from packages.domain.services.processing_pipeline import run_processing_pipeline
 from packages.domain.services.planner import (
     ensure_task_plan,
     set_task_plan_step_status,
@@ -191,7 +192,11 @@ def _tool_recommend_dataset(db: Session, task: TaskRunRecord, context: PipelineE
     return recommendation
 
 
-def _tool_run_ndvi_pipeline(db: Session, task: TaskRunRecord, context: PipelineExecutionContext) -> dict[str, object]:
+def _tool_run_ndvi_pipeline_legacy(
+    db: Session,
+    task: TaskRunRecord,
+    context: PipelineExecutionContext,
+) -> dict[str, object]:
     settings = get_settings()
     bbox = context.bbox or _require_task_bbox(task)
     try:
@@ -231,7 +236,7 @@ def _tool_run_ndvi_pipeline(db: Session, task: TaskRunRecord, context: PipelineE
             db,
             task_id=task.id,
             event_type="task_fallback_applied",
-            step_name="run_ndvi_pipeline",
+            step_name="run_processing_pipeline",
             status=task.status,
             detail=fallback_detail,
         )
@@ -244,6 +249,29 @@ def _tool_run_ndvi_pipeline(db: Session, task: TaskRunRecord, context: PipelineE
         "selected_item_ids": pipeline_outputs["selected_item_ids"],
         "valid_pixel_ratio": pipeline_outputs["valid_pixel_ratio"],
         "fallback_used": task.fallback_used,
+    }
+
+
+def _tool_run_processing_pipeline(
+    db: Session,
+    task: TaskRunRecord,
+    context: PipelineExecutionContext,
+) -> dict[str, object]:
+    operation_plan = ((task.plan_json or {}).get("operation_plan") or {})
+    plan_nodes = list(operation_plan.get("nodes") or [])
+    if not plan_nodes:
+        return _tool_run_ndvi_pipeline_legacy(db, task, context)
+
+    working_dir = Path(build_artifact_path(task.id, "pipeline_tmp")).parent
+    pipeline_outputs = run_processing_pipeline(
+        task_id=task.id,
+        plan_nodes=plan_nodes,
+        working_dir=working_dir,
+    )
+    context.pipeline_outputs = pipeline_outputs
+    return {
+        "mode": str(pipeline_outputs.get("mode") or "operation_plan"),
+        "artifact_count": len(pipeline_outputs.get("artifacts") or []),
     }
 
 
@@ -521,6 +549,6 @@ TOOL_REGISTRY = {
     "normalize_aoi": _tool_normalize_aoi,
     "search_candidates": _tool_search_candidates,
     "recommend_dataset": _tool_recommend_dataset,
-    "run_ndvi_pipeline": _tool_run_ndvi_pipeline,
+    "run_processing_pipeline": _tool_run_processing_pipeline,
     "generate_outputs": _tool_generate_outputs,
 }

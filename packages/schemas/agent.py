@@ -14,6 +14,7 @@ AllowedToolName = Literal[
     "catalog.search",
     "recommendation.rank",
     "ndvi.run",
+    "processing.run",
     "raster.compute",
     "terrain.derive",
     "vector.buffer",
