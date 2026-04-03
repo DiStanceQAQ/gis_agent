@@ -272,6 +272,14 @@ def _assert_expected(result: dict[str, Any]) -> None:
         for key, value in detail_expectation.items():
             assert event_detail.get(key) == value
 
+    after_approve_status = expected.get("after_approve_status")
+    if after_approve_status:
+        after_approve = result.get("after_approve")
+        assert after_approve is not None
+        assert after_approve["detail"].status == after_approve_status
+        for event_type in expected.get("after_approve_event_types", []):
+            assert event_type in after_approve["event_types"]
+
 
 @pytest.fixture
 def sample_task_runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
@@ -280,6 +288,8 @@ def sample_task_runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     def _run(sample_input: str | dict[str, Any]) -> dict[str, Any]:
         sample = _load_task_sample(sample_input) if isinstance(sample_input, str) else sample_input
         _patch_sample_environment(monkeypatch, tmp_path, scenario=sample["scenario"])
+        expected = sample.get("expected") or {}
+        manual_approval = bool(expected.get("after_approve_status"))
 
         initial_task_id: str | None = None
         target_task_id: str
@@ -292,7 +302,7 @@ def sample_task_runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 
             if sample["scenario"] in {"create_only", "create_and_run", "real_pipeline_to_baseline_fallback", "generate_outputs_failure"}:
                 response = _create_task(db, session_id, sample["message"])
-                if response.need_approval:
+                if response.need_approval and not manual_approval:
                     detail = orchestrator.get_task_detail(db, response.task_id)
                     assert detail.operation_plan is not None
                     orchestrator.approve_task_plan(
@@ -305,7 +315,7 @@ def sample_task_runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
                 initial_response = _create_task(db, session_id, sample["initial_message"])
                 initial_task_id = initial_response.task_id
                 followup_response = _create_task(db, session_id, sample["followup_message"])
-                if followup_response.need_approval:
+                if followup_response.need_approval and not manual_approval:
                     detail = orchestrator.get_task_detail(db, followup_response.task_id)
                     assert detail.operation_plan is not None
                     orchestrator.approve_task_plan(
@@ -333,6 +343,19 @@ def sample_task_runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         snapshot["sample"] = sample
         snapshot["session_id"] = session_id
         snapshot["initial_task_id"] = initial_task_id
+
+        if manual_approval:
+            with SessionLocal() as db:
+                detail = orchestrator.get_task_detail(db, target_task_id)
+                assert detail.operation_plan is not None
+                orchestrator.approve_task_plan(
+                    db,
+                    target_task_id,
+                    approved_version=detail.operation_plan.version,
+                )
+            run_task_graph(target_task_id)
+            snapshot["after_approve"] = _capture_task_state(target_task_id)
+
         return snapshot
 
     yield _run

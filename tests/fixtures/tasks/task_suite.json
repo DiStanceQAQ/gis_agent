@@ -28,6 +28,18 @@
     }
   },
   {
+    "id": "approval_gate_then_execute",
+    "category": "success",
+    "scenario": "create_only",
+    "message": "bbox(116.1,39.8,116.5,40.1) 在 2024-06-01 到 2024-06-30 的 NDVI，并导出 GeoTIFF",
+    "expected": {
+      "status": "awaiting_approval",
+      "event_types": ["task_plan_built", "task_plan_drafted"],
+      "after_approve_status": "success",
+      "after_approve_event_types": ["task_plan_approved", "task_completed"]
+    }
+  },
+  {
     "id": "success_place_alias_summer",
     "category": "success",
     "scenario": "create_and_run",

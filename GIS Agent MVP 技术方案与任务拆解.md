@@ -2,7 +2,7 @@
 
 > 文档类型：技术方案 + 开发拆解  
 > 对应产品文档：`GIS Agent MVP PRD.md`  
-> 当前版本：v2.2（LangGraph 迁移版）  
+> 当前版本：v2.3（LangGraph 迁移 + 计划审批执行版）  
 > 更新时间：2026-04-03
 
 ---
@@ -19,6 +19,19 @@
 ---
 
 ## 2. 架构总览
+
+### 2.0 当前实现进展（2026-04-03）
+
+已落地：
+
+1. 主执行链路由 `run_ndvi_pipeline` 迁移为 `run_processing_pipeline`，并接入 `processing_pipeline` 调度器。  
+2. 任务执行前新增审批门禁：`awaiting_approval -> approved -> queued`，未审批禁止进入运行阶段。  
+3. 前端任务面板新增 operation plan JSON 编辑、保存草稿、确认执行入口。  
+4. 样例测试补齐“先审批再执行”回归，覆盖 `awaiting_approval -> success` 端到端路径。  
+
+兼容策略：
+
+1. 在无 `operation_plan.nodes` 时，运行层保留 legacy NDVI 执行兜底，保证历史样例和回归稳定。
 
 ### 2.1 逻辑分层
 
