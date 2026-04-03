@@ -1,6 +1,9 @@
 import pytest
 
 from packages.domain.services.task_state import (
+    TASK_STATUS_APPROVED,
+    TASK_STATUS_AWAITING_APPROVAL,
+    TASK_STATUS_CANCELLED,
     STEP_STATUS_FAILED,
     STEP_STATUS_PENDING,
     STEP_STATUS_RUNNING,
@@ -25,6 +28,41 @@ def test_can_transition_allows_valid_task_status_change() -> None:
         TASK_STATUS_DRAFT,
         TASK_STATUS_QUEUED,
     )
+
+
+@pytest.mark.parametrize(
+    ("current", "target"),
+    [
+        (TASK_STATUS_DRAFT, TASK_STATUS_AWAITING_APPROVAL),
+        (TASK_STATUS_WAITING_CLARIFICATION, TASK_STATUS_AWAITING_APPROVAL),
+        (TASK_STATUS_WAITING_CLARIFICATION, TASK_STATUS_FAILED),
+        (TASK_STATUS_WAITING_CLARIFICATION, TASK_STATUS_CANCELLED),
+        (TASK_STATUS_AWAITING_APPROVAL, TASK_STATUS_APPROVED),
+        (TASK_STATUS_AWAITING_APPROVAL, TASK_STATUS_CANCELLED),
+        (TASK_STATUS_AWAITING_APPROVAL, TASK_STATUS_FAILED),
+        (TASK_STATUS_APPROVED, TASK_STATUS_QUEUED),
+        (TASK_STATUS_APPROVED, TASK_STATUS_CANCELLED),
+        (TASK_STATUS_APPROVED, TASK_STATUS_FAILED),
+    ],
+)
+def test_approval_state_allows_expected_transitions(current: str, target: str) -> None:
+    ensure_task_status_transition(current, target)
+
+
+@pytest.mark.parametrize(
+    ("current", "target"),
+    [
+        (TASK_STATUS_DRAFT, TASK_STATUS_APPROVED),
+        (TASK_STATUS_DRAFT, TASK_STATUS_CANCELLED),
+        (TASK_STATUS_AWAITING_APPROVAL, TASK_STATUS_QUEUED),
+        (TASK_STATUS_APPROVED, TASK_STATUS_RUNNING),
+        (TASK_STATUS_APPROVED, TASK_STATUS_SUCCESS),
+        (TASK_STATUS_CANCELLED, TASK_STATUS_QUEUED),
+    ],
+)
+def test_approval_state_rejects_invalid_transitions(current: str, target: str) -> None:
+    with pytest.raises(ValueError):
+        ensure_task_status_transition(current, target)
 
 
 @pytest.mark.parametrize(
