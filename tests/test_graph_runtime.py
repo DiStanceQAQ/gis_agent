@@ -1,3 +1,6 @@
+import inspect
+
+from packages.domain.services.graph import nodes as graph_nodes
 from packages.domain.errors import ErrorCode
 from packages.domain.services.graph.builder import build_task_graph
 from packages.domain.services.graph.routes import (
@@ -40,3 +43,9 @@ def test_run_task_graph_marks_failed_for_missing_task(monkeypatch) -> None:  # n
 
     assert result["plan_status"] == "failed"
     assert result["error_code"] == ErrorCode.TASK_NOT_FOUND
+
+
+def test_graph_nodes_do_not_depend_on_agent_runtime_private_entry() -> None:
+    source = inspect.getsource(graph_nodes)
+    assert "_run_task_runtime_legacy" not in source
+    assert "agent_runtime" not in source

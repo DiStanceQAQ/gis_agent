@@ -19,21 +19,17 @@ from packages.domain.services.task_state import (
     TASK_STATUS_RUNNING,
     TASK_STATUS_SUCCESS,
     TASK_STATUS_WAITING_CLARIFICATION,
+    ensure_task_steps,
     set_task_status,
     write_task_error,
 )
 from packages.domain.services.tool_registry import get_tool_definition
 from packages.schemas.task import ParsedTaskSpec
 
+from . import runtime_helpers
 from .state import GISAgentState
 
 logger = get_logger(__name__)
-
-
-def _runtime_module():
-    from packages.domain.services import agent_runtime as runtime
-
-    return runtime
 
 
 def _build_missing_task_state(task_id: str) -> GISAgentState:
@@ -60,7 +56,6 @@ def parse_task_node(state: GISAgentState) -> GISAgentState:
 
 def plan_task_node(state: GISAgentState) -> GISAgentState:
     task_id = state["task_id"]
-    runtime = _runtime_module()
     with SessionLocal() as db:
         task = db.get(TaskRunRecord, task_id)
         if task is None or task.task_spec is None:
@@ -79,7 +74,7 @@ def plan_task_node(state: GISAgentState) -> GISAgentState:
             "plan_status": plan.status,
             "runtime_started_at": perf_counter(),
             "tool_calls": 0,
-            "runtime_context": runtime.PipelineExecutionContext(parsed_spec=parsed),
+            "runtime_context": runtime_helpers.PipelineExecutionContext(parsed_spec=parsed),
         }
 
 
@@ -90,15 +85,14 @@ def _prepare_runtime_start(
     state: GISAgentState,
     start: float,
 ) -> GISAgentState | None:
-    runtime = _runtime_module()
     context = state.get("runtime_context")
     if context is None:
         if task.task_spec is None:
             return _build_missing_task_state(task.id)
         parsed = ParsedTaskSpec(**task.task_spec.raw_spec_json)
-        context = runtime.PipelineExecutionContext(parsed_spec=parsed)
+        context = runtime_helpers.PipelineExecutionContext(parsed_spec=parsed)
 
-    if _runtime_module()._maybe_skip_runtime_for_clarification(db, task, context.parsed_spec):
+    if runtime_helpers.maybe_skip_runtime_for_clarification(db, task, context.parsed_spec):
         return {
             "need_clarification": True,
             "plan_status": PLAN_STATUS_NEEDS_CLARIFICATION,
@@ -112,7 +106,7 @@ def _prepare_runtime_start(
         for step in (task.plan_json or {}).get("steps", [])
         if step.get("step_name")
     ]
-    runtime.ensure_task_steps(db, task, step_names)
+    ensure_task_steps(db, task, step_names)
     task.plan_json = set_task_plan_status(task.plan_json, PLAN_STATUS_RUNNING)
     first_step = step_names[0] if step_names else None
     set_task_status(
@@ -133,7 +127,6 @@ def _prepare_runtime_start(
 
 def _run_runtime_step(state: GISAgentState, *, step_name: str) -> GISAgentState:
     task_id = state["task_id"]
-    runtime = _runtime_module()
     start = float(state.get("runtime_started_at", perf_counter()))
     tool_calls = int(state.get("tool_calls", 0))
 
@@ -147,7 +140,7 @@ def _run_runtime_step(state: GISAgentState, *, step_name: str) -> GISAgentState:
             if task.task_spec is None:
                 return _build_missing_task_state(task_id)
             parsed = ParsedTaskSpec(**task.task_spec.raw_spec_json)
-            context = runtime.PipelineExecutionContext(parsed_spec=parsed)
+            context = runtime_helpers.PipelineExecutionContext(parsed_spec=parsed)
 
         if step_name == "normalize_aoi" and task.status != TASK_STATUS_RUNNING:
             early = _prepare_runtime_start(db=db, task=task, state=state, start=start)
@@ -155,21 +148,21 @@ def _run_runtime_step(state: GISAgentState, *, step_name: str) -> GISAgentState:
                 return early
 
         try:
-            runtime._check_runtime_limits(
+            runtime_helpers.check_runtime_limits(
                 start=start,
                 step_count=len((task.plan_json or {}).get("steps", [])),
                 tool_calls=tool_calls,
             )
             tool_def = get_tool_definition(step_name)
-            handler = runtime.TOOL_REGISTRY.get(step_name)
+            handler = runtime_helpers.TOOL_REGISTRY.get(step_name)
             if tool_def is None or handler is None:
-                raise runtime.AgentRuntimeError(
+                raise runtime_helpers.AgentRuntimeError(
                     error_code=ErrorCode.TASK_RUNTIME_UNKNOWN_TOOL,
                     message=f"Unknown tool step: {step_name}",
                     detail={"step_name": step_name},
                 )
 
-            runtime._execute_tool_step(
+            runtime_helpers.execute_tool_step(
                 db,
                 task,
                 context,
@@ -213,7 +206,7 @@ def _run_runtime_step(state: GISAgentState, *, step_name: str) -> GISAgentState:
                 "tool_calls": tool_calls,
             }
         except Exception as exc:  # pragma: no cover - defensive guard
-            error_code, error_detail = runtime._map_runtime_error(exc)
+            error_code, error_detail = runtime_helpers.map_runtime_error(exc)
             write_task_error(
                 task,
                 error_code=error_code,
@@ -227,7 +220,7 @@ def _run_runtime_step(state: GISAgentState, *, step_name: str) -> GISAgentState:
                 "duration_seconds": task.duration_seconds,
             }
             failure_detail.update(error_detail)
-            runtime._mark_current_step_failed(
+            runtime_helpers.mark_current_step_failed(
                 db,
                 task,
                 detail=failure_detail,

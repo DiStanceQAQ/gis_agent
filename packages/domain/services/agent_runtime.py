@@ -27,7 +27,6 @@ from packages.domain.services.planner import (
 )
 from packages.domain.services.qc import build_fallback_detail, evaluate_candidate_qc
 from packages.domain.services.recommendation import build_recommendation
-from packages.domain.services.graph.runner import run_task_graph
 from packages.domain.services.storage import build_artifact_path, persist_artifact_file
 from packages.domain.services.task_events import append_task_event
 from packages.domain.services.task_state import (
@@ -655,4 +654,6 @@ def _run_task_runtime_legacy(task_id: str) -> None:
 
 def run_task_runtime(task_id: str) -> None:
     """Compatibility shim. Legacy callers now execute the LangGraph runtime."""
+    from packages.domain.services.graph.runner import run_task_graph
+
     run_task_graph(task_id)

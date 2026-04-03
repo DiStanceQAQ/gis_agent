@@ -67,7 +67,7 @@ def test_run_task_runtime_delegates_to_graph_runner(monkeypatch: pytest.MonkeyPa
     def _fake_run(task_id: str) -> None:
         called.append(task_id)
 
-    monkeypatch.setattr(agent_runtime, "run_task_graph", _fake_run)
+    monkeypatch.setattr("packages.domain.services.graph.runner.run_task_graph", _fake_run)
 
     run_task_runtime("task_123")
 
