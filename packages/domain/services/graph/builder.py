@@ -9,7 +9,7 @@ from .nodes import (
     parse_task_node,
     plan_task_node,
 )
-from .routes import route_after_parse, route_after_plan
+from .routes import route_after_execute, route_after_parse, route_after_plan
 from .state import GISAgentState
 
 def build_task_graph():
@@ -40,7 +40,15 @@ def build_task_graph():
             "execute": "execute",
         },
     )
-    graph.add_edge("execute", "success")
+    graph.add_conditional_edges(
+        "execute",
+        route_after_execute,
+        {
+            "waiting_clarification": "waiting_clarification",
+            "failed": "failed",
+            "success": "success",
+        },
+    )
     graph.add_edge("success", END)
     graph.add_edge("waiting_clarification", END)
     graph.add_edge("failed", END)

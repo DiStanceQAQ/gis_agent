@@ -17,3 +17,11 @@ def route_after_plan(state: GISAgentState) -> str:
     if state.get("plan_status") == "failed":
         return "failed"
     return "execute"
+
+
+def route_after_execute(state: GISAgentState) -> str:
+    if state.get("need_clarification"):
+        return "waiting_clarification"
+    if state.get("plan_status") == "failed":
+        return "failed"
+    return "success"

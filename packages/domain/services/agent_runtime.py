@@ -537,6 +537,122 @@ TOOL_REGISTRY = {
 }
 
 
+def run_task_runtime_legacy(task_id: str) -> None:
+    db = SessionLocal()
+    start = perf_counter()
+    try:
+        task = db.get(TaskRunRecord, task_id)
+        if task is None:
+            return
+
+        parsed_spec = ParsedTaskSpec(**(task.task_spec.raw_spec_json if task.task_spec else {}))
+        if _maybe_skip_runtime_for_clarification(db, task, parsed_spec):
+            return
+
+        plan = ensure_task_plan(task.plan_json, parsed_spec, task_id=task.id)
+        _check_runtime_limits(start=start, step_count=len(plan.steps), tool_calls=0)
+        task.plan_json = plan.model_dump()
+        ensure_task_steps(db, task, [step.step_name for step in plan.steps])
+        task.plan_json = set_task_plan_status(task.plan_json, PLAN_STATUS_RUNNING)
+        set_task_status(
+            db,
+            task,
+            TASK_STATUS_RUNNING,
+            current_step=plan.steps[0].step_name if plan.steps else None,
+            event_type="task_started",
+            detail={
+                "current_step": plan.steps[0].step_name if plan.steps else None,
+                "plan_mode": plan.mode,
+            },
+        )
+        db.commit()
+        logger.info("agent_runtime.started task_id=%s plan_steps=%s", task.id, len(plan.steps))
+
+        context = PipelineExecutionContext(parsed_spec=parsed_spec)
+        tool_calls = 0
+        for planned_step in plan.steps:
+            task.current_step = planned_step.step_name
+            db.flush()
+            _check_runtime_limits(start=start, step_count=len(plan.steps), tool_calls=tool_calls)
+
+            tool_def = get_tool_definition(planned_step.step_name)
+            handler = TOOL_REGISTRY.get(planned_step.step_name)
+            if tool_def is None or handler is None:
+                raise AgentRuntimeError(
+                    error_code=ErrorCode.TASK_RUNTIME_UNKNOWN_TOOL,
+                    message=f"Unknown tool step: {planned_step.step_name}",
+                    detail={"step_name": planned_step.step_name},
+                )
+
+            _execute_tool_step(
+                db,
+                task,
+                context,
+                step_name=planned_step.step_name,
+                tool_name=tool_def.tool_name,
+                title=tool_def.title,
+                handler=handler,
+                start=start,
+            )
+            tool_calls += 1
+
+        task.plan_json = set_task_plan_status(task.plan_json, PLAN_STATUS_SUCCESS)
+        set_task_status(
+            db,
+            task,
+            TASK_STATUS_SUCCESS,
+            current_step="generate_outputs",
+            event_type="task_completed",
+            detail={
+                "duration_seconds": task.duration_seconds,
+                "selected_dataset": task.selected_dataset,
+                "fallback_used": task.fallback_used,
+            },
+        )
+        db.commit()
+        logger.info(
+            "agent_runtime.succeeded task_id=%s dataset=%s duration_seconds=%s",
+            task.id,
+            task.selected_dataset,
+            task.duration_seconds,
+        )
+    except Exception as exc:  # pragma: no cover - defensive scaffold handling
+        task = db.get(TaskRunRecord, task_id)
+        if task is not None:
+            error_code, error_detail = _map_runtime_error(exc)
+            write_task_error(
+                task,
+                error_code=error_code,
+                error_message=str(exc),
+            )
+            task.duration_seconds = int(perf_counter() - start)
+            failure_detail = {
+                "error_code": task.error_code,
+                "error_message": task.error_message,
+                "failed_step": task.current_step,
+                "duration_seconds": task.duration_seconds,
+            }
+            failure_detail.update(error_detail)
+            _mark_current_step_failed(
+                db,
+                task,
+                detail=failure_detail,
+            )
+            task.plan_json = set_task_plan_status(task.plan_json, PLAN_STATUS_FAILED)
+            set_task_status(
+                db,
+                task,
+                TASK_STATUS_FAILED,
+                current_step=task.current_step,
+                event_type="task_failed",
+                detail=failure_detail,
+            )
+            db.commit()
+        logger.exception("agent_runtime.failed task_id=%s", task_id)
+    finally:
+        db.close()
+
+
 def run_task_runtime(task_id: str) -> None:
     """Compatibility shim. Legacy callers now execute the LangGraph runtime."""
     run_task_graph(task_id)
