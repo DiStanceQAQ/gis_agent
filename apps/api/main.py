@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from time import perf_counter
 from uuid import uuid4
 
@@ -24,10 +25,19 @@ settings = get_settings()
 configure_logging(settings.debug)
 logger = get_logger(__name__)
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):  # noqa: ARG001
+    ensure_storage_dirs(settings)
+    run_migrations()
+    yield
+
+
 app = FastAPI(
     title=settings.app_name,
     debug=settings.debug,
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -137,9 +147,3 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
             message="Internal server error.",
         ),
     )
-
-
-@app.on_event("startup")
-def on_startup() -> None:
-    ensure_storage_dirs(settings)
-    run_migrations()
