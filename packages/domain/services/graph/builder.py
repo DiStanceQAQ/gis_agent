@@ -2,44 +2,31 @@ from __future__ import annotations
 
 from langgraph.graph import END, StateGraph
 
+from .nodes import (
+    execute_task_node,
+    finalize_failed_node,
+    finalize_success_node,
+    parse_task_node,
+    plan_task_node,
+)
 from .routes import route_after_parse, route_after_plan
 from .state import GISAgentState
 
-
-def _parse_task_node(state: GISAgentState) -> GISAgentState:
-    return state
-
-
-def _plan_task_node(state: GISAgentState) -> GISAgentState:
-    return state
-
-
-def _execute_task_node(state: GISAgentState) -> GISAgentState:
-    return state
-
-
-def _finalize_success_node(state: GISAgentState) -> GISAgentState:
-    return state
-
-
-def _finalize_failed_node(state: GISAgentState) -> GISAgentState:
-    return state
-
-
 def build_task_graph():
     graph = StateGraph(GISAgentState)
-    graph.add_node("parse", _parse_task_node)
-    graph.add_node("plan", _plan_task_node)
-    graph.add_node("execute", _execute_task_node)
-    graph.add_node("waiting_clarification", _finalize_success_node)
-    graph.add_node("failed", _finalize_failed_node)
-    graph.add_node("success", _finalize_success_node)
+    graph.add_node("parse", parse_task_node)
+    graph.add_node("plan", plan_task_node)
+    graph.add_node("execute", execute_task_node)
+    graph.add_node("waiting_clarification", finalize_success_node)
+    graph.add_node("failed", finalize_failed_node)
+    graph.add_node("success", finalize_success_node)
 
     graph.set_entry_point("parse")
     graph.add_conditional_edges(
         "parse",
         route_after_parse,
         {
+            "failed": "failed",
             "waiting_clarification": "waiting_clarification",
             "plan": "plan",
         },

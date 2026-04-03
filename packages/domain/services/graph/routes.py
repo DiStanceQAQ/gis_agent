@@ -4,6 +4,8 @@ from .state import GISAgentState
 
 
 def route_after_parse(state: GISAgentState) -> str:
+    if state.get("plan_status") == "failed":
+        return "failed"
     if state.get("need_clarification"):
         return "waiting_clarification"
     return "plan"
