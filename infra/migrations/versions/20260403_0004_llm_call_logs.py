@@ -28,7 +28,7 @@ def upgrade() -> None:
         sa.Column("status", sa.String(length=16), nullable=False),
         sa.Column("error_message", sa.Text(), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
-        sa.ForeignKeyConstraint(["task_id"], ["task_runs.id"]),
+        sa.ForeignKeyConstraint(["task_id"], ["task_runs.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index("ix_llm_call_logs_task_id", "llm_call_logs", ["task_id"], unique=False)

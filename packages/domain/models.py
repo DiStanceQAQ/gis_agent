@@ -95,7 +95,11 @@ class LLMCallLogRecord(Base):
     __tablename__ = "llm_call_logs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    task_id: Mapped[str | None] = mapped_column(ForeignKey("task_runs.id"), nullable=True, index=True)
+    task_id: Mapped[str | None] = mapped_column(
+        ForeignKey("task_runs.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     phase: Mapped[str] = mapped_column(String(32))
     model_name: Mapped[str] = mapped_column(String(128))
     request_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
