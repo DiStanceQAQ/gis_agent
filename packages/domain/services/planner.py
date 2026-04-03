@@ -262,7 +262,7 @@ def _build_planner_repair_user_prompt(
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
-def _build_task_plan_with_llm(parsed: ParsedTaskSpec) -> TaskPlan:
+def _build_task_plan_with_llm(parsed: ParsedTaskSpec, *, task_id: str | None = None) -> TaskPlan:
     settings = get_settings()
     planner_retries = max(0, settings.llm_planner_schema_retries)
     client = LLMClient(settings)
@@ -278,6 +278,8 @@ def _build_task_plan_with_llm(parsed: ParsedTaskSpec) -> TaskPlan:
             user_prompt=user_prompt,
             model=settings.llm_model,
             temperature=settings.llm_temperature,
+            phase="plan",
+            task_id=task_id,
         )
         try:
             payload = LLMTaskPlan.model_validate(response.content_json)
@@ -297,13 +299,13 @@ def _build_task_plan_with_llm(parsed: ParsedTaskSpec) -> TaskPlan:
     return _build_planner_failure_plan(parsed, reason=last_error)
 
 
-def build_task_plan(parsed: ParsedTaskSpec) -> TaskPlan:
+def build_task_plan(parsed: ParsedTaskSpec, *, task_id: str | None = None) -> TaskPlan:
     settings = get_settings()
     if not settings.llm_planner_enabled:
         return _build_task_plan_legacy(parsed)
 
     try:
-        return _build_task_plan_with_llm(parsed)
+        return _build_task_plan_with_llm(parsed, task_id=task_id)
     except LLMClientError as exc:
         logger.warning("planner.llm_client_failed detail=%s", exc.detail)
         if settings.llm_planner_legacy_fallback:
@@ -322,11 +324,16 @@ def load_task_plan(plan_payload: dict | None) -> TaskPlan | None:
     return TaskPlan(**plan_payload)
 
 
-def ensure_task_plan(plan_payload: dict | None, parsed: ParsedTaskSpec) -> TaskPlan:
+def ensure_task_plan(
+    plan_payload: dict | None,
+    parsed: ParsedTaskSpec,
+    *,
+    task_id: str | None = None,
+) -> TaskPlan:
     plan = load_task_plan(plan_payload)
     if plan is not None:
         return plan
-    return build_task_plan(parsed)
+    return build_task_plan(parsed, task_id=task_id)
 
 
 def set_task_plan_status(plan_payload: dict | None, status: str) -> dict[str, object]:

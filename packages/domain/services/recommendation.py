@@ -345,6 +345,7 @@ def _build_recommendation_with_llm(
     *,
     user_priority: str,
     requested_dataset: str | None,
+    task_id: str | None = None,
 ) -> dict[str, Any]:
     settings = get_settings()
     recommendation_retries = max(0, settings.llm_recommendation_schema_retries)
@@ -365,6 +366,8 @@ def _build_recommendation_with_llm(
             user_prompt=user_prompt,
             model=settings.llm_model,
             temperature=settings.llm_temperature,
+            phase="recommend",
+            task_id=task_id,
         )
         try:
             payload = LLMRecommendation.model_validate(response.content_json)
@@ -394,6 +397,7 @@ def build_recommendation(
     *,
     user_priority: str,
     requested_dataset: str | None = None,
+    task_id: str | None = None,
 ) -> dict[str, Any]:
     candidate_list = list(candidates)
     settings = get_settings()
@@ -417,6 +421,7 @@ def build_recommendation(
             candidate_list,
             user_priority=user_priority,
             requested_dataset=requested_dataset,
+            task_id=task_id,
         )
     except LLMClientError as exc:
         logger.warning("recommendation.llm_client_failed detail=%s", exc.detail)

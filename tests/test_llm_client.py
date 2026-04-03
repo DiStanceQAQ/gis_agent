@@ -45,6 +45,7 @@ def test_build_prompt_hash_is_deterministic() -> None:
 
 
 def test_llm_client_chat_json_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("packages.domain.services.llm_client.write_llm_call_log", lambda **kwargs: None)
     _FakeClient.next_response = _FakeResponse(
         status_code=200,
         payload={
@@ -71,6 +72,39 @@ def test_llm_client_chat_json_success(monkeypatch: pytest.MonkeyPatch) -> None:
     assert response.usage.total_tokens == 20
 
 
+def test_llm_client_writes_success_log(monkeypatch: pytest.MonkeyPatch) -> None:
+    written: list[dict] = []
+
+    def _fake_write(**kwargs):  # noqa: ANN001
+        written.append(kwargs)
+
+    monkeypatch.setattr("packages.domain.services.llm_client.write_llm_call_log", _fake_write)
+    _FakeClient.next_response = _FakeResponse(
+        status_code=200,
+        payload={
+            "id": "chatcmpl_test",
+            "choices": [{"message": {"content": "{\"analysis_type\":\"NDVI\"}"}}],
+            "usage": {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20},
+        },
+        headers={"x-request-id": "req_test_123"},
+    )
+    monkeypatch.setattr("packages.domain.services.llm_client.httpx.Client", _FakeClient)
+
+    settings = Settings(
+        llm_api_key="test_key",
+        llm_base_url="https://example.com/v1",
+        llm_max_retries=0,
+    )
+    client = LLMClient(settings)
+
+    client.chat_json(system_prompt="sys", user_prompt="usr", phase="parse", task_id="task_123")
+
+    assert written
+    assert written[0]["phase"] == "parse"
+    assert written[0]["task_id"] == "task_123"
+    assert written[0]["status"] == "success"
+
+
 def test_llm_client_requires_api_key() -> None:
     settings = Settings(llm_api_key=None, llm_base_url="https://example.com/v1")
     client = LLMClient(settings)
@@ -82,6 +116,12 @@ def test_llm_client_requires_api_key() -> None:
 
 
 def test_llm_client_raises_on_server_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    written: list[dict] = []
+
+    def _fake_write(**kwargs):  # noqa: ANN001
+        written.append(kwargs)
+
+    monkeypatch.setattr("packages.domain.services.llm_client.write_llm_call_log", _fake_write)
     _FakeClient.next_response = _FakeResponse(
         status_code=500,
         payload={"error": {"message": "server_error"}},
@@ -96,6 +136,10 @@ def test_llm_client_raises_on_server_error(monkeypatch: pytest.MonkeyPatch) -> N
     client = LLMClient(settings)
 
     with pytest.raises(LLMClientError) as exc_info:
-        client.chat_json(system_prompt="system", user_prompt="user")
+        client.chat_json(system_prompt="system", user_prompt="user", phase="plan", task_id="task_456")
 
     assert exc_info.value.status_code == 500
+    assert written
+    assert written[0]["status"] == "failed"
+    assert written[0]["phase"] == "plan"
+    assert written[0]["task_id"] == "task_456"

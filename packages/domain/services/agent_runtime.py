@@ -132,7 +132,7 @@ def _build_baseline_pipeline_outputs(task: TaskRunRecord, bbox: list[float]) -> 
 
 
 def _tool_plan_task(db, task: TaskRunRecord, context: PipelineExecutionContext) -> dict[str, object]:
-    task.plan_json = ensure_task_plan(task.plan_json, context.parsed_spec).model_dump()
+    task.plan_json = ensure_task_plan(task.plan_json, context.parsed_spec, task_id=task.id).model_dump()
     db.flush()
     return {
         "plan_status": (task.plan_json or {}).get("status"),
@@ -181,6 +181,7 @@ def _tool_recommend_dataset(db, task: TaskRunRecord, context: PipelineExecutionC
         context.candidates,
         user_priority=context.parsed_spec.user_priority,
         requested_dataset=context.parsed_spec.requested_dataset,
+        task_id=task.id,
     )
     context.recommendation = recommendation
     if recommendation.get("error_code"):

@@ -498,6 +498,8 @@ def _parse_task_message_with_llm(message: str, *, has_upload: bool) -> ParsedTas
             user_prompt=user_prompt,
             model=settings.llm_model,
             temperature=settings.llm_temperature,
+            phase="parse",
+            task_id=None,
         )
         try:
             payload = LLMParsedSpec.model_validate(response.content_json)

@@ -264,7 +264,7 @@ def _build_task(
         task_spec.need_confirmation = True
         task_spec.raw_spec_json = safe_parsed.model_dump()
 
-    task_plan = build_task_plan(safe_parsed)
+    task_plan = build_task_plan(safe_parsed, task_id=task.id)
     if task_plan.error_code and task_plan.error_message:
         write_task_error(
             task,

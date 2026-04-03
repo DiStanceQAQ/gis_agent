@@ -11,6 +11,7 @@ import httpx
 
 from packages.domain.config import Settings, get_settings
 from packages.domain.logging import get_logger
+from packages.domain.services.llm_call_logs import write_llm_call_log
 
 logger = get_logger(__name__)
 
@@ -74,10 +75,17 @@ class LLMClient:
         model: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        phase: str = "unknown",
+        task_id: str | None = None,
     ) -> LLMResponse:
         resolved_model = model or self.settings.llm_model
         resolved_temperature = (
             self.settings.llm_temperature if temperature is None else temperature
+        )
+        prompt_hash = build_prompt_hash(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            model=resolved_model,
         )
         payload: dict[str, Any] = {
             "model": resolved_model,
@@ -94,6 +102,31 @@ class LLMClient:
         endpoint = f"{self.base_url}/chat/completions"
         attempt = 0
         max_retries = max(0, self.settings.llm_max_retries)
+
+        def _write_log(
+            *,
+            status: str,
+            latency_ms: int,
+            request_id: str | None = None,
+            input_tokens: int | None = None,
+            output_tokens: int | None = None,
+            total_tokens: int | None = None,
+            error_message: str | None = None,
+        ) -> None:
+            write_llm_call_log(
+                task_id=task_id,
+                phase=phase,
+                model_name=resolved_model,
+                request_id=request_id,
+                prompt_hash=prompt_hash,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=total_tokens,
+                latency_ms=latency_ms,
+                status=status,
+                error_message=error_message,
+            )
+
         while True:
             started = perf_counter()
             try:
@@ -106,8 +139,15 @@ class LLMClient:
                     attempt += 1
                     time.sleep(min(0.8 * attempt, 2.0))
                     continue
+                latency_ms = int((perf_counter() - started) * 1000)
+                message = "LLM request timed out."
+                _write_log(
+                    status="failed",
+                    latency_ms=latency_ms,
+                    error_message=message,
+                )
                 raise LLMClientError(
-                    "LLM request timed out.",
+                    message,
                     retryable=False,
                     detail={"attempt": attempt + 1, "timeout_seconds": self.settings.llm_timeout_seconds},
                 ) from exc
@@ -117,8 +157,15 @@ class LLMClient:
                     attempt += 1
                     time.sleep(min(0.8 * attempt, 2.0))
                     continue
+                latency_ms = int((perf_counter() - started) * 1000)
+                message = "LLM request failed due to network error."
+                _write_log(
+                    status="failed",
+                    latency_ms=latency_ms,
+                    error_message=message,
+                )
                 raise LLMClientError(
-                    "LLM request failed due to network error.",
+                    message,
                     retryable=False,
                     detail={"attempt": attempt + 1},
                 ) from exc
@@ -129,6 +176,14 @@ class LLMClient:
                     attempt += 1
                     time.sleep(min(0.8 * attempt, 2.0))
                     continue
+                request_id = response.headers.get("x-request-id")
+                message = f"LLM request returned status {response.status_code}."
+                _write_log(
+                    status="failed",
+                    latency_ms=latency_ms,
+                    request_id=request_id,
+                    error_message=f"{message} body={response.text[:800]}",
+                )
                 raise LLMClientError(
                     "LLM request returned an error response.",
                     status_code=response.status_code,
@@ -139,8 +194,16 @@ class LLMClient:
             try:
                 data = response.json()
             except ValueError as exc:
+                request_id = response.headers.get("x-request-id")
+                message = "LLM response is not valid JSON."
+                _write_log(
+                    status="failed",
+                    latency_ms=latency_ms,
+                    request_id=request_id,
+                    error_message=message,
+                )
                 raise LLMClientError(
-                    "LLM response is not valid JSON.",
+                    message,
                     status_code=response.status_code,
                     retryable=False,
                     detail={"body": response.text[:400]},
@@ -149,8 +212,16 @@ class LLMClient:
             choice = ((data.get("choices") or [{}])[0]).get("message") or {}
             content_text = str(choice.get("content") or "").strip()
             if not content_text:
+                request_id = response.headers.get("x-request-id") or data.get("id")
+                message = "LLM response is empty."
+                _write_log(
+                    status="failed",
+                    latency_ms=latency_ms,
+                    request_id=request_id,
+                    error_message=message,
+                )
                 raise LLMClientError(
-                    "LLM response is empty.",
+                    message,
                     status_code=response.status_code,
                     retryable=False,
                     detail={"body": json.dumps(data)[:500]},
@@ -158,8 +229,16 @@ class LLMClient:
             try:
                 content_json = json.loads(content_text)
             except json.JSONDecodeError as exc:
+                request_id = response.headers.get("x-request-id") or data.get("id")
+                message = "LLM response content is not valid JSON text."
+                _write_log(
+                    status="failed",
+                    latency_ms=latency_ms,
+                    request_id=request_id,
+                    error_message=message,
+                )
                 raise LLMClientError(
-                    "LLM response content is not valid JSON text.",
+                    message,
                     status_code=response.status_code,
                     retryable=False,
                     detail={"content_text": content_text[:500]},
@@ -172,6 +251,15 @@ class LLMClient:
                 total_tokens=usage_payload.get("total_tokens"),
             )
             request_id = response.headers.get("x-request-id") or data.get("id")
+            _write_log(
+                status="success",
+                latency_ms=latency_ms,
+                request_id=request_id,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                total_tokens=usage.total_tokens,
+                error_message=None,
+            )
             logger.info(
                 "llm.chat_json.ok model=%s latency_ms=%s prompt_tokens=%s completion_tokens=%s",
                 resolved_model,
