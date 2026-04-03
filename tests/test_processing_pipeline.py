@@ -7,8 +7,10 @@ from rasterio.transform import from_origin
 from packages.domain.services.processing_pipeline import run_processing_pipeline
 
 
-def _create_test_raster(path: Path) -> None:
-    data = np.arange(64, dtype="float32").reshape((8, 8))
+def _create_test_raster(path: Path, *, offset: float = 0.0, mask_first_pixel: bool = False) -> None:
+    data = np.arange(64, dtype="float32").reshape((8, 8)) + float(offset)
+    if mask_first_pixel:
+        data[0, 0] = -9999.0
     with rasterio.open(
         path,
         "w",
@@ -130,3 +132,77 @@ def test_run_processing_pipeline_supports_phase1_raster_ops(tmp_path) -> None:
     assert outputs["output_width"] is not None and outputs["output_width"] > 0
     assert outputs["output_height"] is not None and outputs["output_height"] > 0
     assert outputs["valid_pixel_ratio"] is not None and outputs["valid_pixel_ratio"] > 0
+
+
+def test_run_processing_pipeline_supports_phase2_terrain_and_mosaic_ops(tmp_path) -> None:
+    source_a = tmp_path / "source_a.tif"
+    source_b = tmp_path / "source_b.tif"
+    _create_test_raster(source_a, mask_first_pixel=True)
+    _create_test_raster(source_b, offset=100.0)
+
+    plan_nodes = [
+        {
+            "step_id": "clip_a",
+            "op_name": "raster.clip",
+            "depends_on": [],
+            "inputs": {},
+            "params": {"source_path": str(source_a)},
+            "outputs": {"raster": "r_a"},
+        },
+        {
+            "step_id": "clip_b",
+            "op_name": "raster.clip",
+            "depends_on": [],
+            "inputs": {},
+            "params": {"source_path": str(source_b)},
+            "outputs": {"raster": "r_b"},
+        },
+        {
+            "step_id": "mosaic1",
+            "op_name": "raster.mosaic",
+            "depends_on": ["clip_a", "clip_b"],
+            "inputs": {"rasters": ["r_a", "r_b"]},
+            "params": {},
+            "outputs": {"raster": "r_mosaic"},
+        },
+        {
+            "step_id": "slope1",
+            "op_name": "raster.terrain_slope",
+            "depends_on": ["mosaic1"],
+            "inputs": {"raster": "r_mosaic"},
+            "params": {},
+            "outputs": {"raster": "r_slope"},
+        },
+        {
+            "step_id": "aspect1",
+            "op_name": "raster.terrain_aspect",
+            "depends_on": ["mosaic1"],
+            "inputs": {"raster": "r_mosaic"},
+            "params": {},
+            "outputs": {"raster": "r_aspect"},
+        },
+        {
+            "step_id": "hillshade1",
+            "op_name": "raster.hillshade",
+            "depends_on": ["mosaic1"],
+            "inputs": {"raster": "r_mosaic"},
+            "params": {"azimuth": 315.0, "altitude": 45.0},
+            "outputs": {"raster": "r_hillshade"},
+        },
+        {
+            "step_id": "export_hillshade",
+            "op_name": "artifact.export",
+            "depends_on": ["hillshade1", "aspect1", "slope1"],
+            "inputs": {"primary": "r_hillshade"},
+            "params": {"formats": ["geotiff", "png_map"]},
+            "outputs": {"artifact": "a_hillshade"},
+        },
+    ]
+
+    outputs = run_processing_pipeline(task_id="task_phase2", plan_nodes=plan_nodes, working_dir=tmp_path)
+
+    artifact_types = {item["artifact_type"] for item in outputs["artifacts"]}
+    assert {"geotiff", "png_map"} <= artifact_types
+    assert outputs["output_crs"] == "EPSG:4326"
+    assert outputs["output_width"] is not None and outputs["output_width"] > 0
+    assert outputs["output_height"] is not None and outputs["output_height"] > 0

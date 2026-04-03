@@ -99,14 +99,66 @@ def _write_raster_copy(*, source_path: Path, output_path: Path) -> None:
             dst.write(data)
 
 
+def _valid_data_mask(data: np.ndarray, nodata: float | None) -> np.ndarray:
+    mask = np.isfinite(data)
+    if nodata is not None:
+        mask &= data != float(nodata)
+    return mask
+
+
+def _compute_slope_and_aspect(*, data: np.ndarray, x_res: float, y_res: float) -> tuple[np.ndarray, np.ndarray]:
+    safe_x = abs(float(x_res)) if x_res else 1.0
+    safe_y = abs(float(y_res)) if y_res else 1.0
+    grad_y, grad_x = np.gradient(data.astype("float32"), safe_y, safe_x)
+
+    slope_rad = np.arctan(np.hypot(grad_x, grad_y))
+    slope_deg = np.degrees(slope_rad).astype("float32")
+
+    aspect = np.degrees(np.arctan2(grad_x, -grad_y))
+    aspect = (aspect + 360.0) % 360.0
+    aspect = aspect.astype("float32")
+    return slope_deg, aspect
+
+
+def _resolve_raster_sources(
+    *,
+    node: dict[str, Any],
+    references: dict[str, str],
+    working_dir: Path,
+) -> list[Path]:
+    inputs = node.get("inputs") or {}
+    params = node.get("params") or {}
+    sources: list[Path] = []
+
+    input_rasters = inputs.get("rasters")
+    if isinstance(input_rasters, list):
+        for item in input_rasters:
+            ref = str(item)
+            candidate = Path(references[ref]) if ref in references else Path(ref)
+            sources.append(candidate)
+
+    source_paths = params.get("source_paths")
+    if isinstance(source_paths, list):
+        for item in source_paths:
+            sources.append(Path(str(item)))
+
+    if not sources:
+        sources.append(_resolve_raster_source(node=node, references=references, working_dir=working_dir))
+
+    resolved: list[Path] = []
+    for path in sources:
+        if not _is_supported_raster(path):
+            _create_default_raster(path)
+        resolved.append(path)
+    return resolved
+
+
 def _compute_raster_metrics(tif_path: str) -> dict[str, object]:
     try:
         with rasterio.open(tif_path) as dataset:
             data = dataset.read(1).astype("float32")
             nodata = dataset.nodata
-            mask = np.isfinite(data)
-            if nodata is not None:
-                mask &= data != float(nodata)
+            mask = _valid_data_mask(data, nodata)
             valid = data[mask]
 
             valid_ratio = float(mask.sum() / mask.size) if mask.size else None
@@ -253,9 +305,7 @@ def run_processing_pipeline(*, task_id: str, plan_nodes: list[dict[str, Any]], w
                 with rasterio.open(source_path) as src:
                     data = src.read(1).astype("float32")
                     nodata = src.nodata
-                    mask = np.isfinite(data)
-                    if nodata is not None:
-                        mask &= data != float(nodata)
+                    mask = _valid_data_mask(data, nodata)
                     values = data[mask]
 
                 stat_values: dict[str, float | None] = {}
@@ -278,6 +328,110 @@ def run_processing_pipeline(*, task_id: str, plan_nodes: list[dict[str, Any]], w
                     writer.writerow(["zone_id", *stats])
                     writer.writerow(["all", *[stat_values[stat] for stat in stats]])
                 references[table_ref] = str(output_path)
+            elif op_name == "raster.terrain_slope":
+                output_ref = str(outputs.get("raster") or step_id or "raster_terrain_slope")
+                output_path = working_dir / f"{step_id or output_ref}.tif"
+                source_path = _resolve_raster_source(node=node, references=references, working_dir=working_dir)
+                with rasterio.open(source_path) as src:
+                    data = src.read(1).astype("float32")
+                    x_res = float(src.res[0]) if src.res else 1.0
+                    y_res = float(src.res[1]) if src.res else 1.0
+                    slope, _ = _compute_slope_and_aspect(data=data, x_res=x_res, y_res=y_res)
+                    profile = src.profile.copy()
+                    profile.update(count=1, dtype="float32")
+                    with rasterio.open(output_path, "w", **profile) as dst:
+                        dst.write(slope, 1)
+                references[output_ref] = str(output_path)
+            elif op_name == "raster.terrain_aspect":
+                output_ref = str(outputs.get("raster") or step_id or "raster_terrain_aspect")
+                output_path = working_dir / f"{step_id or output_ref}.tif"
+                source_path = _resolve_raster_source(node=node, references=references, working_dir=working_dir)
+                with rasterio.open(source_path) as src:
+                    data = src.read(1).astype("float32")
+                    x_res = float(src.res[0]) if src.res else 1.0
+                    y_res = float(src.res[1]) if src.res else 1.0
+                    _, aspect = _compute_slope_and_aspect(data=data, x_res=x_res, y_res=y_res)
+                    profile = src.profile.copy()
+                    profile.update(count=1, dtype="float32")
+                    with rasterio.open(output_path, "w", **profile) as dst:
+                        dst.write(aspect, 1)
+                references[output_ref] = str(output_path)
+            elif op_name == "raster.hillshade":
+                output_ref = str(outputs.get("raster") or step_id or "raster_hillshade")
+                output_path = working_dir / f"{step_id or output_ref}.tif"
+                source_path = _resolve_raster_source(node=node, references=references, working_dir=working_dir)
+                altitude = float(params.get("altitude") or 45.0)
+                azimuth = float(params.get("azimuth") or 315.0)
+                with rasterio.open(source_path) as src:
+                    data = src.read(1).astype("float32")
+                    x_res = float(src.res[0]) if src.res else 1.0
+                    y_res = float(src.res[1]) if src.res else 1.0
+                    slope_deg, aspect_deg = _compute_slope_and_aspect(data=data, x_res=x_res, y_res=y_res)
+                    slope_rad = np.radians(slope_deg)
+                    aspect_rad = np.radians(aspect_deg)
+
+                    zenith_rad = np.radians(90.0 - altitude)
+                    azimuth_rad = np.radians(360.0 - azimuth + 90.0)
+                    shaded = np.cos(zenith_rad) * np.cos(slope_rad) + np.sin(zenith_rad) * np.sin(
+                        slope_rad
+                    ) * np.cos(azimuth_rad - aspect_rad)
+                    shaded = np.clip(shaded, 0.0, 1.0)
+                    hillshade = (255.0 * shaded).astype("uint8")
+
+                    profile = src.profile.copy()
+                    profile.update(count=1, dtype="uint8", nodata=0)
+                    with rasterio.open(output_path, "w", **profile) as dst:
+                        dst.write(hillshade, 1)
+                references[output_ref] = str(output_path)
+            elif op_name == "raster.mosaic":
+                output_ref = str(outputs.get("raster") or step_id or "raster_mosaic")
+                output_path = working_dir / f"{step_id or output_ref}.tif"
+                source_paths = _resolve_raster_sources(node=node, references=references, working_dir=working_dir)
+                if not source_paths:
+                    raise ValueError("raster.mosaic requires at least one source raster")
+
+                with rasterio.open(source_paths[0]) as base:
+                    profile = base.profile.copy()
+                    mosaic = base.read(1).astype("float32")
+                    mosaic_nodata = base.nodata
+                    mosaic_valid = _valid_data_mask(mosaic, mosaic_nodata)
+
+                    for src_path in source_paths[1:]:
+                        with rasterio.open(src_path) as src:
+                            src_band = src.read(1).astype("float32")
+                            if (
+                                src.width != base.width
+                                or src.height != base.height
+                                or src.crs != base.crs
+                                or src.transform != base.transform
+                            ):
+                                projected = np.empty((base.height, base.width), dtype="float32")
+                                reproject(
+                                    source=src_band,
+                                    destination=projected,
+                                    src_transform=src.transform,
+                                    src_crs=src.crs,
+                                    dst_transform=base.transform,
+                                    dst_crs=base.crs,
+                                    resampling=Resampling.bilinear,
+                                )
+                                candidate = projected
+                            else:
+                                candidate = src_band
+
+                            candidate_valid = _valid_data_mask(candidate, src.nodata)
+                            fill_mask = (~mosaic_valid) & candidate_valid
+                            mosaic[fill_mask] = candidate[fill_mask]
+                            mosaic_valid |= candidate_valid
+
+                    if mosaic_nodata is not None:
+                        mosaic[~mosaic_valid] = float(mosaic_nodata)
+
+                profile.update(count=1, dtype="float32")
+                with rasterio.open(output_path, "w", **profile) as dst:
+                    dst.write(mosaic.astype("float32"), 1)
+
+                references[output_ref] = str(output_path)
             elif op_name == "artifact.export":
                 source_ref = str(inputs.get("primary") or "")
                 source_path = references.get(source_ref)
