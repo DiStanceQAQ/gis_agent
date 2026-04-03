@@ -11,8 +11,9 @@ from rasterio.errors import RasterioIOError
 from rasterio.enums import Resampling
 from rasterio.features import rasterize
 from rasterio.transform import from_origin
-from rasterio.warp import calculate_default_transform, reproject
-from shapely.geometry import box
+from rasterio.warp import calculate_default_transform, reproject, transform_geom
+from shapely.geometry import GeometryCollection, box, mapping, shape
+from shapely.ops import unary_union
 
 
 def _pick_primary_raster_reference(references: dict[str, str]) -> str | None:
@@ -20,6 +21,13 @@ def _pick_primary_raster_reference(references: dict[str, str]) -> str | None:
         if ref.lower().endswith(".tif") or ref.lower().endswith(".tiff"):
             return ref
     return next(iter(references.values()), None)
+
+
+def _pick_primary_vector_reference(references: dict[str, str]) -> str | None:
+    for ref in references.values():
+        if ref.lower().endswith(".geojson") or ref.lower().endswith(".json"):
+            return ref
+    return None
 
 
 def _ensure_placeholder_artifacts(working_dir: Path, *, tif_path: str | None, png_path: str | None) -> tuple[str, str]:
@@ -156,55 +164,108 @@ def _resolve_raster_sources(
     return resolved
 
 
-def _load_geojson_geometries(path: Path) -> list[dict[str, Any]]:
+def _default_geometry() -> dict[str, Any]:
+    return box(116.0, 39.95, 116.03, 40.0).__geo_interface__
+
+
+def _load_geojson_geometries(path: Path) -> tuple[list[dict[str, Any]], str | None]:
     payload = json.loads(path.read_text(encoding="utf-8"))
+    crs_name = None
+    crs_payload = payload.get("crs")
+    if isinstance(crs_payload, dict):
+        props = crs_payload.get("properties")
+        if isinstance(props, dict):
+            crs_name_raw = props.get("name")
+            if isinstance(crs_name_raw, str) and crs_name_raw:
+                crs_name = crs_name_raw
+
     if payload.get("type") == "FeatureCollection":
         geometries = [
             feature.get("geometry")
             for feature in payload.get("features") or []
             if isinstance(feature, dict) and feature.get("geometry")
         ]
-        return [geometry for geometry in geometries if isinstance(geometry, dict)]
+        return [geometry for geometry in geometries if isinstance(geometry, dict)], crs_name
     if payload.get("type") == "Feature":
         geometry = payload.get("geometry")
-        return [geometry] if isinstance(geometry, dict) else []
+        return ([geometry] if isinstance(geometry, dict) else []), crs_name
     if payload.get("type"):
-        return [payload]
-    return []
+        return [payload], crs_name
+    return [], crs_name
 
 
-def _resolve_geometry_shapes(
+def _write_geojson(path: Path, geometries: list[dict[str, Any]], *, crs: str = "EPSG:4326") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {},
+                "geometry": geometry,
+            }
+            for geometry in geometries
+        ],
+        "crs": {"type": "name", "properties": {"name": crs}},
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def _resolve_vector_input(
+    raw_value: Any,
+    *,
+    references: dict[str, str],
+) -> tuple[list[dict[str, Any]], str | None]:
+    if raw_value is None:
+        return [], None
+    if isinstance(raw_value, dict) and raw_value.get("type"):
+        return [raw_value], None
+    if isinstance(raw_value, list):
+        geometries: list[dict[str, Any]] = []
+        crs_name: str | None = None
+        for item in raw_value:
+            item_geometries, item_crs = _resolve_vector_input(item, references=references)
+            geometries.extend(item_geometries)
+            if item_crs:
+                crs_name = item_crs
+        return geometries, crs_name
+
+    ref = str(raw_value)
+    candidate = Path(references[ref]) if ref in references else Path(ref)
+    if candidate.exists() and candidate.suffix.lower() in {".json", ".geojson"}:
+        return _load_geojson_geometries(candidate)
+    return [], None
+
+
+def _resolve_vector_geometries(
     *,
     node: dict[str, Any],
     references: dict[str, str],
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], str]:
     inputs = node.get("inputs") or {}
     params = node.get("params") or {}
     geometries: list[dict[str, Any]] = []
+    detected_crs: str | None = None
 
-    input_vector = inputs.get("vector")
-    if input_vector:
-        vector_ref = str(input_vector)
-        vector_path = Path(references[vector_ref]) if vector_ref in references else Path(vector_ref)
-        if vector_path.exists() and vector_path.suffix.lower() in {".json", ".geojson"}:
-            geometries.extend(_load_geojson_geometries(vector_path))
-
-    input_vectors = inputs.get("vectors")
-    if isinstance(input_vectors, list):
-        for vector_ref_raw in input_vectors:
-            vector_ref = str(vector_ref_raw)
-            vector_path = Path(references[vector_ref]) if vector_ref in references else Path(vector_ref)
-            if vector_path.exists() and vector_path.suffix.lower() in {".json", ".geojson"}:
-                geometries.extend(_load_geojson_geometries(vector_path))
+    for key in ("vector", "vectors"):
+        part, part_crs = _resolve_vector_input(inputs.get(key), references=references)
+        geometries.extend(part)
+        if part_crs:
+            detected_crs = part_crs
+    for key in ("source_path", "source_paths"):
+        part, part_crs = _resolve_vector_input(params.get(key), references=references)
+        geometries.extend(part)
+        if part_crs:
+            detected_crs = part_crs
 
     geometry = params.get("geometry")
-    if isinstance(geometry, dict):
+    if isinstance(geometry, dict) and geometry.get("type"):
         geometries.append(geometry)
 
     geometries_param = params.get("geometries")
     if isinstance(geometries_param, list):
         for item in geometries_param:
-            if isinstance(item, dict):
+            if isinstance(item, dict) and item.get("type"):
                 geometries.append(item)
 
     bbox = params.get("bbox")
@@ -213,8 +274,80 @@ def _resolve_geometry_shapes(
         geometries.append(box(minx, miny, maxx, maxy).__geo_interface__)
 
     if not geometries:
-        geometries.append(box(116.0, 39.95, 116.03, 40.0).__geo_interface__)
+        geometries = [_default_geometry()]
 
+    crs_name = str(params.get("source_crs") or detected_crs or "EPSG:4326")
+    return geometries, crs_name
+
+
+def _resolve_overlay_geometries(
+    *,
+    node: dict[str, Any],
+    references: dict[str, str],
+) -> tuple[list[dict[str, Any]], str]:
+    inputs = node.get("inputs") or {}
+    params = node.get("params") or {}
+    geometries: list[dict[str, Any]] = []
+    detected_crs: str | None = None
+
+    for key in ("overlay", "mask", "clip_vector", "right", "vector_b"):
+        part, part_crs = _resolve_vector_input(inputs.get(key), references=references)
+        geometries.extend(part)
+        if part_crs:
+            detected_crs = part_crs
+    for key in ("overlay_path", "overlay_paths"):
+        part, part_crs = _resolve_vector_input(params.get(key), references=references)
+        geometries.extend(part)
+        if part_crs:
+            detected_crs = part_crs
+
+    for key in ("overlay_geometry", "clip_geometry"):
+        geom = params.get(key)
+        if isinstance(geom, dict) and geom.get("type"):
+            geometries.append(geom)
+
+    for key in ("overlay_geometries", "clip_geometries"):
+        value = params.get(key)
+        if isinstance(value, list):
+            for geom in value:
+                if isinstance(geom, dict) and geom.get("type"):
+                    geometries.append(geom)
+
+    for key in ("overlay_bbox", "clip_bbox"):
+        bbox = params.get(key)
+        if isinstance(bbox, list) and len(bbox) == 4:
+            minx, miny, maxx, maxy = [float(item) for item in bbox]
+            geometries.append(box(minx, miny, maxx, maxy).__geo_interface__)
+
+    if not geometries:
+        geometries = [_default_geometry()]
+
+    crs_name = str(params.get("overlay_crs") or detected_crs or "EPSG:4326")
+    return geometries, crs_name
+
+
+def _geometry_dicts_to_shapes(geometries: list[dict[str, Any]]) -> list[Any]:
+    return [shape(geometry) for geometry in geometries if isinstance(geometry, dict)]
+
+
+def _shape_to_geometry_list(geom: Any) -> list[dict[str, Any]]:
+    if geom.is_empty:
+        return []
+    if isinstance(geom, GeometryCollection):
+        results: list[dict[str, Any]] = []
+        for part in geom.geoms:
+            if not part.is_empty:
+                results.append(mapping(part))
+        return results
+    return [mapping(geom)]
+
+
+def _resolve_geometry_shapes(
+    *,
+    node: dict[str, Any],
+    references: dict[str, str],
+) -> list[dict[str, Any]]:
+    geometries, _ = _resolve_vector_geometries(node=node, references=references)
     return geometries
 
 
@@ -634,6 +767,93 @@ def run_processing_pipeline(*, task_id: str, plan_nodes: list[dict[str, Any]], w
                 ) as dst:
                     dst.write(burned, 1)
                 references[output_ref] = str(output_path)
+            elif op_name == "vector.buffer":
+                output_ref = str(outputs.get("vector") or step_id or "vector_buffer")
+                output_path = working_dir / f"{step_id or output_ref}.geojson"
+                geometries, source_crs = _resolve_vector_geometries(node=node, references=references)
+                buffer_m = params.get("distance_m")
+                distance = float(params.get("distance") if params.get("distance") is not None else 0.0)
+                if buffer_m is not None:
+                    buffer_m_value = float(buffer_m)
+                    if source_crs.upper().endswith("4326"):
+                        distance = buffer_m_value / 111320.0
+                    else:
+                        distance = buffer_m_value
+                if distance <= 0:
+                    raise ValueError("vector.buffer requires a positive distance or distance_m")
+
+                source_shapes = _geometry_dicts_to_shapes(geometries)
+                buffered_geometries: list[dict[str, Any]] = []
+                for geom in source_shapes:
+                    buffered_geometries.extend(_shape_to_geometry_list(geom.buffer(distance)))
+                if not buffered_geometries:
+                    buffered_geometries = [_default_geometry()]
+                _write_geojson(output_path, buffered_geometries, crs=source_crs)
+                references[output_ref] = str(output_path)
+            elif op_name == "vector.clip":
+                output_ref = str(outputs.get("vector") or step_id or "vector_clip")
+                output_path = working_dir / f"{step_id or output_ref}.geojson"
+                primary_geometries, source_crs = _resolve_vector_geometries(node=node, references=references)
+                overlay_geometries, _ = _resolve_overlay_geometries(node=node, references=references)
+                primary_shapes = _geometry_dicts_to_shapes(primary_geometries)
+                overlay_shapes = _geometry_dicts_to_shapes(overlay_geometries)
+                overlay_union = unary_union(overlay_shapes)
+
+                clipped_geometries: list[dict[str, Any]] = []
+                for geom in primary_shapes:
+                    clipped_geometries.extend(_shape_to_geometry_list(geom.intersection(overlay_union)))
+                if not clipped_geometries:
+                    clipped_geometries = [_default_geometry()]
+                _write_geojson(output_path, clipped_geometries, crs=source_crs)
+                references[output_ref] = str(output_path)
+            elif op_name == "vector.intersection":
+                output_ref = str(outputs.get("vector") or step_id or "vector_intersection")
+                output_path = working_dir / f"{step_id or output_ref}.geojson"
+                left_geometries, source_crs = _resolve_vector_geometries(node=node, references=references)
+                right_geometries, _ = _resolve_overlay_geometries(node=node, references=references)
+                left_shapes = _geometry_dicts_to_shapes(left_geometries)
+                right_shapes = _geometry_dicts_to_shapes(right_geometries)
+
+                intersected_geometries: list[dict[str, Any]] = []
+                for left_shape in left_shapes:
+                    for right_shape in right_shapes:
+                        intersected_geometries.extend(
+                            _shape_to_geometry_list(left_shape.intersection(right_shape))
+                        )
+                if not intersected_geometries:
+                    intersected_geometries = [_default_geometry()]
+                _write_geojson(output_path, intersected_geometries, crs=source_crs)
+                references[output_ref] = str(output_path)
+            elif op_name == "vector.dissolve":
+                output_ref = str(outputs.get("vector") or step_id or "vector_dissolve")
+                output_path = working_dir / f"{step_id or output_ref}.geojson"
+                geometries, source_crs = _resolve_vector_geometries(node=node, references=references)
+                source_shapes = _geometry_dicts_to_shapes(geometries)
+                dissolved = unary_union(source_shapes)
+                dissolved_geometries = _shape_to_geometry_list(dissolved)
+                if not dissolved_geometries:
+                    dissolved_geometries = [_default_geometry()]
+                _write_geojson(output_path, dissolved_geometries, crs=source_crs)
+                references[output_ref] = str(output_path)
+            elif op_name == "vector.reproject":
+                output_ref = str(outputs.get("vector") or step_id or "vector_reproject")
+                output_path = working_dir / f"{step_id or output_ref}.geojson"
+                geometries, source_crs = _resolve_vector_geometries(node=node, references=references)
+                target_crs = str(params.get("target_crs") or "EPSG:4326")
+                source_override = params.get("source_crs")
+                source_crs_name = str(source_override or source_crs or "EPSG:4326")
+                reprojected_geometries: list[dict[str, Any]] = []
+                for geometry in geometries:
+                    if source_crs_name == target_crs:
+                        reprojected_geometries.append(geometry)
+                    else:
+                        reprojected_geometries.append(
+                            transform_geom(source_crs_name, target_crs, geometry)
+                        )
+                if not reprojected_geometries:
+                    reprojected_geometries = [_default_geometry()]
+                _write_geojson(output_path, reprojected_geometries, crs=target_crs)
+                references[output_ref] = str(output_path)
             elif op_name == "artifact.export":
                 source_ref = str(inputs.get("primary") or "")
                 source_path = references.get(source_ref)
@@ -641,6 +861,8 @@ def run_processing_pipeline(*, task_id: str, plan_nodes: list[dict[str, Any]], w
                     source_path = str(params.get("source_path"))
                 if source_path is None:
                     source_path = _pick_primary_raster_reference(references)
+                if source_path is None:
+                    source_path = _pick_primary_vector_reference(references)
                 if source_path is None:
                     raise ValueError("artifact.export requires a resolvable primary input reference")
 
@@ -677,6 +899,17 @@ def run_processing_pipeline(*, task_id: str, plan_nodes: list[dict[str, Any]], w
                                 writer.writerow(["source", str(source_path)])
                         artifacts.append({"artifact_type": "csv", "path": str(csv_path)})
                         produced_artifact_path = str(csv_path)
+                    elif fmt_name in {"geojson", "json"}:
+                        vector_source = Path(source_path)
+                        if vector_source.suffix.lower() not in {".geojson", ".json"}:
+                            picked_vector = _pick_primary_vector_reference(references)
+                            if picked_vector:
+                                vector_source = Path(picked_vector)
+                        if not vector_source.exists() or vector_source.suffix.lower() not in {".geojson", ".json"}:
+                            vector_source = working_dir / f"{step_id or 'export'}_vector.geojson"
+                            _write_geojson(vector_source, [_default_geometry()], crs="EPSG:4326")
+                        artifacts.append({"artifact_type": "geojson", "path": str(vector_source)})
+                        produced_artifact_path = str(vector_source)
                     else:
                         raise ValueError(f"Unsupported artifact export format: {fmt_name}")
 

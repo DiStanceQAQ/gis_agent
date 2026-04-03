@@ -10,6 +10,10 @@ def test_registry_contains_clip_and_export_specs() -> None:
     reclassify = require_operation_spec("raster.reclassify")
     mask = require_operation_spec("raster.mask")
     rasterize = require_operation_spec("raster.rasterize")
+    vector_clip = require_operation_spec("vector.clip")
+    vector_intersection = require_operation_spec("vector.intersection")
+    vector_dissolve = require_operation_spec("vector.dissolve")
+    vector_reproject = require_operation_spec("vector.reproject")
 
     assert clip.op_name == "raster.clip"
     assert "raster" in clip.input_types
@@ -19,4 +23,8 @@ def test_registry_contains_clip_and_export_specs() -> None:
     assert "rules" in reclassify.default_params
     assert mask.default_params["invert"] is False
     assert rasterize.default_params["burn_value"] == 1.0
+    assert "clip_vector" in vector_clip.input_types
+    assert "overlay" in vector_intersection.input_types
+    assert vector_dissolve.output_types["vector"] == "vector"
+    assert vector_reproject.default_params["target_crs"] == "EPSG:4326"
     assert export.op_name == "artifact.export"

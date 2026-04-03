@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import json
 import numpy as np
 import rasterio
 from rasterio.transform import from_origin
@@ -24,6 +25,22 @@ def _create_test_raster(path: Path, *, offset: float = 0.0, mask_first_pixel: bo
         nodata=-9999.0,
     ) as dataset:
         dataset.write(data, 1)
+
+
+def _write_test_geojson(path: Path, polygons: list[list[list[float]]]) -> None:
+    payload = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {},
+                "geometry": {"type": "Polygon", "coordinates": [polygon]},
+            }
+            for polygon in polygons
+        ],
+        "crs": {"type": "name", "properties": {"name": "EPSG:4326"}},
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
 def test_run_processing_pipeline_executes_clip_then_export(tmp_path) -> None:
@@ -278,3 +295,106 @@ def test_run_processing_pipeline_supports_phase3_reclassify_mask_rasterize(tmp_p
     assert outputs["output_width"] is not None and outputs["output_width"] > 0
     assert outputs["output_height"] is not None and outputs["output_height"] > 0
     assert outputs["valid_pixel_ratio"] is not None and outputs["valid_pixel_ratio"] > 0
+
+
+def test_run_processing_pipeline_supports_phase1_vector_ops(tmp_path) -> None:
+    source_raster = tmp_path / "source_vector.tif"
+    _create_test_raster(source_raster)
+
+    source_vector_a = tmp_path / "source_a.geojson"
+    source_vector_b = tmp_path / "source_b.geojson"
+    _write_test_geojson(
+        source_vector_a,
+        [[[116.0, 39.95], [116.02, 39.95], [116.02, 39.99], [116.0, 39.99], [116.0, 39.95]]],
+    )
+    _write_test_geojson(
+        source_vector_b,
+        [[[116.01, 39.96], [116.03, 39.96], [116.03, 40.0], [116.01, 40.0], [116.01, 39.96]]],
+    )
+
+    plan_nodes = [
+        {
+            "step_id": "rclip",
+            "op_name": "raster.clip",
+            "depends_on": [],
+            "inputs": {},
+            "params": {"source_path": str(source_raster)},
+            "outputs": {"raster": "r_clip"},
+        },
+        {
+            "step_id": "vbuffer",
+            "op_name": "vector.buffer",
+            "depends_on": [],
+            "inputs": {},
+            "params": {"source_path": str(source_vector_a), "distance_m": 100},
+            "outputs": {"vector": "v_buffer"},
+        },
+        {
+            "step_id": "vclip",
+            "op_name": "vector.clip",
+            "depends_on": ["vbuffer"],
+            "inputs": {"vector": "v_buffer"},
+            "params": {"clip_bbox": [116.005, 39.955, 116.025, 39.995]},
+            "outputs": {"vector": "v_clip"},
+        },
+        {
+            "step_id": "vintersection",
+            "op_name": "vector.intersection",
+            "depends_on": ["vclip"],
+            "inputs": {"vector": "v_clip", "overlay": str(source_vector_b)},
+            "params": {},
+            "outputs": {"vector": "v_inter"},
+        },
+        {
+            "step_id": "vdissolve",
+            "op_name": "vector.dissolve",
+            "depends_on": ["vintersection"],
+            "inputs": {"vector": "v_inter"},
+            "params": {},
+            "outputs": {"vector": "v_diss"},
+        },
+        {
+            "step_id": "vreproject",
+            "op_name": "vector.reproject",
+            "depends_on": ["vdissolve"],
+            "inputs": {"vector": "v_diss"},
+            "params": {"target_crs": "EPSG:3857"},
+            "outputs": {"vector": "v_proj"},
+        },
+        {
+            "step_id": "rmask",
+            "op_name": "raster.mask",
+            "depends_on": ["rclip", "vdissolve"],
+            "inputs": {"raster": "r_clip", "vector": "v_diss"},
+            "params": {"nodata": -9999},
+            "outputs": {"raster": "r_mask"},
+        },
+        {
+            "step_id": "vexport",
+            "op_name": "artifact.export",
+            "depends_on": ["vreproject"],
+            "inputs": {"primary": "v_proj"},
+            "params": {"formats": ["geojson"]},
+            "outputs": {"artifact": "a_vector"},
+        },
+        {
+            "step_id": "rexport",
+            "op_name": "artifact.export",
+            "depends_on": ["rmask"],
+            "inputs": {"primary": "r_mask"},
+            "params": {"formats": ["geotiff"]},
+            "outputs": {"artifact": "a_raster"},
+        },
+    ]
+
+    outputs = run_processing_pipeline(task_id="task_vector_phase1", plan_nodes=plan_nodes, working_dir=tmp_path)
+
+    artifact_types = {item["artifact_type"] for item in outputs["artifacts"]}
+    assert {"geojson", "geotiff"} <= artifact_types
+    geojson_paths = [
+        Path(item["path"]) for item in outputs["artifacts"] if item["artifact_type"] == "geojson"
+    ]
+    assert geojson_paths
+    exported_vector = json.loads(geojson_paths[0].read_text(encoding="utf-8"))
+    assert exported_vector["type"] == "FeatureCollection"
+    assert len(exported_vector["features"]) >= 1
