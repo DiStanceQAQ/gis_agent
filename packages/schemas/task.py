@@ -6,6 +6,7 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from packages.schemas.analysis import AnalysisType, normalize_analysis_type, normalize_operation_params
+from packages.schemas.operation_plan import OperationPlan
 
 
 class ParsedTaskSpec(BaseModel):
@@ -124,6 +125,7 @@ class TaskDetailResponse(BaseModel):
     created_at: datetime | None = None
     task_spec: dict[str, Any] | None = None
     task_plan: TaskPlanResponse | None = None
+    operation_plan: OperationPlan | None = None
     recommendation: RecommendationResponse | None = None
     candidates: list[CandidateResponse] = Field(default_factory=list)
     steps: list[TaskStepResponse] = Field(default_factory=list)
@@ -143,3 +145,11 @@ class TaskDetailResponse(BaseModel):
 
 class RerunTaskRequest(BaseModel):
     override: dict[str, Any] | None = None
+
+
+class TaskPlanPatchRequest(BaseModel):
+    operation_plan: OperationPlan
+
+
+class TaskPlanApproveRequest(BaseModel):
+    approved_version: int
