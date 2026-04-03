@@ -537,7 +537,7 @@ TOOL_REGISTRY = {
 }
 
 
-def run_task_runtime_legacy(task_id: str) -> None:
+def _run_task_runtime_legacy(task_id: str) -> None:
     db = SessionLocal()
     start = perf_counter()
     try:

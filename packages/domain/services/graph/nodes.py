@@ -62,9 +62,9 @@ def plan_task_node(state: GISAgentState) -> GISAgentState:
 
 def execute_task_node(state: GISAgentState) -> GISAgentState:
     task_id = state["task_id"]
-    from packages.domain.services.agent_runtime import run_task_runtime_legacy
+    from packages.domain.services.agent_runtime import _run_task_runtime_legacy
 
-    run_task_runtime_legacy(task_id)
+    _run_task_runtime_legacy(task_id)
 
     with SessionLocal() as db:
         task = db.get(TaskRunRecord, task_id)

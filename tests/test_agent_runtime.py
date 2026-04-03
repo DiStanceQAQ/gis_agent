@@ -6,10 +6,12 @@ import pytest
 
 from packages.domain.config import get_settings
 from packages.domain.errors import ErrorCode
+from packages.domain.services import agent_runtime
 from packages.domain.services.agent_runtime import (
     AgentRuntimeError,
     _check_runtime_limits,
     _map_runtime_error,
+    run_task_runtime,
 )
 
 
@@ -57,3 +59,20 @@ def test_map_runtime_error_preserves_unknown_tool_code() -> None:
 
     assert error_code == ErrorCode.TASK_RUNTIME_UNKNOWN_TOOL
     assert detail["step_name"] == "foo"
+
+
+def test_run_task_runtime_delegates_to_graph_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: list[str] = []
+
+    def _fake_run(task_id: str) -> None:
+        called.append(task_id)
+
+    monkeypatch.setattr(agent_runtime, "run_task_graph", _fake_run)
+
+    run_task_runtime("task_123")
+
+    assert called == ["task_123"]
+
+
+def test_agent_runtime_no_longer_exposes_legacy_runtime_entry() -> None:
+    assert not hasattr(agent_runtime, "run_task_runtime_legacy")
