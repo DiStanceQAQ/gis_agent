@@ -344,6 +344,78 @@
     }
   },
   {
+    "id": "rerun_analysis_ndwi",
+    "category": "followup",
+    "scenario": "rerun_task",
+    "initial_message": "bbox(116.1,39.8,116.5,40.1) 在 2024-06-01 到 2024-06-30 的 NDVI",
+    "override": {
+      "analysis_type": "NDWI",
+      "operation_params": {
+        "index": "ndwi"
+      }
+    },
+    "run_pipeline": true,
+    "expected": {
+      "status": "success",
+      "parent_task": "initial",
+      "task_spec": {
+        "analysis_type": "NDWI",
+        "operation_params_contains": {
+          "index": "ndwi"
+        }
+      },
+      "event_types": ["task_completed"]
+    }
+  },
+  {
+    "id": "rerun_analysis_slope_aspect",
+    "category": "followup",
+    "scenario": "rerun_task",
+    "initial_message": "bbox(116.1,39.8,116.5,40.1) 在 2024-06-01 到 2024-06-30 的 NDVI",
+    "override": {
+      "analysis_type": "slope_aspect",
+      "operation_params": {
+        "terrain_product": "aspect"
+      }
+    },
+    "run_pipeline": true,
+    "expected": {
+      "status": "success",
+      "parent_task": "initial",
+      "task_spec": {
+        "analysis_type": "SLOPE_ASPECT",
+        "operation_params_contains": {
+          "product": "aspect"
+        }
+      },
+      "event_types": ["task_completed"]
+    }
+  },
+  {
+    "id": "rerun_analysis_buffer",
+    "category": "followup",
+    "scenario": "rerun_task",
+    "initial_message": "bbox(116.1,39.8,116.5,40.1) 在 2024-06-01 到 2024-06-30 的 NDVI",
+    "override": {
+      "analysis_type": "buffer",
+      "operation_params": {
+        "distance": 300
+      }
+    },
+    "run_pipeline": true,
+    "expected": {
+      "status": "success",
+      "parent_task": "initial",
+      "task_spec": {
+        "analysis_type": "BUFFER",
+        "operation_params_contains": {
+          "distance_m": 300.0
+        }
+      },
+      "event_types": ["task_completed"]
+    }
+  },
+  {
     "id": "success_methods_text_request",
     "category": "export",
     "scenario": "create_and_run",

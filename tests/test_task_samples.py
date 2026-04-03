@@ -235,12 +235,20 @@ def _assert_expected(result: dict[str, Any]) -> None:
             assert detail_task_spec.get("aoi_input") == task_spec["aoi_input"]
         if "aoi_source_type" in task_spec:
             assert detail_task_spec.get("aoi_source_type") == task_spec["aoi_source_type"]
+        if "analysis_type" in task_spec:
+            assert detail_task_spec.get("analysis_type") == task_spec["analysis_type"]
         if "requested_dataset" in task_spec:
             assert detail_task_spec.get("requested_dataset") == task_spec["requested_dataset"]
         if "user_priority" in task_spec:
             assert detail_task_spec.get("user_priority") == task_spec["user_priority"]
         if "time_range" in task_spec:
             assert detail_task_spec.get("time_range") == task_spec["time_range"]
+        if "operation_params" in task_spec:
+            assert detail_task_spec.get("operation_params") == task_spec["operation_params"]
+        if "operation_params_contains" in task_spec:
+            actual_params = detail_task_spec.get("operation_params") or {}
+            for param_key, param_value in task_spec["operation_params_contains"].items():
+                assert actual_params.get(param_key) == param_value
         for output in task_spec.get("preferred_output_contains", []):
             assert output in (detail_task_spec.get("preferred_output") or [])
         for missing_field in task_spec.get("missing_fields_contains", []):
@@ -320,9 +328,20 @@ def sample_task_runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 def test_task_sample_suite_has_required_coverage() -> None:
     suite = _load_task_suite()
     categories = {sample["category"] for sample in suite} | set(LEGACY_SAMPLE_FILES.values())
+    analysis_types: set[str] = set()
+    for sample in suite:
+        expected_task_spec = (sample.get("expected") or {}).get("task_spec") or {}
+        if expected_task_spec.get("analysis_type"):
+            analysis_types.add(str(expected_task_spec["analysis_type"]))
+
+        override = sample.get("override") or {}
+        raw_analysis_type = override.get("analysis_type")
+        if raw_analysis_type:
+            analysis_types.add(str(raw_analysis_type).strip().upper().replace("-", "_"))
 
     assert len(suite) + len(LEGACY_SAMPLE_FILES) >= 20
     assert {"success", "failure", "fallback", "followup", "export"}.issubset(categories)
+    assert {"NDWI", "SLOPE_ASPECT", "BUFFER"}.issubset(analysis_types)
 
 
 @pytest.mark.parametrize("sample", _load_task_suite(), ids=lambda sample: sample["id"])
