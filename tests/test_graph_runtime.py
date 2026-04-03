@@ -1,6 +1,7 @@
 import inspect
 
 from packages.domain.services.graph import nodes as graph_nodes
+from packages.domain.services.graph import runtime_helpers
 from packages.domain.errors import ErrorCode
 from packages.domain.services.graph.builder import build_task_graph
 from packages.domain.services.graph.routes import (
@@ -49,3 +50,9 @@ def test_graph_nodes_do_not_depend_on_agent_runtime_private_entry() -> None:
     source = inspect.getsource(graph_nodes)
     assert "_run_task_runtime_legacy" not in source
     assert "agent_runtime" not in source
+
+
+def test_runtime_helpers_do_not_depend_on_agent_runtime_module() -> None:
+    source = inspect.getsource(runtime_helpers)
+    assert "services import agent_runtime" not in source
+    assert "services.agent_runtime" not in source

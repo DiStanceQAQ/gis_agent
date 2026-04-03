@@ -24,6 +24,7 @@ from packages.domain.models import (
 )
 from packages.domain.services import agent_runtime, orchestrator
 from packages.domain.services.catalog import CatalogCandidate
+from packages.domain.services.graph import runtime_helpers
 from packages.domain.services.graph.runner import run_task_graph
 from packages.domain.services.planner import PLAN_STATUS_NEEDS_CLARIFICATION, TaskPlan
 from packages.schemas.message import MessageCreateRequest
@@ -130,29 +131,32 @@ def _patch_sample_environment(
     scenario: str,
 ) -> None:
     monkeypatch.setattr(orchestrator, "_queue_or_run", lambda task_id: None)
-    monkeypatch.setattr(
-        agent_runtime,
-        "build_artifact_path",
-        lambda task_id, filename: str(tmp_path / f"{task_id}_{filename}"),
-    )
-    monkeypatch.setattr(agent_runtime, "search_candidates", lambda spec, aoi: _fake_candidates())
-    monkeypatch.setattr(
-        agent_runtime,
-        "get_settings",
-        lambda: SimpleNamespace(real_pipeline_enabled=False),
-    )
+    for module in (agent_runtime, runtime_helpers):
+        monkeypatch.setattr(
+            module,
+            "build_artifact_path",
+            lambda task_id, filename: str(tmp_path / f"{task_id}_{filename}"),
+        )
+        monkeypatch.setattr(module, "search_candidates", lambda spec, aoi: _fake_candidates())
+        monkeypatch.setattr(
+            module,
+            "get_settings",
+            lambda: SimpleNamespace(real_pipeline_enabled=False),
+        )
 
     if scenario == "real_pipeline_to_baseline_fallback":
-        monkeypatch.setattr(
-            agent_runtime,
-            "get_settings",
-            lambda: SimpleNamespace(real_pipeline_enabled=True),
-        )
+        for module in (agent_runtime, runtime_helpers):
+            monkeypatch.setattr(
+                module,
+                "get_settings",
+                lambda: SimpleNamespace(real_pipeline_enabled=True),
+            )
 
         def _raise_real_pipeline(**_: object) -> object:
             raise RuntimeError("simulated real pipeline failure")
 
         monkeypatch.setattr(agent_runtime, "run_real_ndvi_pipeline", _raise_real_pipeline)
+        monkeypatch.setattr(runtime_helpers, "run_real_ndvi_pipeline", _raise_real_pipeline)
     elif scenario == "generate_outputs_failure":
 
         def _raise_persist_artifact_file(
@@ -166,6 +170,7 @@ def _patch_sample_environment(
             raise RuntimeError("simulated artifact metadata failure")
 
         monkeypatch.setattr(agent_runtime, "persist_artifact_file", _raise_persist_artifact_file)
+        monkeypatch.setattr(runtime_helpers, "persist_artifact_file", _raise_persist_artifact_file)
 
 
 def _create_task(db, session_id: str, message: str) -> object:
@@ -452,20 +457,21 @@ def test_runtime_writes_back_recommendation_schema_error_code(
     sample_task_runner,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        agent_runtime,
-        "build_recommendation",
-        lambda *args, **kwargs: {  # noqa: ARG005
-            "primary_dataset": "unknown",
-            "backup_dataset": None,
-            "scores": {},
-            "reason": "推荐阶段失败（schema_validation_failed）",
-            "risk_note": "当前无法生成可靠推荐结果。",
-            "confidence": None,
-            "error_code": ErrorCode.TASK_LLM_RECOMMENDATION_SCHEMA_VALIDATION_FAILED,
-            "error_message": "Recommendation LLM 输出未通过 schema 校验。",
-        },
-    )
+    for module in (agent_runtime, runtime_helpers):
+        monkeypatch.setattr(
+            module,
+            "build_recommendation",
+            lambda *args, **kwargs: {  # noqa: ARG005
+                "primary_dataset": "unknown",
+                "backup_dataset": None,
+                "scores": {},
+                "reason": "推荐阶段失败（schema_validation_failed）",
+                "risk_note": "当前无法生成可靠推荐结果。",
+                "confidence": None,
+                "error_code": ErrorCode.TASK_LLM_RECOMMENDATION_SCHEMA_VALIDATION_FAILED,
+                "error_message": "Recommendation LLM 输出未通过 schema 校验。",
+            },
+        )
 
     sample = next(sample for sample in _load_task_suite() if sample["id"] == "success_bbox_geotiff")
     sample = {**sample, "run_pipeline": True}
