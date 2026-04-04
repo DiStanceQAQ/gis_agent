@@ -15,6 +15,7 @@ from packages.domain.models import (
     AOIRecord,
     ArtifactRecord,
     DatasetCandidateRecord,
+    LLMCallLogRecord,
     MessageRecord,
     SessionRecord,
     TaskEventRecord,
@@ -679,3 +680,21 @@ def test_audit_query_includes_failed_step_and_error_code(sample_task_runner) -> 
     assert audit_view["task_failed_detail"] is not None
     assert audit_view["task_failed_detail"]["failed_step"] == "generate_outputs"
     assert audit_view["task_failed_detail"]["error_code"] == ErrorCode.TASK_RUNTIME_FAILED
+
+
+def test_main_flow_persists_llm_phase_logs_with_task_binding(sample_task_runner) -> None:
+    sample = next(sample for sample in _load_task_suite() if sample["id"] == "approval_edit_plan_then_execute")
+    result = sample_task_runner(sample)
+    task_id = result["task"]["task_id"]
+
+    with SessionLocal() as db:
+        logs = (
+            db.query(LLMCallLogRecord)
+            .filter(LLMCallLogRecord.task_id == task_id)
+            .order_by(LLMCallLogRecord.id.asc())
+            .all()
+        )
+
+    phases = {log.phase for log in logs}
+    assert {"parse", "plan", "recommend", "react_step"} <= phases
+    assert all(log.task_id == task_id for log in logs)

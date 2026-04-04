@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError
+from sqlalchemy.orm import Session
 
 from packages.domain.config import get_settings
 from packages.domain.errors import ErrorCode
@@ -262,7 +263,12 @@ def _build_planner_repair_user_prompt(
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
-def _build_task_plan_with_llm(parsed: ParsedTaskSpec, *, task_id: str | None = None) -> TaskPlan:
+def _build_task_plan_with_llm(
+    parsed: ParsedTaskSpec,
+    *,
+    task_id: str | None = None,
+    db_session: Session | None = None,
+) -> TaskPlan:
     settings = get_settings()
     planner_retries = max(0, settings.llm_planner_schema_retries)
     client = LLMClient(settings)
@@ -280,6 +286,7 @@ def _build_task_plan_with_llm(parsed: ParsedTaskSpec, *, task_id: str | None = N
             temperature=settings.llm_temperature,
             phase="plan",
             task_id=task_id,
+            db_session=db_session,
         )
         try:
             payload = LLMTaskPlan.model_validate(response.content_json)
@@ -299,13 +306,22 @@ def _build_task_plan_with_llm(parsed: ParsedTaskSpec, *, task_id: str | None = N
     return _build_planner_failure_plan(parsed, reason=last_error)
 
 
-def build_task_plan(parsed: ParsedTaskSpec, *, task_id: str | None = None) -> TaskPlan:
+def build_task_plan(
+    parsed: ParsedTaskSpec,
+    *,
+    task_id: str | None = None,
+    db_session: Session | None = None,
+) -> TaskPlan:
     settings = get_settings()
     if not settings.llm_planner_enabled:
         return _build_task_plan_legacy(parsed)
 
     try:
-        return _build_task_plan_with_llm(parsed, task_id=task_id)
+        return _build_task_plan_with_llm(
+            parsed,
+            task_id=task_id,
+            db_session=db_session,
+        )
     except LLMClientError as exc:
         logger.warning("planner.llm_client_failed detail=%s", exc.detail)
         if settings.llm_planner_legacy_fallback:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
@@ -17,6 +18,7 @@ from packages.domain.services.catalog import (
     search_candidates,
 )
 from packages.domain.services.explanation import ExplanationContext, build_methods_text, build_summary_text
+from packages.domain.services.llm_call_logs import write_llm_call_log
 from packages.domain.services.processing_pipeline import run_processing_pipeline
 from packages.domain.services.planner import (
     ensure_task_plan,
@@ -492,6 +494,33 @@ def _build_step_react_observation(detail: dict[str, object]) -> dict[str, object
     }
 
 
+def _write_react_step_log(
+    *,
+    db: Session,
+    task: TaskRunRecord,
+    step_name: str,
+    tool_name: str,
+    status: str,
+    latency_ms: int,
+    error_message: str | None = None,
+) -> None:
+    prompt_hash = hashlib.sha256(f"{step_name}:{tool_name}".encode("utf-8")).hexdigest()
+    write_llm_call_log(
+        task_id=task.id,
+        phase="react_step",
+        model_name="deterministic_step_react",
+        request_id=None,
+        prompt_hash=prompt_hash,
+        input_tokens=None,
+        output_tokens=None,
+        total_tokens=None,
+        latency_ms=max(0, latency_ms),
+        status=status,
+        error_message=error_message,
+        db_session=db,
+    )
+
+
 def execute_tool_step(
     db: Session,
     task: TaskRunRecord,
@@ -527,11 +556,28 @@ def execute_tool_step(
             context=context,
         )
     except ValidationError as exc:
+        _write_react_step_log(
+            db=db,
+            task=task,
+            step_name=step_name,
+            tool_name=tool_name,
+            status="failed",
+            latency_ms=int((perf_counter() - step_react_started) * 1000),
+            error_message="step_react_schema_validation_failed",
+        )
         raise AgentRuntimeError(
             error_code=ErrorCode.TASK_LLM_REACT_SCHEMA_VALIDATION_FAILED,
             message="Step ReAct decision failed schema validation.",
             detail={"validation_errors": exc.errors()},
         ) from exc
+    _write_react_step_log(
+        db=db,
+        task=task,
+        step_name=step_name,
+        tool_name=tool_name,
+        status="success",
+        latency_ms=int((perf_counter() - step_react_started) * 1000),
+    )
     if step_react_timeout_seconds > 0 and (perf_counter() - step_react_started) > step_react_timeout_seconds:
         raise AgentRuntimeError(
             error_code=ErrorCode.TASK_RUNTIME_TIMEOUT,

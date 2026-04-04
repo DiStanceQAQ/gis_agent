@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
+from sqlalchemy.orm import Session
 
 from packages.domain.config import get_settings
 from packages.domain.errors import ErrorCode
@@ -482,7 +483,13 @@ def _normalize_llm_parsed_spec(payload: LLMParsedSpec, *, has_upload: bool) -> P
     )
 
 
-def _parse_task_message_with_llm(message: str, *, has_upload: bool) -> ParsedTaskSpec:
+def _parse_task_message_with_llm(
+    message: str,
+    *,
+    has_upload: bool,
+    task_id: str | None = None,
+    db_session: Session | None = None,
+) -> ParsedTaskSpec:
     settings = get_settings()
     parser_retries = max(0, settings.llm_parser_schema_retries)
     client = LLMClient(settings)
@@ -499,7 +506,8 @@ def _parse_task_message_with_llm(message: str, *, has_upload: bool) -> ParsedTas
             model=settings.llm_model,
             temperature=settings.llm_temperature,
             phase="parse",
-            task_id=None,
+            task_id=task_id,
+            db_session=db_session,
         )
         try:
             payload = LLMParsedSpec.model_validate(response.content_json)
@@ -518,13 +526,24 @@ def _parse_task_message_with_llm(message: str, *, has_upload: bool) -> ParsedTas
     return _build_parser_failure_spec(message, has_upload=has_upload, reason=last_error)
 
 
-def parse_task_message(message: str, has_upload: bool) -> ParsedTaskSpec:
+def parse_task_message(
+    message: str,
+    has_upload: bool,
+    *,
+    task_id: str | None = None,
+    db_session: Session | None = None,
+) -> ParsedTaskSpec:
     settings = get_settings()
     if not settings.llm_parser_enabled:
         return _parse_task_message_legacy(message, has_upload)
 
     try:
-        return _parse_task_message_with_llm(message, has_upload=has_upload)
+        return _parse_task_message_with_llm(
+            message,
+            has_upload=has_upload,
+            task_id=task_id,
+            db_session=db_session,
+        )
     except LLMClientError as exc:
         logger.warning("parser.llm_client_failed detail=%s", exc.detail)
         if settings.llm_parser_legacy_fallback:

@@ -213,6 +213,7 @@ def _build_initial_operation_plan(task_plan: TaskPlanResponse) -> OperationPlan:
 def _load_latest_session_task(db: Session, session_id: str) -> TaskRunRecord | None:
     return (
         db.query(TaskRunRecord)
+        .join(TaskSpecRecord, TaskSpecRecord.task_id == TaskRunRecord.id)
         .options(
             selectinload(TaskRunRecord.task_spec),
             selectinload(TaskRunRecord.aoi),
@@ -273,22 +274,31 @@ def _build_task(
     parent_task_id: str | None = None,
     inherited_aoi: AOIRecord | None = None,
     require_approval: bool = False,
+    existing_task: TaskRunRecord | None = None,
 ) -> TaskRunRecord:
     safe_parsed = parsed
     upload_slots = classify_uploaded_inputs(uploaded_files or [])
     parser_error_code, parser_error_message = extract_parser_failure_error(safe_parsed)
-    task = TaskRunRecord(
-        id=make_id("task"),
-        session_id=session_id,
-        parent_task_id=parent_task_id,
-        user_message_id=user_message_id,
-        status=TASK_STATUS_WAITING_CLARIFICATION if safe_parsed.need_confirmation else TASK_STATUS_QUEUED,
-        current_step="parse_task",
-        analysis_type=safe_parsed.analysis_type,
-        requested_time_range=safe_parsed.time_range,
-    )
-    db.add(task)
-    db.flush()
+    if existing_task is None:
+        task = TaskRunRecord(
+            id=make_id("task"),
+            session_id=session_id,
+            parent_task_id=parent_task_id,
+            user_message_id=user_message_id,
+            status=TASK_STATUS_WAITING_CLARIFICATION if safe_parsed.need_confirmation else TASK_STATUS_QUEUED,
+            current_step="parse_task",
+            analysis_type=safe_parsed.analysis_type,
+            requested_time_range=safe_parsed.time_range,
+        )
+        db.add(task)
+        db.flush()
+    else:
+        task = existing_task
+        task.parent_task_id = parent_task_id
+        task.status = TASK_STATUS_WAITING_CLARIFICATION if safe_parsed.need_confirmation else TASK_STATUS_QUEUED
+        task.current_step = "parse_task"
+        task.analysis_type = safe_parsed.analysis_type
+        task.requested_time_range = safe_parsed.time_range
     if parser_error_code and parser_error_message:
         write_task_error(
             task,
@@ -296,16 +306,25 @@ def _build_task(
             error_message=parser_error_message,
         )
 
-    task_spec = TaskSpecRecord(
-        task_id=task.id,
-        aoi_input=safe_parsed.aoi_input,
-        aoi_source_type=safe_parsed.aoi_source_type,
-        preferred_output=safe_parsed.preferred_output,
-        user_priority=safe_parsed.user_priority,
-        need_confirmation=safe_parsed.need_confirmation,
-        raw_spec_json=_build_task_spec_raw_payload(safe_parsed, upload_slots),
-    )
-    db.add(task_spec)
+    task_spec = db.get(TaskSpecRecord, task.id)
+    if task_spec is None:
+        task_spec = TaskSpecRecord(
+            task_id=task.id,
+            aoi_input=safe_parsed.aoi_input,
+            aoi_source_type=safe_parsed.aoi_source_type,
+            preferred_output=safe_parsed.preferred_output,
+            user_priority=safe_parsed.user_priority,
+            need_confirmation=safe_parsed.need_confirmation,
+            raw_spec_json=_build_task_spec_raw_payload(safe_parsed, upload_slots),
+        )
+        db.add(task_spec)
+    else:
+        task_spec.aoi_input = safe_parsed.aoi_input
+        task_spec.aoi_source_type = safe_parsed.aoi_source_type
+        task_spec.preferred_output = safe_parsed.preferred_output
+        task_spec.user_priority = safe_parsed.user_priority
+        task_spec.need_confirmation = safe_parsed.need_confirmation
+        task_spec.raw_spec_json = _build_task_spec_raw_payload(safe_parsed, upload_slots)
     db.flush()
 
     normalized_aoi = normalize_task_aoi(task=task, uploaded_files=uploaded_files)
@@ -319,9 +338,10 @@ def _build_task(
         task_spec.need_confirmation = True
         task_spec.raw_spec_json = _build_task_spec_raw_payload(safe_parsed, upload_slots)
 
-    # The task row is not committed yet at this point, so LLM call logs from
-    # planner should not reference task_id to avoid FK races in a separate session.
-    task_plan = build_task_plan(safe_parsed, task_id=None)
+    try:
+        task_plan = build_task_plan(safe_parsed, task_id=task.id, db_session=db)
+    except TypeError:
+        task_plan = build_task_plan(safe_parsed, task_id=task.id)
     if task_plan.error_code and task_plan.error_message:
         write_task_error(
             task,
@@ -424,7 +444,26 @@ def create_message_and_task(db: Session, payload: MessageCreateRequest) -> Messa
     db.add(message)
     db.flush()
 
-    parsed = parse_task_message(payload.content, has_upload=bool(files))
+    provisional_task = TaskRunRecord(
+        id=make_id("task"),
+        session_id=payload.session_id,
+        user_message_id=message.id,
+        status=TASK_STATUS_QUEUED,
+        current_step="parse_task",
+        analysis_type="NDVI",
+    )
+    db.add(provisional_task)
+    db.flush()
+
+    try:
+        parsed = parse_task_message(
+            payload.content,
+            has_upload=bool(files),
+            task_id=provisional_task.id,
+            db_session=db,
+        )
+    except TypeError:
+        parsed = parse_task_message(payload.content, has_upload=bool(files))
     parsed, parent_task, override = _resolve_followup_context(
         db,
         session_id=payload.session_id,
@@ -445,6 +484,7 @@ def create_message_and_task(db: Session, payload: MessageCreateRequest) -> Messa
             else None
         ),
         require_approval=True,
+        existing_task=provisional_task,
     )
 
     message.linked_task_id = task.id

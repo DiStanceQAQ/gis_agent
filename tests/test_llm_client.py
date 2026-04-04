@@ -184,3 +184,27 @@ def test_llm_client_writes_failed_log_for_invalid_json_content(monkeypatch: pyte
     assert written[0]["phase"] == "react_step"
     assert written[0]["task_id"] == "task_789"
     assert "not valid JSON text" in str(written[0]["error_message"])
+
+
+def test_llm_client_logs_failure_when_api_key_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    written: list[dict] = []
+
+    def _fake_write(**kwargs):  # noqa: ANN001
+        written.append(kwargs)
+
+    monkeypatch.setattr("packages.domain.services.llm_client.write_llm_call_log", _fake_write)
+    settings = Settings(llm_api_key=None, llm_base_url="https://example.com/v1")
+    client = LLMClient(settings)
+
+    with pytest.raises(LLMClientError):
+        client.chat_json(
+            system_prompt="system",
+            user_prompt="user",
+            phase="parse",
+            task_id="task_missing_key",
+        )
+
+    assert written
+    assert written[0]["status"] == "failed"
+    assert written[0]["phase"] == "parse"
+    assert written[0]["task_id"] == "task_missing_key"

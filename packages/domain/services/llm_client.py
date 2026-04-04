@@ -8,6 +8,7 @@ from time import perf_counter
 from typing import Any
 
 import httpx
+from sqlalchemy.orm import Session
 
 from packages.domain.config import Settings, get_settings
 from packages.domain.logging import get_logger
@@ -77,6 +78,7 @@ class LLMClient:
         max_tokens: int | None = None,
         phase: str = "unknown",
         task_id: str | None = None,
+        db_session: Session | None = None,
     ) -> LLMResponse:
         resolved_model = model or self.settings.llm_model
         resolved_temperature = (
@@ -125,13 +127,24 @@ class LLMClient:
                 latency_ms=latency_ms,
                 status=status,
                 error_message=error_message,
+                db_session=db_session,
             )
+
+        try:
+            headers = self._headers()
+        except LLMClientError as exc:
+            _write_log(
+                status="failed",
+                latency_ms=0,
+                error_message=str(exc),
+            )
+            raise
 
         while True:
             started = perf_counter()
             try:
                 with httpx.Client(timeout=self.settings.llm_timeout_seconds) as client:
-                    response = client.post(endpoint, headers=self._headers(), json=payload)
+                    response = client.post(endpoint, headers=headers, json=payload)
                 latency_ms = int((perf_counter() - started) * 1000)
             except httpx.TimeoutException as exc:
                 retryable = attempt < max_retries
