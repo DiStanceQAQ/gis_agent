@@ -143,3 +143,44 @@ def test_llm_client_raises_on_server_error(monkeypatch: pytest.MonkeyPatch) -> N
     assert written[0]["status"] == "failed"
     assert written[0]["phase"] == "plan"
     assert written[0]["task_id"] == "task_456"
+
+
+def test_llm_client_writes_failed_log_for_invalid_json_content(monkeypatch: pytest.MonkeyPatch) -> None:
+    written: list[dict] = []
+
+    def _fake_write(**kwargs):  # noqa: ANN001
+        written.append(kwargs)
+
+    monkeypatch.setattr("packages.domain.services.llm_client.write_llm_call_log", _fake_write)
+    _FakeClient.next_response = _FakeResponse(
+        status_code=200,
+        payload={
+            "id": "chatcmpl_bad_json",
+            "choices": [{"message": {"content": "not-json"}}],
+            "usage": {"prompt_tokens": 9, "completion_tokens": 3, "total_tokens": 12},
+        },
+        headers={"x-request-id": "req_bad_json"},
+    )
+    monkeypatch.setattr("packages.domain.services.llm_client.httpx.Client", _FakeClient)
+
+    settings = Settings(
+        llm_api_key="test_key",
+        llm_base_url="https://example.com/v1",
+        llm_max_retries=0,
+    )
+    client = LLMClient(settings)
+
+    with pytest.raises(LLMClientError) as exc_info:
+        client.chat_json(
+            system_prompt="system",
+            user_prompt="user",
+            phase="react_step",
+            task_id="task_789",
+        )
+
+    assert "not valid JSON text" in str(exc_info.value)
+    assert written
+    assert written[0]["status"] == "failed"
+    assert written[0]["phase"] == "react_step"
+    assert written[0]["task_id"] == "task_789"
+    assert "not valid JSON text" in str(written[0]["error_message"])

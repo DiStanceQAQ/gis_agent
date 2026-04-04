@@ -198,6 +198,21 @@ def _capture_task_state(task_id: str) -> dict[str, Any]:
         }
 
 
+def _query_task_audit_view(task_id: str) -> dict[str, Any]:
+    with SessionLocal() as db:
+        detail = orchestrator.get_task_detail(db, task_id)
+        _, events = orchestrator.list_task_events(db, task_id=task_id, since_id=0)
+        ordered_events = sorted(events, key=lambda item: item.id)
+        task_failed_event = next((event for event in ordered_events if event.event_type == "task_failed"), None)
+        return {
+            "status": detail.status,
+            "error_code": detail.error_code,
+            "rejected_reason": detail.rejected_reason,
+            "event_types": [event.event_type for event in ordered_events],
+            "task_failed_detail": task_failed_event.detail_json if task_failed_event is not None else None,
+        }
+
+
 def _build_manual_edited_plan(
     operation_plan: OperationPlan,
     *,
@@ -624,3 +639,43 @@ def test_runtime_writes_back_recommendation_schema_error_code(
     assert result["detail"].status == "failed"
     assert result["task"]["error_code"] == ErrorCode.TASK_LLM_RECOMMENDATION_SCHEMA_VALIDATION_FAILED
     assert "task_failed" in result["event_types"]
+
+
+def test_audit_query_includes_approval_react_and_function_call_events(sample_task_runner) -> None:
+    sample = next(sample for sample in _load_task_suite() if sample["id"] == "approval_edit_plan_then_execute")
+
+    result = sample_task_runner(sample)
+    task_id = result["task"]["task_id"]
+    audit_view = _query_task_audit_view(task_id)
+
+    assert audit_view["status"] == "success"
+    assert "task_plan_approved" in audit_view["event_types"]
+    assert "step_react_decision" in audit_view["event_types"]
+    assert "function_call_requested" in audit_view["event_types"]
+    assert "function_call_completed" in audit_view["event_types"]
+
+
+def test_audit_query_includes_reject_reason(sample_task_runner) -> None:
+    sample = next(sample for sample in _load_task_suite() if sample["id"] == "approval_reject_then_cancelled")
+
+    result = sample_task_runner(sample)
+    task_id = result["task"]["task_id"]
+    audit_view = _query_task_audit_view(task_id)
+
+    assert audit_view["status"] == "cancelled"
+    assert audit_view["error_code"] == ErrorCode.TASK_CANCELLED_BY_USER
+    assert audit_view["rejected_reason"] == "先不执行，等我确认范围"
+    assert "task_plan_rejected" in audit_view["event_types"]
+    assert "task_cancelled" in audit_view["event_types"]
+
+
+def test_audit_query_includes_failed_step_and_error_code(sample_task_runner) -> None:
+    result = sample_task_runner("failure_generate_outputs.json")
+    task_id = result["task"]["task_id"]
+    audit_view = _query_task_audit_view(task_id)
+
+    assert audit_view["status"] == "failed"
+    assert audit_view["error_code"] == ErrorCode.TASK_RUNTIME_FAILED
+    assert audit_view["task_failed_detail"] is not None
+    assert audit_view["task_failed_detail"]["failed_step"] == "generate_outputs"
+    assert audit_view["task_failed_detail"]["error_code"] == ErrorCode.TASK_RUNTIME_FAILED
