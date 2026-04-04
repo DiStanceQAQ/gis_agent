@@ -513,6 +513,9 @@ def get_task_detail(db: Session, task_id: str) -> TaskDetailResponse:
             artifact_type=artifact.artifact_type,
             mime_type=artifact.mime_type,
             size_bytes=artifact.size_bytes,
+            checksum=artifact.checksum,
+            created_at=artifact.created_at,
+            metadata=artifact.metadata_json,
             download_url=f"{settings.api_prefix}/artifacts/{artifact.id}",
         )
         for artifact in sorted(task.artifacts, key=lambda item: item.created_at)

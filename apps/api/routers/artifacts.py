@@ -3,10 +3,12 @@ from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from apps.api.deps import get_db
+from packages.domain.config import get_settings
 from packages.domain.errors import AppError, ErrorCode
 from packages.domain.models import ArtifactRecord
 from packages.domain.services.storage import read_storage_bytes, storage_exists
 from packages.schemas.common import ErrorResponse
+from packages.schemas.file import ArtifactMetadataResponse
 
 router = APIRouter(tags=["artifacts"])
 
@@ -31,8 +33,51 @@ def get_artifact_endpoint(artifact_id: str, db: Session = Depends(get_db)) -> Re
         )
     filename = artifact.storage_key.split("/")[-1]
     disposition = "inline" if artifact.mime_type.startswith("image/") else "attachment"
+    metadata = artifact.metadata_json or {}
+    headers = {
+        "Content-Disposition": f'{disposition}; filename="{filename}"',
+        "X-Artifact-Id": artifact.id,
+        "X-Artifact-Type": artifact.artifact_type,
+        "X-Artifact-Checksum": artifact.checksum,
+        "X-Artifact-Timestamp": artifact.created_at.isoformat(),
+    }
+    if metadata.get("source_step"):
+        headers["X-Artifact-Source-Step"] = str(metadata["source_step"])
+    if metadata.get("projection"):
+        headers["X-Artifact-Projection"] = str(metadata["projection"])
+
     return Response(
         content=read_storage_bytes(artifact.storage_key),
         media_type=artifact.mime_type,
-        headers={"Content-Disposition": f'{disposition}; filename="{filename}"'},
+        headers=headers,
+    )
+
+
+@router.get(
+    "/artifacts/{artifact_id}/metadata",
+    response_model=ArtifactMetadataResponse,
+    responses={404: {"model": ErrorResponse}},
+)
+def get_artifact_metadata_endpoint(
+    artifact_id: str,
+    db: Session = Depends(get_db),
+) -> ArtifactMetadataResponse:
+    artifact = db.get(ArtifactRecord, artifact_id)
+    if artifact is None:
+        raise AppError.not_found(
+            error_code=ErrorCode.ARTIFACT_NOT_FOUND,
+            message="Artifact not found.",
+            detail={"artifact_id": artifact_id},
+        )
+
+    settings = get_settings()
+    return ArtifactMetadataResponse(
+        artifact_id=artifact.id,
+        artifact_type=artifact.artifact_type,
+        mime_type=artifact.mime_type,
+        size_bytes=artifact.size_bytes,
+        checksum=artifact.checksum,
+        created_at=artifact.created_at,
+        metadata=artifact.metadata_json,
+        download_url=f"{settings.api_prefix}/artifacts/{artifact.id}",
     )

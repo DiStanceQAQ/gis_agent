@@ -19,7 +19,12 @@ from packages.domain.services.planner import (
 )
 from packages.domain.services.qc import evaluate_candidate_qc
 from packages.domain.services.recommendation import build_recommendation
-from packages.domain.services.storage import build_artifact_path, persist_artifact_file
+from packages.domain.services.storage import (
+    build_artifact_path,
+    collect_artifact_metadata,
+    infer_artifact_mime_type,
+    persist_artifact_file,
+)
 from packages.domain.services.task_events import append_task_event
 from packages.domain.services.task_state import (
     STEP_STATUS_FAILED,
@@ -173,12 +178,67 @@ def _tool_generate_outputs(
     methods_path = build_artifact_path(task.id, "methods.md")
     summary_path = build_artifact_path(task.id, "summary.md")
 
-    artifact_specs = [
-        ("png_map", png_path, "image/png"),
-        ("geotiff", tif_path, "image/tiff"),
-        ("methods_md", methods_path, "text/markdown"),
-        ("summary_md", summary_path, "text/markdown"),
-    ]
+    artifact_specs: list[dict[str, str | None]] = []
+    seen_artifacts: set[tuple[str, str]] = set()
+
+    def _append_artifact_spec(
+        *,
+        artifact_type: str,
+        path: str,
+        source_step: str | None,
+        mime_type: str | None = None,
+    ) -> None:
+        artifact_key = (artifact_type, str(Path(path)))
+        if artifact_key in seen_artifacts:
+            return
+        seen_artifacts.add(artifact_key)
+        artifact_specs.append(
+            {
+                "artifact_type": artifact_type,
+                "path": str(path),
+                "source_step": source_step,
+                "mime_type": mime_type or infer_artifact_mime_type(path, artifact_type=artifact_type),
+            }
+        )
+
+    for artifact in pipeline_outputs.get("artifacts") or []:
+        artifact_type = str(artifact.get("artifact_type") or "")
+        artifact_path = str(artifact.get("path") or "")
+        if not artifact_type or not artifact_path:
+            continue
+        _append_artifact_spec(
+            artifact_type=artifact_type,
+            path=artifact_path,
+            source_step=str(artifact.get("source_step") or "run_processing_pipeline"),
+        )
+
+    if not any(item["artifact_type"] == "png_map" for item in artifact_specs):
+        _append_artifact_spec(
+            artifact_type="png_map",
+            path=png_path,
+            source_step="run_processing_pipeline",
+            mime_type="image/png",
+        )
+    if not any(item["artifact_type"] == "geotiff" for item in artifact_specs):
+        _append_artifact_spec(
+            artifact_type="geotiff",
+            path=tif_path,
+            source_step="run_processing_pipeline",
+            mime_type="image/tiff",
+        )
+
+    _append_artifact_spec(
+        artifact_type="methods_md",
+        path=methods_path,
+        source_step="generate_outputs",
+        mime_type="text/markdown",
+    )
+    _append_artifact_spec(
+        artifact_type="summary_md",
+        path=summary_path,
+        source_step="generate_outputs",
+        mime_type="text/markdown",
+    )
     explanation_context = ExplanationContext(
         dataset_name=task.selected_dataset or "unknown",
         mode=str(pipeline_outputs["mode"]),
@@ -186,7 +246,7 @@ def _tool_generate_outputs(
         requested_time_range=task.requested_time_range,
         actual_time_range=pipeline_outputs["actual_time_range"],
         preferred_output=task.task_spec.preferred_output if task.task_spec else [],
-        output_artifact_types=[artifact_type for artifact_type, _, _ in artifact_specs],
+        output_artifact_types=[str(item["artifact_type"]) for item in artifact_specs],
         item_count=len(pipeline_outputs["selected_item_ids"]),
         valid_pixel_ratio=(
             float(pipeline_outputs["valid_pixel_ratio"])
@@ -220,13 +280,23 @@ def _tool_generate_outputs(
         db.delete(artifact)
     db.flush()
 
-    for artifact_type, path, mime in artifact_specs:
+    for item in artifact_specs:
+        artifact_type = str(item["artifact_type"])
+        path = str(item["path"])
+        mime = str(item["mime_type"])
+        source_step = str(item["source_step"]) if item["source_step"] else None
         storage_key, size_bytes, checksum = persist_artifact_file(
             task.id,
             Path(path).name,
             path,
             content_type=mime,
         )
+        metadata = collect_artifact_metadata(
+            path,
+            artifact_type=artifact_type,
+            source_step=source_step,
+        )
+        metadata["mode"] = pipeline_outputs["mode"]
         db.add(
             ArtifactRecord(
                 id=make_id("art"),
@@ -236,7 +306,7 @@ def _tool_generate_outputs(
                 mime_type=mime,
                 size_bytes=size_bytes,
                 checksum=checksum,
-                metadata_json={"mode": pipeline_outputs["mode"]},
+                metadata_json=metadata,
             )
         )
 
@@ -247,7 +317,7 @@ def _tool_generate_outputs(
     db.flush()
 
     return {
-        "artifact_types": [artifact_type for artifact_type, _, _ in artifact_specs],
+        "artifact_types": [str(item["artifact_type"]) for item in artifact_specs],
         "duration_seconds": task.duration_seconds,
         "mode": pipeline_outputs["mode"],
     }

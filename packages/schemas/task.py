@@ -113,6 +113,9 @@ class ArtifactResponse(BaseModel):
     artifact_type: str
     mime_type: str
     size_bytes: int
+    checksum: str | None = None
+    created_at: datetime | None = None
+    metadata: dict[str, Any] | None = None
     download_url: str
 
 

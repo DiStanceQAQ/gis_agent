@@ -589,7 +589,7 @@ def run_processing_pipeline(*, task_id: str, plan_nodes: list[dict[str, Any]], w
     pending_nodes = [dict(node) for node in plan_nodes]
     completed_steps: set[str] = set()
     references: dict[str, str] = {}
-    artifacts: list[dict[str, str]] = []
+    artifacts: list[dict[str, Any]] = []
     exported_tif_path: str | None = None
     exported_png_path: str | None = None
 
@@ -1191,13 +1191,17 @@ def run_processing_pipeline(*, task_id: str, plan_nodes: list[dict[str, Any]], w
                                 candidate = working_dir / f"{step_id or 'export'}_raster.tif"
                                 _create_default_raster(candidate)
                         source_path = str(candidate)
-                        artifacts.append({"artifact_type": "geotiff", "path": str(source_path)})
+                        artifacts.append(
+                            {"artifact_type": "geotiff", "path": str(source_path), "source_step": step_id}
+                        )
                         exported_tif_path = str(source_path)
                         produced_artifact_path = str(source_path)
                     elif fmt_name in {"png", "png_map"}:
                         png_path = working_dir / f"{step_id or 'export'}_preview.png"
                         png_path.write_bytes(b"png-output")
-                        artifacts.append({"artifact_type": "png_map", "path": str(png_path)})
+                        artifacts.append(
+                            {"artifact_type": "png_map", "path": str(png_path), "source_step": step_id}
+                        )
                         exported_png_path = str(png_path)
                         produced_artifact_path = str(png_path)
                     elif fmt_name == "csv":
@@ -1208,7 +1212,9 @@ def run_processing_pipeline(*, task_id: str, plan_nodes: list[dict[str, Any]], w
                                 writer = csv.writer(csv_file)
                                 writer.writerow(["key", "value"])
                                 writer.writerow(["source", str(source_path)])
-                        artifacts.append({"artifact_type": "csv", "path": str(csv_path)})
+                        artifacts.append(
+                            {"artifact_type": "csv", "path": str(csv_path), "source_step": step_id}
+                        )
                         produced_artifact_path = str(csv_path)
                     elif fmt_name in {"geojson", "json"}:
                         vector_source = Path(source_path)
@@ -1219,7 +1225,9 @@ def run_processing_pipeline(*, task_id: str, plan_nodes: list[dict[str, Any]], w
                         if not vector_source.exists() or vector_source.suffix.lower() not in {".geojson", ".json"}:
                             vector_source = working_dir / f"{step_id or 'export'}_vector.geojson"
                             _write_geojson(vector_source, [_default_geometry()], crs="EPSG:4326")
-                        artifacts.append({"artifact_type": "geojson", "path": str(vector_source)})
+                        artifacts.append(
+                            {"artifact_type": "geojson", "path": str(vector_source), "source_step": step_id}
+                        )
                         produced_artifact_path = str(vector_source)
                     elif fmt_name == "gpkg":
                         vector_source = Path(source_path)
@@ -1233,7 +1241,9 @@ def run_processing_pipeline(*, task_id: str, plan_nodes: list[dict[str, Any]], w
                             geometries = [_default_geometry()]
                         gpkg_path = working_dir / f"{step_id or 'export'}_vector.gpkg"
                         _write_gpkg(gpkg_path, geometries, crs=vector_crs)
-                        artifacts.append({"artifact_type": "gpkg", "path": str(gpkg_path)})
+                        artifacts.append(
+                            {"artifact_type": "gpkg", "path": str(gpkg_path), "source_step": step_id}
+                        )
                         produced_artifact_path = str(gpkg_path)
                     elif fmt_name in {"shapefile", "shp"}:
                         vector_source = Path(source_path)
@@ -1247,7 +1257,9 @@ def run_processing_pipeline(*, task_id: str, plan_nodes: list[dict[str, Any]], w
                             geometries = [_default_geometry()]
                         shp_path = working_dir / f"{step_id or 'export'}_vector.shp"
                         _write_shapefile(shp_path, geometries, crs=vector_crs)
-                        artifacts.append({"artifact_type": "shapefile", "path": str(shp_path)})
+                        artifacts.append(
+                            {"artifact_type": "shapefile", "path": str(shp_path), "source_step": step_id}
+                        )
                         produced_artifact_path = str(shp_path)
                     else:
                         raise ValueError(f"Unsupported artifact export format: {fmt_name}")

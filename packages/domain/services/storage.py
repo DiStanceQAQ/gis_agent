@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import mimetypes
 import os
 import shutil
+import sqlite3
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Iterator
@@ -38,6 +41,163 @@ def build_upload_storage_key(session_id: str, filename: str) -> str:
 
 def build_artifact_storage_key(task_id: str, filename: str) -> str:
     return f"artifacts/{task_id}/{_safe_name(filename)}"
+
+
+ARTIFACT_MIME_BY_TYPE: dict[str, str] = {
+    "png_map": "image/png",
+    "geotiff": "image/tiff",
+    "methods_md": "text/markdown",
+    "summary_md": "text/markdown",
+    "csv": "text/csv",
+    "geojson": "application/geo+json",
+    "gpkg": "application/geopackage+sqlite3",
+    "shapefile": "application/x-shapefile",
+}
+
+
+def infer_artifact_mime_type(path: str, *, artifact_type: str | None = None) -> str:
+    if artifact_type and artifact_type in ARTIFACT_MIME_BY_TYPE:
+        return ARTIFACT_MIME_BY_TYPE[artifact_type]
+
+    guessed = mimetypes.guess_type(path)[0]
+    if guessed:
+        return guessed
+    suffix = Path(path).suffix.lower()
+    if suffix in {".tif", ".tiff"}:
+        return "image/tiff"
+    if suffix in {".geojson", ".json"}:
+        return "application/geo+json"
+    if suffix == ".gpkg":
+        return "application/geopackage+sqlite3"
+    if suffix == ".shp":
+        return "application/x-shapefile"
+    if suffix == ".md":
+        return "text/markdown"
+    if suffix == ".csv":
+        return "text/csv"
+    return "application/octet-stream"
+
+
+def _collect_raster_metadata(path: Path) -> dict[str, object]:
+    import rasterio
+
+    with rasterio.open(path) as dataset:
+        resolution = None
+        if dataset.res:
+            resolution = [float(dataset.res[0]), float(dataset.res[1])]
+        return {
+            "projection": str(dataset.crs) if dataset.crs else None,
+            "dimensions": {"width": int(dataset.width), "height": int(dataset.height)},
+            "band_count": int(dataset.count),
+            "dtype": str(dataset.dtypes[0]) if dataset.dtypes else None,
+            "nodata": dataset.nodata,
+            "resolution": resolution,
+            "bounds": list(dataset.bounds) if dataset.bounds else None,
+        }
+
+
+def _collect_geojson_metadata(path: Path) -> dict[str, object]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    features = payload.get("features") if isinstance(payload, dict) else None
+    if not isinstance(features, list):
+        features = []
+    crs = None
+    crs_payload = payload.get("crs") if isinstance(payload, dict) else None
+    if isinstance(crs_payload, dict):
+        props = crs_payload.get("properties")
+        if isinstance(props, dict):
+            crs = props.get("name")
+    geometry_type = None
+    if features:
+        geometry = features[0].get("geometry")
+        if isinstance(geometry, dict):
+            geometry_type = geometry.get("type")
+    return {
+        "projection": crs,
+        "feature_count": len(features),
+        "geometry_type": geometry_type,
+    }
+
+
+def _collect_gpkg_metadata(path: Path) -> dict[str, object]:
+    with sqlite3.connect(path) as conn:
+        cursor = conn.cursor()
+        feature_tables = [
+            row[0]
+            for row in cursor.execute(
+                "SELECT table_name FROM gpkg_contents WHERE data_type='features'"
+            ).fetchall()
+        ]
+        feature_count = 0
+        for table_name in feature_tables:
+            query = f'SELECT COUNT(*) FROM "{table_name}"'
+            feature_count += int(cursor.execute(query).fetchone()[0])
+
+        srs_info = cursor.execute(
+            "SELECT srs_id, organization, organization_coordsys_id FROM gpkg_spatial_ref_sys ORDER BY srs_id LIMIT 1"
+        ).fetchone()
+        projection = None
+        if srs_info:
+            projection = f"{srs_info[1]}:{srs_info[2]}" if srs_info[1] and srs_info[2] else srs_info[0]
+
+    return {
+        "projection": projection,
+        "feature_count": feature_count,
+        "layer_count": len(feature_tables),
+    }
+
+
+def _collect_shapefile_metadata(path: Path) -> dict[str, object]:
+    import shapefile
+
+    reader = shapefile.Reader(str(path))
+    feature_count = int(reader.numRecords)
+    bbox = list(reader.bbox) if reader.bbox else None
+    shape_type = reader.shapeTypeName
+    projection = None
+    prj_path = path.with_suffix(".prj")
+    if prj_path.exists():
+        projection = prj_path.read_text(encoding="utf-8").strip() or None
+    return {
+        "projection": projection,
+        "feature_count": feature_count,
+        "shape_type": shape_type,
+        "bbox": bbox,
+    }
+
+
+def collect_artifact_metadata(
+    source_path: str,
+    *,
+    artifact_type: str,
+    source_step: str | None = None,
+) -> dict[str, object]:
+    path = Path(source_path)
+    metadata: dict[str, object] = {
+        "artifact_type": artifact_type,
+        "filename": path.name,
+        "source_step": source_step,
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
+
+    if path.suffix.lower() in {".tif", ".tiff"}:
+        metadata.update(_collect_raster_metadata(path))
+    elif path.suffix.lower() in {".geojson", ".json"}:
+        metadata.update(_collect_geojson_metadata(path))
+    elif path.suffix.lower() == ".gpkg":
+        metadata.update(_collect_gpkg_metadata(path))
+    elif path.suffix.lower() == ".shp":
+        metadata.update(_collect_shapefile_metadata(path))
+    elif path.suffix.lower() == ".csv":
+        line_count = 0
+        with path.open("r", encoding="utf-8") as handle:
+            for _ in handle:
+                line_count += 1
+        metadata["line_count"] = line_count
+    elif path.suffix.lower() == ".md":
+        metadata["line_count"] = len(path.read_text(encoding="utf-8").splitlines())
+
+    return metadata
 
 
 def _build_s3_client(
