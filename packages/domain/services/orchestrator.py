@@ -257,11 +257,18 @@ def _parse_candidate_request_content(content: str, *, has_upload: bool) -> Parse
     return parse_task_message(content, has_upload=has_upload)
 
 
-def _load_recent_session_file_ids(db: Session, *, session_id: str, limit: int) -> list[str]:
+def _load_recent_session_file_ids(
+    db: Session,
+    *,
+    session_id: str,
+    limit: int,
+    before_created_at: datetime | None = None,
+) -> list[str]:
+    files_query = db.query(UploadedFileRecord).filter(UploadedFileRecord.session_id == session_id)
+    if before_created_at is not None:
+        files_query = files_query.filter(UploadedFileRecord.created_at <= before_created_at)
     files = (
-        db.query(UploadedFileRecord)
-        .filter(UploadedFileRecord.session_id == session_id)
-        .order_by(UploadedFileRecord.created_at.desc(), UploadedFileRecord.id.desc())
+        files_query.order_by(UploadedFileRecord.created_at.desc(), UploadedFileRecord.id.desc())
         .limit(limit)
         .all()
     )
@@ -760,7 +767,7 @@ def create_message(db: Session, payload: MessageCreateRequest) -> MessageCreateR
                 intent_confidence=intent_result.confidence,
             )
 
-        fallback_file_ids = _load_recent_session_file_ids(
+        session_file_ids = _load_recent_session_file_ids(
             db,
             session_id=payload.session_id,
             limit=settings.intent_history_limit,
@@ -770,7 +777,7 @@ def create_message(db: Session, payload: MessageCreateRequest) -> MessageCreateR
             session_id=payload.session_id,
             current_message_id=message.id,
             confirmation_prompt_message=confirmation_prompt_message,
-            has_recent_uploads=bool(fallback_file_ids),
+            has_recent_uploads=bool(session_file_ids),
             limit=settings.intent_history_limit,
         )
         if source_request_message is None:
@@ -783,6 +790,12 @@ def create_message(db: Session, payload: MessageCreateRequest) -> MessageCreateR
                 intent_confidence=intent_result.confidence,
             )
 
+        fallback_file_ids = _load_recent_session_file_ids(
+            db,
+            session_id=payload.session_id,
+            limit=settings.intent_history_limit,
+            before_created_at=source_request_message.created_at,
+        )
         task_payload = payload
         if (
             not task_payload.file_ids

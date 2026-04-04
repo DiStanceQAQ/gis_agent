@@ -46,6 +46,11 @@ def test_is_task_confirmation_message_detects_confirmation_keywords() -> None:
     assert is_task_confirmation_message("可以") is True
 
 
+@pytest.mark.parametrize("message", ["开始执行", "按这个执行", "确认执行", "就按这个来"])
+def test_is_task_confirmation_message_detects_configured_default_keywords(message: str) -> None:
+    assert is_task_confirmation_message(message) is True
+
+
 @pytest.mark.parametrize(
     "message",
     [

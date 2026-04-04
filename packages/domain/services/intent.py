@@ -9,6 +9,7 @@ from typing import Literal
 
 from sqlalchemy.orm import Session
 
+from packages.domain.config import get_settings
 from packages.domain.logging import get_logger
 from packages.domain.services.llm_client import LLMClient
 
@@ -35,10 +36,31 @@ CONFIRMATION_KEYWORDS = (
 )
 
 _CONFIRMATION_STRIP_PATTERN = re.compile(r"[\s，。！？!?、,.;；:：·\"'“”‘’（）()\[\]{}<>…\-]+")
-_CONFIRMATION_PATTERN = re.compile(
-    rf"^(?:{'|'.join(re.escape(keyword) for keyword in sorted(CONFIRMATION_KEYWORDS, key=len, reverse=True))})+$",
-    re.IGNORECASE,
-)
+def _normalize_confirmation_text(text: str) -> str:
+    return _CONFIRMATION_STRIP_PATTERN.sub("", text).lower()
+
+
+def _load_confirmation_keywords() -> tuple[str, ...]:
+    configured = tuple(
+        keyword.strip()
+        for keyword in get_settings().intent_confirmation_keywords.split(",")
+        if keyword.strip()
+    )
+    merged = (*CONFIRMATION_KEYWORDS, *configured)
+    # Keep original order while removing duplicates.
+    return tuple(dict.fromkeys(merged))
+
+
+def _build_confirmation_pattern() -> re.Pattern[str] | None:
+    normalized_keywords = [
+        _normalize_confirmation_text(keyword)
+        for keyword in _load_confirmation_keywords()
+    ]
+    normalized_keywords = [keyword for keyword in normalized_keywords if keyword]
+    if not normalized_keywords:
+        return None
+    ordered = sorted(set(normalized_keywords), key=len, reverse=True)
+    return re.compile(rf"^(?:{'|'.join(re.escape(keyword) for keyword in ordered)})+$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -49,10 +71,13 @@ class IntentResult:
 
 
 def is_task_confirmation_message(message: str) -> bool:
-    normalized = _CONFIRMATION_STRIP_PATTERN.sub("", message).lower()
+    normalized = _normalize_confirmation_text(message)
     if not normalized:
         return False
-    return _CONFIRMATION_PATTERN.fullmatch(normalized) is not None
+    pattern = _build_confirmation_pattern()
+    if pattern is None:
+        return False
+    return pattern.fullmatch(normalized) is not None
 
 
 def _load_intent_system_prompt() -> str:
