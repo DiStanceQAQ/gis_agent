@@ -224,6 +224,38 @@ def test_chat_message_returns_chat_mode_and_persists_assistant_message(client: T
         _cleanup_session(session_id)
 
 
+def test_second_chat_turn_replays_prior_assistant_message_into_generation_history(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = _create_session()
+    history_snapshots: list[list[dict[str, str]]] = []
+
+    def _generate_chat_reply(*, user_message: str, history: list[dict[str, str]], db_session: object) -> str:  # noqa: ARG001
+        del db_session
+        history_snapshots.append([dict(item) for item in history])
+        return f"reply-{len(history_snapshots)}"
+
+    monkeypatch.setattr(orchestrator, "generate_chat_reply", _generate_chat_reply)
+
+    try:
+        first_payload = _post_message(client, session_id, "你好，我们先随便聊聊。")
+        assert first_payload["assistant_message"] == "reply-1"
+
+        second_payload = _post_message(client, session_id, "那再聊一点别的吧。")
+        assert second_payload["assistant_message"] == "reply-2"
+
+        assert history_snapshots == [
+            [],
+            [
+                {"role": "user", "content": "你好，我们先随便聊聊。"},
+                {"role": "assistant", "content": "reply-1"},
+            ],
+        ]
+    finally:
+        _cleanup_session(session_id)
+
+
 def test_high_confidence_task_request_prompts_confirmation_without_creating_task(client: TestClient) -> None:
     session_id = _create_session()
     try:
