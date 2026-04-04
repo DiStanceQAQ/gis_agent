@@ -98,6 +98,32 @@ def test_classify_message_intent_returns_task_for_explicit_confirmation_when_llm
     assert _FakeLLMClient.calls[0]["task_id"] == "task_confirmed"
 
 
+def test_classify_message_intent_returns_task_for_explicit_confirmation_with_invalid_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("packages.domain.services.intent.LLMClient", _FakeLLMClient)
+    _FakeLLMClient.response = _FakeIntentResponse(
+        {
+            "intent": "task",
+            "confidence": "not-a-number",
+            "reason": "The user asks for an NDVI analysis.",
+        }
+    )
+
+    result = classify_message_intent(
+        "好的，继续",
+        history=[{"role": "assistant", "content": "上一轮"}],
+        task_id="task_confirmed_payload",
+        db_session=object(),  # type: ignore[arg-type]
+    )
+
+    assert result.intent == "task"
+    assert result.confidence == 0.99
+    assert "explicit confirmation" in result.reason
+    assert _FakeLLMClient.calls[0]["phase"] == "intent"
+    assert _FakeLLMClient.calls[0]["task_id"] == "task_confirmed_payload"
+
+
 def test_classify_message_intent_passes_through_valid_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("packages.domain.services.intent.LLMClient", _FakeLLMClient)
     _FakeLLMClient.response = _FakeIntentResponse(

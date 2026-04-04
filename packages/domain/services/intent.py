@@ -134,5 +134,7 @@ def classify_message_intent(
 
     result = _coerce_intent(response.content_json)
     if result is None:
+        if is_task_confirmation_message(message):
+            return _confirmation_fallback_result()
         return _fallback_intent_result("LLM intent classification returned an invalid payload.")
     return result
