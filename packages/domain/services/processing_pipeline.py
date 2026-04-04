@@ -36,28 +36,6 @@ def _pick_primary_vector_reference(references: dict[str, str]) -> str | None:
     return None
 
 
-def _ensure_placeholder_artifacts(working_dir: Path, *, tif_path: str | None, png_path: str | None) -> tuple[str, str]:
-    candidate_tif = Path(tif_path) if tif_path else None
-    resolved_tif = (
-        candidate_tif
-        if candidate_tif is not None and candidate_tif.suffix.lower() in {".tif", ".tiff"}
-        else working_dir / "processing_output.tif"
-    )
-    candidate_png = Path(png_path) if png_path else None
-    resolved_png = (
-        candidate_png
-        if candidate_png is not None and candidate_png.suffix.lower() == ".png"
-        else working_dir / "processing_preview.png"
-    )
-
-    if not _is_supported_raster(resolved_tif):
-        _create_default_raster(resolved_tif)
-    if not resolved_png.exists():
-        _write_png_preview_from_raster(raster_path=resolved_tif, png_path=resolved_png)
-
-    return str(resolved_tif), str(resolved_png)
-
-
 def _create_default_raster(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     data = np.linspace(0.1, 0.9, 64, dtype="float32").reshape((8, 8))
@@ -1390,8 +1368,7 @@ def run_processing_pipeline(*, task_id: str, plan_nodes: list[dict[str, Any]], w
                             if raster_source is not None and _is_supported_raster(Path(raster_source)):
                                 candidate = Path(raster_source)
                             else:
-                                candidate = working_dir / f"{step_id or 'export'}_raster.tif"
-                                _create_default_raster(candidate)
+                                raise ValueError("artifact.export geotiff requires a valid raster source")
                         source_path = str(candidate)
                         artifacts.append(
                             {"artifact_type": "geotiff", "path": str(source_path), "source_step": step_id}
@@ -1406,8 +1383,7 @@ def run_processing_pipeline(*, task_id: str, plan_nodes: list[dict[str, Any]], w
                             if primary_raster is not None:
                                 raster_source = Path(primary_raster)
                             else:
-                                raster_source = working_dir / f"{step_id or 'export'}_raster.tif"
-                                _create_default_raster(raster_source)
+                                raise ValueError("artifact.export png_map requires a valid raster source")
                         _write_png_preview_from_raster(raster_path=raster_source, png_path=png_path)
                         artifacts.append(
                             {"artifact_type": "png_map", "path": str(png_path), "source_step": step_id}
@@ -1489,11 +1465,16 @@ def run_processing_pipeline(*, task_id: str, plan_nodes: list[dict[str, Any]], w
             raise ValueError(f"Operation plan has unresolved dependencies for steps: {unresolved}")
 
     primary_tif = exported_tif_path or _pick_primary_raster_reference(references)
-    tif_path, png_path = _ensure_placeholder_artifacts(
-        working_dir,
-        tif_path=primary_tif,
-        png_path=exported_png_path,
-    )
+    if primary_tif is None or not _is_supported_raster(Path(primary_tif)):
+        raise ValueError("Processing pipeline did not produce a valid raster output.")
+    tif_path = str(Path(primary_tif))
+
+    if exported_png_path is not None and Path(exported_png_path).exists():
+        png_path = str(Path(exported_png_path))
+    else:
+        preview_png_path = working_dir / "processing_preview.png"
+        _write_png_preview_from_raster(raster_path=Path(tif_path), png_path=preview_png_path)
+        png_path = str(preview_png_path)
     metrics = _compute_raster_metrics(tif_path)
 
     return {

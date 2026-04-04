@@ -612,11 +612,19 @@ def test_raster_zonal_stats_outputs_per_zone_rows(tmp_path) -> None:
 
     plan_nodes = [
         {
+            "step_id": "zonal_clip",
+            "op_name": "raster.clip",
+            "depends_on": [],
+            "inputs": {},
+            "params": {"source_path": str(source_raster)},
+            "outputs": {"raster": "zonal_raster"},
+        },
+        {
             "step_id": "zonal_by_zone",
             "op_name": "raster.zonal_stats",
-            "depends_on": [],
-            "inputs": {"zones": str(zones_geojson)},
-            "params": {"source_path": str(source_raster), "stats": ["mean", "min", "max"]},
+            "depends_on": ["zonal_clip"],
+            "inputs": {"raster": "zonal_raster", "zones": str(zones_geojson)},
+            "params": {"stats": ["mean", "min", "max"]},
             "outputs": {"table": "z_stats"},
         }
     ]
@@ -660,3 +668,61 @@ def test_artifact_export_png_map_is_valid_png(tmp_path) -> None:
     outputs = run_processing_pipeline(task_id="task_png_preview", plan_nodes=plan_nodes, working_dir=tmp_path)
     png_path = next(Path(item["path"]) for item in outputs["artifacts"] if item["artifact_type"] == "png_map")
     assert png_path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_run_processing_pipeline_vector_only_plan_fails_without_raster_output(tmp_path) -> None:
+    source_vector = tmp_path / "vector_only.geojson"
+    _write_test_geojson(
+        source_vector,
+        [[[116.0, 39.95], [116.02, 39.95], [116.02, 39.99], [116.0, 39.99], [116.0, 39.95]]],
+    )
+    plan_nodes = [
+        {
+            "step_id": "vector_only_buffer",
+            "op_name": "vector.buffer",
+            "depends_on": [],
+            "inputs": {"vector": str(source_vector)},
+            "params": {"distance_m": 100.0},
+            "outputs": {"vector": "v_buf"},
+        },
+        {
+            "step_id": "vector_only_export",
+            "op_name": "artifact.export",
+            "depends_on": ["vector_only_buffer"],
+            "inputs": {"primary": "v_buf"},
+            "params": {"formats": ["geojson"]},
+            "outputs": {"artifact": "a_vec"},
+        },
+    ]
+
+    with pytest.raises(ValueError, match="valid raster output"):
+        run_processing_pipeline(task_id="task_vector_only", plan_nodes=plan_nodes, working_dir=tmp_path)
+
+
+def test_artifact_export_geotiff_requires_real_raster_input(tmp_path) -> None:
+    source_vector = tmp_path / "geotiff_from_vector.geojson"
+    _write_test_geojson(
+        source_vector,
+        [[[116.0, 39.95], [116.02, 39.95], [116.02, 39.99], [116.0, 39.99], [116.0, 39.95]]],
+    )
+    plan_nodes = [
+        {
+            "step_id": "vector_source",
+            "op_name": "vector.buffer",
+            "depends_on": [],
+            "inputs": {"vector": str(source_vector)},
+            "params": {"distance_m": 100.0},
+            "outputs": {"vector": "v_only"},
+        },
+        {
+            "step_id": "export_missing_raster",
+            "op_name": "artifact.export",
+            "depends_on": ["vector_source"],
+            "inputs": {"primary": "v_only"},
+            "params": {"formats": ["geotiff"]},
+            "outputs": {"artifact": "a_missing"},
+        }
+    ]
+
+    with pytest.raises(ValueError, match="requires a valid raster source"):
+        run_processing_pipeline(task_id="task_missing_raster", plan_nodes=plan_nodes, working_dir=tmp_path)
