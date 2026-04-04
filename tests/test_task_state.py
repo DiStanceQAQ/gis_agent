@@ -85,6 +85,7 @@ def test_ensure_task_status_transition_rejects_invalid_changes(current: str, tar
     ("current", "target"),
     [
         (STEP_STATUS_PENDING, STEP_STATUS_RUNNING),
+        (STEP_STATUS_PENDING, STEP_STATUS_FAILED),
         (STEP_STATUS_RUNNING, STEP_STATUS_SUCCESS),
         (STEP_STATUS_RUNNING, STEP_STATUS_FAILED),
     ],

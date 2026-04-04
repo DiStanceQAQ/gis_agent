@@ -324,6 +324,30 @@ def test_reject_task_plan_requires_awaiting_approval_status(client: TestClient) 
         _cleanup_session(session_id)
 
 
+def test_approve_after_reject_is_blocked(client: TestClient) -> None:
+    session_id = _create_session()
+    try:
+        payload = _create_message(client, session_id)
+        detail = client.get(f"/api/v1/tasks/{payload['task_id']}").json()
+        operation_plan = detail["operation_plan"]
+        assert operation_plan is not None
+
+        reject_response = client.post(
+            f"/api/v1/tasks/{payload['task_id']}/reject",
+            json={"reason": "先暂停"},
+        )
+        assert reject_response.status_code == 200
+
+        approve_response = client.post(
+            f"/api/v1/tasks/{payload['task_id']}/approve",
+            json={"approved_version": operation_plan["version"]},
+        )
+        assert approve_response.status_code == 400
+        assert approve_response.json()["error"]["code"] == "plan_approval_required"
+    finally:
+        _cleanup_session(session_id)
+
+
 def test_patch_task_plan_rejects_unknown_dependency_with_plan_edit_invalid(client: TestClient) -> None:
     session_id = _create_session()
     try:

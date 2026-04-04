@@ -23,6 +23,8 @@ from packages.domain.services.graph import runtime_helpers
 from packages.domain.services.graph.runner import run_task_graph
 from packages.domain.services.orchestrator import list_task_events
 from packages.domain.utils import make_id
+from packages.domain.errors import ErrorCode
+from packages.schemas.agent import LLMReactStepDecision
 
 
 @pytest.fixture
@@ -295,6 +297,51 @@ def test_langgraph_runtime_success_event_sequence_is_ordered(
             assert step_started < step_completed
             assert step_completed <= function_call_completed_index < react_observation_index
             assert started_index < step_started < completed_index
+    finally:
+        _cleanup_session(session_id)
+        get_settings.cache_clear()
+
+
+def test_langgraph_runtime_fails_on_illegal_function_call(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("GIS_AGENT_LLM_PLANNER_ENABLED", "false")
+    monkeypatch.setenv("GIS_AGENT_LLM_RECOMMENDATION_ENABLED", "false")
+    get_settings.cache_clear()
+
+    session_id, task_id = _seed_runtime_task()
+
+    try:
+        monkeypatch.setattr(
+            runtime_helpers,
+            "build_artifact_path",
+            lambda task_id, filename: str(tmp_path / f"{task_id}_{filename}"),
+        )
+        monkeypatch.setattr(
+            runtime_helpers,
+            "_build_step_react_decision",
+            lambda **kwargs: LLMReactStepDecision(
+                decision="continue",
+                function_name="unknown.tool",
+                arguments={"step_name": kwargs.get("step_name")},
+                reasoning_summary="模拟非法 function call",
+            ),
+        )
+
+        run_task_graph(task_id)
+
+        with SessionLocal() as db:
+            task = db.get(TaskRunRecord, task_id)
+            assert task is not None
+            assert task.status == "failed"
+            assert task.error_code == ErrorCode.TASK_RUNTIME_UNKNOWN_TOOL
+
+            _, events = list_task_events(db, task_id=task_id, since_id=0)
+            event_types = [event.event_type for event in events]
+            assert "step_react_decision" in event_types
+            assert "function_call_requested" not in event_types
+            assert "task_failed" in event_types
     finally:
         _cleanup_session(session_id)
         get_settings.cache_clear()
