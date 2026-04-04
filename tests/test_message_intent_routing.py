@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -166,16 +168,22 @@ def _create_session() -> str:
         return session.session_id
 
 
-def _create_uploaded_vector_file(session_id: str) -> str:
+def _create_uploaded_vector_file(
+    session_id: str,
+    *,
+    file_id: str = "file_test_vector",
+    created_at: datetime | None = None,
+) -> str:
     with SessionLocal() as db:
         record = UploadedFileRecord(
-            id="file_test_vector",
+            id=file_id,
             session_id=session_id,
-            original_name="boundary.geojson",
+            original_name=f"{file_id}.geojson",
             file_type="geojson",
-            storage_key=".data/uploads/boundary.geojson",
+            storage_key=f".data/uploads/{file_id}.geojson",
             size_bytes=128,
-            checksum="checksum",
+            checksum=f"checksum-{file_id}",
+            created_at=created_at,
         )
         db.add(record)
         db.commit()
@@ -376,5 +384,68 @@ def test_create_message_uses_single_shot_task_flow_when_intent_router_is_disable
 
         with SessionLocal() as db:
             assert db.query(TaskRunRecord).filter(TaskRunRecord.session_id == session_id).count() == 1
+    finally:
+        _cleanup_session(session_id)
+
+
+def test_delayed_confirmation_after_unrelated_chat_does_not_execute_old_request(
+    client: TestClient,
+) -> None:
+    session_id = _create_session()
+    try:
+        prompt_payload = _post_message(client, session_id, TASK_REQUEST)
+        assert prompt_payload["awaiting_task_confirmation"] is True
+
+        chat_payload = _post_message(client, session_id, "今天先不做任务，聊聊别的。")
+        assert chat_payload["mode"] == "chat"
+        assert chat_payload["awaiting_task_confirmation"] is False
+
+        delayed_confirmation_payload = _post_message(client, session_id, "好的，继续")
+
+        assert delayed_confirmation_payload["mode"] == "chat"
+        assert delayed_confirmation_payload["task_id"] is None
+        assert delayed_confirmation_payload["awaiting_task_confirmation"] is False
+
+        with SessionLocal() as db:
+            assert db.query(TaskRunRecord).filter(TaskRunRecord.session_id == session_id).count() == 0
+    finally:
+        _cleanup_session(session_id)
+
+
+def test_confirmation_fallback_prefers_newest_uploaded_file_deterministically(
+    client: TestClient,
+) -> None:
+    session_id = _create_session()
+    base_time = datetime.now(timezone.utc)
+    try:
+        old_file_id = _create_uploaded_vector_file(
+            session_id,
+            file_id="file_old_vector",
+            created_at=base_time - timedelta(minutes=2),
+        )
+        new_file_id = _create_uploaded_vector_file(
+            session_id,
+            file_id="file_new_vector",
+            created_at=base_time,
+        )
+
+        prompt_payload = _post_message(
+            client,
+            session_id,
+            UPLOAD_TASK_REQUEST,
+            file_ids=[new_file_id],
+        )
+        assert prompt_payload["awaiting_task_confirmation"] is True
+
+        payload = _post_message(client, session_id, "好的，继续")
+
+        assert payload["mode"] == "task"
+        assert payload["task_id"]
+
+        with SessionLocal() as db:
+            task_spec = db.get(TaskSpecRecord, payload["task_id"])
+            assert task_spec is not None
+            assert task_spec.raw_spec_json["upload_slots"]["input_vector_file_id"] == new_file_id
+            assert task_spec.raw_spec_json["upload_slots"]["input_vector_file_id"] != old_file_id
     finally:
         _cleanup_session(session_id)

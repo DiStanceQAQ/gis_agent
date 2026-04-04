@@ -228,6 +228,7 @@ def _persist_message(
         role=role,
         content=content,
         linked_task_id=linked_task_id,
+        created_at=datetime.now(timezone.utc),
     )
     db.add(message)
     db.flush()
@@ -264,7 +265,7 @@ def _load_recent_session_file_ids(db: Session, *, session_id: str, limit: int) -
         .limit(limit)
         .all()
     )
-    return [record.id for record in reversed(files)]
+    return [record.id for record in files]
 
 
 def _is_executable_followup_request(content: str, *, latest_task: TaskRunRecord | None) -> bool:
@@ -273,11 +274,38 @@ def _is_executable_followup_request(content: str, *, latest_task: TaskRunRecord 
     return bool(parse_followup_override_message(content, has_upload=False))
 
 
+def _load_active_confirmation_prompt_message(
+    db: Session,
+    *,
+    session_id: str,
+    current_message_id: str,
+    limit: int,
+) -> MessageRecord | None:
+    prior_messages = (
+        db.query(MessageRecord)
+        .filter(
+            MessageRecord.session_id == session_id,
+            MessageRecord.id != current_message_id,
+        )
+        .order_by(MessageRecord.created_at.desc(), MessageRecord.id.desc())
+        .limit(limit)
+        .all()
+    )
+    if not prior_messages:
+        return None
+
+    latest_message = prior_messages[0]
+    if latest_message.role != "assistant" or latest_message.content != TASK_CONFIRMATION_PROMPT:
+        return None
+    return latest_message
+
+
 def _find_latest_executable_request_message(
     db: Session,
     *,
     session_id: str,
     current_message_id: str,
+    confirmation_prompt_message: MessageRecord,
     has_recent_uploads: bool,
     limit: int,
 ) -> MessageRecord | None:
@@ -286,16 +314,24 @@ def _find_latest_executable_request_message(
         db.query(MessageRecord)
         .filter(
             MessageRecord.session_id == session_id,
-            MessageRecord.role == "user",
             MessageRecord.id != current_message_id,
-            MessageRecord.linked_task_id.is_(None),
         )
         .order_by(MessageRecord.created_at.desc(), MessageRecord.id.desc())
         .limit(limit)
         .all()
     )
 
+    prompt_seen = False
+
     for message in prior_messages:
+        if not prompt_seen:
+            prompt_seen = message.id == confirmation_prompt_message.id
+            continue
+        if message.role == "assistant":
+            break
+        if message.role != "user" or message.linked_task_id is not None:
+            continue
+
         content = message.content.strip()
         if not content or is_task_confirmation_message(content):
             continue
@@ -307,6 +343,23 @@ def _find_latest_executable_request_message(
         if parsed.aoi_input and parsed.time_range:
             return message
     return None
+
+
+def _load_uploaded_files_by_payload_order(
+    db: Session,
+    *,
+    file_ids: list[str],
+) -> list[UploadedFileRecord]:
+    files = db.query(UploadedFileRecord).filter(UploadedFileRecord.id.in_(file_ids)).all()
+    files_by_id = {record.id: record for record in files}
+    missing_file_ids = [file_id for file_id in file_ids if file_id not in files_by_id]
+    if missing_file_ids:
+        raise AppError.not_found(
+            error_code=ErrorCode.FILE_NOT_FOUND,
+            message="One or more uploaded files were not found.",
+            detail={"file_ids": missing_file_ids},
+        )
+    return [files_by_id[file_id] for file_id in file_ids]
 
 
 def _create_chat_mode_response(
@@ -565,19 +618,7 @@ def create_message_and_task(
 
     files = []
     if payload.file_ids:
-        files = (
-            db.query(UploadedFileRecord)
-            .filter(UploadedFileRecord.id.in_(payload.file_ids))
-            .all()
-        )
-        found_file_ids = {record.id for record in files}
-        missing_file_ids = [file_id for file_id in payload.file_ids if file_id not in found_file_ids]
-        if missing_file_ids:
-            raise AppError.not_found(
-                error_code=ErrorCode.FILE_NOT_FOUND,
-                message="One or more uploaded files were not found.",
-                detail={"file_ids": missing_file_ids},
-            )
+        files = _load_uploaded_files_by_payload_order(db, file_ids=payload.file_ids)
 
     if existing_user_message is None:
         message = _persist_message(
@@ -703,6 +744,22 @@ def create_message(db: Session, payload: MessageCreateRequest) -> MessageCreateR
     )
 
     if is_task_confirmation_message(payload.content):
+        confirmation_prompt_message = _load_active_confirmation_prompt_message(
+            db,
+            session_id=payload.session_id,
+            current_message_id=message.id,
+            limit=settings.intent_history_limit,
+        )
+        if confirmation_prompt_message is None:
+            return _create_chat_mode_response(
+                db,
+                user_message_id=message.id,
+                session_id=payload.session_id,
+                assistant_message=TASK_CONFIRMATION_MISSING_CONTEXT_PROMPT,
+                intent=intent_result.intent,
+                intent_confidence=intent_result.confidence,
+            )
+
         fallback_file_ids = _load_recent_session_file_ids(
             db,
             session_id=payload.session_id,
@@ -712,6 +769,7 @@ def create_message(db: Session, payload: MessageCreateRequest) -> MessageCreateR
             db,
             session_id=payload.session_id,
             current_message_id=message.id,
+            confirmation_prompt_message=confirmation_prompt_message,
             has_recent_uploads=bool(fallback_file_ids),
             limit=settings.intent_history_limit,
         )
