@@ -4,6 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from apps.api.main import app
+from packages.domain.config import get_settings
 from packages.domain.database import SessionLocal
 from packages.domain.models import (
     AOIRecord,
@@ -25,27 +26,62 @@ from packages.schemas.task import ParsedTaskSpec
 
 
 TASK_REQUEST = "帮我分析 2024 年 6 月 bbox(116.1,39.8,116.5,40.1) 的 NDVI，并先生成计划。"
+FOLLOWUP_REQUEST = "改成 2023 年 6 月"
+UPLOAD_TASK_REQUEST = "请基于我刚上传的边界文件分析 2024 年 6 月 NDVI。"
 
 
 @pytest.fixture(autouse=True)
 def _patched_message_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(orchestrator, "_queue_or_run", lambda task_id: None)
     monkeypatch.setattr(orchestrator, "generate_chat_reply", lambda **kwargs: "当然可以，我们先聊聊。")
+    monkeypatch.setattr(orchestrator, "normalize_task_aoi", lambda **kwargs: None)
 
     def _classify_intent(message: str, **kwargs) -> IntentResult:  # noqa: ANN003
         del kwargs
         if is_task_confirmation_message(message):
             return IntentResult(intent="task", confidence=0.99, reason="用户已明确确认执行任务。")
-        if "NDVI" in message:
+        if "NDVI" in message or "改成" in message:
             return IntentResult(intent="task", confidence=0.95, reason="用户正在发起遥感分析任务。")
         return IntentResult(intent="chat", confidence=0.91, reason="用户正在进行普通对话。")
 
     def _parse_task_message(message: str, has_upload: bool) -> ParsedTaskSpec:
-        assert has_upload is False
-        assert message == TASK_REQUEST
+        if message == TASK_REQUEST:
+            assert has_upload is False
+            return ParsedTaskSpec(
+                aoi_input="bbox(116.1,39.8,116.5,40.1)",
+                aoi_source_type="bbox",
+                time_range={"start": "2024-06-01", "end": "2024-06-30"},
+                requested_dataset="sentinel2",
+                analysis_type="NDVI",
+                preferred_output=["png_map", "methods_text"],
+                user_priority="balanced",
+                operation_params={},
+                need_confirmation=False,
+                missing_fields=[],
+                clarification_message=None,
+                created_from="tests",
+            )
+        if message == FOLLOWUP_REQUEST:
+            assert has_upload is False
+            return ParsedTaskSpec(
+                aoi_input=None,
+                aoi_source_type=None,
+                time_range={"start": "2023-06-01", "end": "2023-06-30"},
+                requested_dataset=None,
+                analysis_type="NDVI",
+                preferred_output=["png_map", "methods_text"],
+                user_priority="balanced",
+                operation_params={},
+                need_confirmation=True,
+                missing_fields=["aoi"],
+                clarification_message="请补充 AOI。",
+                created_from="tests",
+            )
+        assert message == UPLOAD_TASK_REQUEST
+        assert has_upload is True
         return ParsedTaskSpec(
-            aoi_input="bbox(116.1,39.8,116.5,40.1)",
-            aoi_source_type="bbox",
+            aoi_input="uploaded_aoi",
+            aoi_source_type="file_upload",
             time_range={"start": "2024-06-01", "end": "2024-06-30"},
             requested_dataset="sentinel2",
             analysis_type="NDVI",
@@ -130,10 +166,32 @@ def _create_session() -> str:
         return session.session_id
 
 
-def _post_message(client: TestClient, session_id: str, content: str) -> dict[str, object]:
+def _create_uploaded_vector_file(session_id: str) -> str:
+    with SessionLocal() as db:
+        record = UploadedFileRecord(
+            id="file_test_vector",
+            session_id=session_id,
+            original_name="boundary.geojson",
+            file_type="geojson",
+            storage_key=".data/uploads/boundary.geojson",
+            size_bytes=128,
+            checksum="checksum",
+        )
+        db.add(record)
+        db.commit()
+        return record.id
+
+
+def _post_message(
+    client: TestClient,
+    session_id: str,
+    content: str,
+    *,
+    file_ids: list[str] | None = None,
+) -> dict[str, object]:
     response = client.post(
         "/api/v1/messages",
-        json={"session_id": session_id, "content": content, "file_ids": []},
+        json={"session_id": session_id, "content": content, "file_ids": file_ids or []},
     )
     assert response.status_code == 200
     return response.json()
@@ -213,5 +271,110 @@ def test_confirmation_without_prior_context_returns_chat_guidance(client: TestCl
                 .all()
             )
             assert len(assistant_messages) == 1
+    finally:
+        _cleanup_session(session_id)
+
+
+def test_stale_confirmation_after_successful_confirmation_does_not_create_second_task(
+    client: TestClient,
+) -> None:
+    session_id = _create_session()
+    try:
+        first_payload = _post_message(client, session_id, TASK_REQUEST)
+        assert first_payload["awaiting_task_confirmation"] is True
+
+        task_payload = _post_message(client, session_id, "好的，继续")
+        assert task_payload["mode"] == "task"
+        assert task_payload["task_id"]
+
+        stale_confirmation_payload = _post_message(client, session_id, "好的，继续")
+
+        assert stale_confirmation_payload["mode"] == "chat"
+        assert stale_confirmation_payload["task_id"] is None
+
+        with SessionLocal() as db:
+            assert db.query(TaskRunRecord).filter(TaskRunRecord.session_id == session_id).count() == 1
+            source_message = (
+                db.query(MessageRecord)
+                .filter(MessageRecord.session_id == session_id, MessageRecord.content == TASK_REQUEST)
+                .one()
+            )
+            assert source_message.linked_task_id == task_payload["task_id"]
+    finally:
+        _cleanup_session(session_id)
+
+
+def test_confirmation_reuses_recent_session_uploads_when_current_file_ids_are_empty(
+    client: TestClient,
+) -> None:
+    session_id = _create_session()
+    try:
+        file_id = _create_uploaded_vector_file(session_id)
+        prompt_payload = _post_message(
+            client,
+            session_id,
+            UPLOAD_TASK_REQUEST,
+            file_ids=[file_id],
+        )
+        assert prompt_payload["awaiting_task_confirmation"] is True
+
+        payload = _post_message(client, session_id, "好的，继续")
+
+        assert payload["mode"] == "task"
+        assert payload["task_id"]
+
+        with SessionLocal() as db:
+            task_spec = db.get(TaskSpecRecord, payload["task_id"])
+            assert task_spec is not None
+            assert task_spec.raw_spec_json["upload_slots"]["input_vector_file_id"] == file_id
+    finally:
+        _cleanup_session(session_id)
+
+
+def test_followup_style_request_can_be_used_as_confirmation_context(client: TestClient) -> None:
+    session_id = _create_session()
+    try:
+        first_prompt = _post_message(client, session_id, TASK_REQUEST)
+        assert first_prompt["awaiting_task_confirmation"] is True
+
+        parent_payload = _post_message(client, session_id, "好的，继续")
+        assert parent_payload["mode"] == "task"
+        parent_task_id = parent_payload["task_id"]
+        assert parent_task_id
+
+        followup_prompt = _post_message(client, session_id, FOLLOWUP_REQUEST)
+        assert followup_prompt["awaiting_task_confirmation"] is True
+
+        payload = _post_message(client, session_id, "好的，继续")
+
+        assert payload["mode"] == "task"
+        assert payload["task_id"]
+        assert payload["task_id"] != parent_task_id
+
+        with SessionLocal() as db:
+            task = db.get(TaskRunRecord, payload["task_id"])
+            assert task is not None
+            assert task.parent_task_id == parent_task_id
+            assert task.requested_time_range == {"start": "2023-06-01", "end": "2023-06-30"}
+    finally:
+        _cleanup_session(session_id)
+
+
+def test_create_message_uses_single_shot_task_flow_when_intent_router_is_disabled(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(get_settings(), "intent_router_enabled", False)
+    session_id = _create_session()
+    try:
+        payload = _post_message(client, session_id, TASK_REQUEST)
+
+        assert payload["mode"] == "task"
+        assert payload["task_id"]
+        assert payload["task_status"] == TASK_STATUS_AWAITING_APPROVAL
+        assert payload["awaiting_task_confirmation"] is False
+
+        with SessionLocal() as db:
+            assert db.query(TaskRunRecord).filter(TaskRunRecord.session_id == session_id).count() == 1
     finally:
         _cleanup_session(session_id)

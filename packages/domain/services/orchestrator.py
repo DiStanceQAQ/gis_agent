@@ -68,14 +68,12 @@ from packages.schemas.task import (
 
 logger = get_logger(__name__)
 
-INTENT_TASK_CONFIDENCE_THRESHOLD = 0.8
-INTENT_HISTORY_LIMIT = 12
 TASK_CONFIRMATION_PROMPT = "我理解你想发起一个 GIS 分析任务。请回复“好的，继续”或“开始执行”，我会为你生成计划并进入审批。"
 TASK_CONFIRMATION_MISSING_CONTEXT_PROMPT = (
     "我收到了确认，但还没找到上一条可执行的任务请求。请先描述分析区域、时间范围和目标，再回复“好的，继续”。"
 )
-EXECUTABLE_REQUEST_HINT_PATTERN = re.compile(
-    r"(ndvi|植被|遥感|影像|sentinel|landsat|geotiff|tiff|地图|分析|计算|统计|监测|提取)",
+UPLOAD_REQUEST_HINT_PATTERN = re.compile(
+    r"(上传|文件|边界|geojson|shp|gpkg)",
     re.IGNORECASE,
 )
 
@@ -241,7 +239,7 @@ def _load_message_history(
     *,
     session_id: str,
     exclude_message_id: str | None = None,
-    limit: int = INTENT_HISTORY_LIMIT,
+    limit: int,
 ) -> list[dict[str, str]]:
     query = db.query(MessageRecord).filter(MessageRecord.session_id == session_id)
     if exclude_message_id is not None:
@@ -254,19 +252,36 @@ def _load_message_history(
     return [{"role": record.role, "content": record.content} for record in reversed(records)]
 
 
-def _parse_candidate_request_content(content: str) -> ParsedTaskSpec:
-    try:
-        return parse_task_message(content, has_upload=False, db_session=None)
-    except TypeError:
-        return parse_task_message(content, has_upload=False)
+def _parse_candidate_request_content(content: str, *, has_upload: bool) -> ParsedTaskSpec:
+    return parse_task_message(content, has_upload=has_upload)
 
 
-def _find_latest_executable_request_content(
+def _load_recent_session_file_ids(db: Session, *, session_id: str, limit: int) -> list[str]:
+    files = (
+        db.query(UploadedFileRecord)
+        .filter(UploadedFileRecord.session_id == session_id)
+        .order_by(UploadedFileRecord.created_at.desc(), UploadedFileRecord.id.desc())
+        .limit(limit)
+        .all()
+    )
+    return [record.id for record in reversed(files)]
+
+
+def _is_executable_followup_request(content: str, *, latest_task: TaskRunRecord | None) -> bool:
+    if latest_task is None or not is_followup_request(content):
+        return False
+    return bool(parse_followup_override_message(content, has_upload=False))
+
+
+def _find_latest_executable_request_message(
     db: Session,
     *,
     session_id: str,
     current_message_id: str,
-) -> str | None:
+    has_recent_uploads: bool,
+    limit: int,
+) -> MessageRecord | None:
+    latest_task = _load_latest_session_task(db, session_id)
     prior_messages = (
         db.query(MessageRecord)
         .filter(
@@ -276,7 +291,7 @@ def _find_latest_executable_request_content(
             MessageRecord.linked_task_id.is_(None),
         )
         .order_by(MessageRecord.created_at.desc(), MessageRecord.id.desc())
-        .limit(INTENT_HISTORY_LIMIT)
+        .limit(limit)
         .all()
     )
 
@@ -284,11 +299,13 @@ def _find_latest_executable_request_content(
         content = message.content.strip()
         if not content or is_task_confirmation_message(content):
             continue
-        if EXECUTABLE_REQUEST_HINT_PATTERN.search(content) is None:
-            continue
-        parsed = _parse_candidate_request_content(content)
-        if not parsed.need_confirmation and parsed.aoi_input and parsed.time_range:
-            return content
+        if _is_executable_followup_request(content, latest_task=latest_task):
+            return message
+
+        has_upload = has_recent_uploads and UPLOAD_REQUEST_HINT_PATTERN.search(content) is not None
+        parsed = _parse_candidate_request_content(content, has_upload=has_upload)
+        if parsed.aoi_input and parsed.time_range:
+            return message
     return None
 
 
@@ -652,6 +669,10 @@ def create_message_and_task(
 
 
 def create_message(db: Session, payload: MessageCreateRequest) -> MessageCreateResponse:
+    settings = get_settings()
+    if not settings.intent_router_enabled:
+        return create_message_and_task(db=db, payload=payload)
+
     session = db.get(SessionRecord, payload.session_id)
     if session is None:
         raise AppError.not_found(
@@ -673,6 +694,7 @@ def create_message(db: Session, payload: MessageCreateRequest) -> MessageCreateR
         db,
         session_id=payload.session_id,
         exclude_message_id=message.id,
+        limit=settings.intent_history_limit,
     )
     intent_result = classify_message_intent(
         payload.content,
@@ -681,12 +703,19 @@ def create_message(db: Session, payload: MessageCreateRequest) -> MessageCreateR
     )
 
     if is_task_confirmation_message(payload.content):
-        request_content = _find_latest_executable_request_content(
+        fallback_file_ids = _load_recent_session_file_ids(
+            db,
+            session_id=payload.session_id,
+            limit=settings.intent_history_limit,
+        )
+        source_request_message = _find_latest_executable_request_message(
             db,
             session_id=payload.session_id,
             current_message_id=message.id,
+            has_recent_uploads=bool(fallback_file_ids),
+            limit=settings.intent_history_limit,
         )
-        if request_content is None:
+        if source_request_message is None:
             return _create_chat_mode_response(
                 db,
                 user_message_id=message.id,
@@ -696,12 +725,22 @@ def create_message(db: Session, payload: MessageCreateRequest) -> MessageCreateR
                 intent_confidence=intent_result.confidence,
             )
 
+        task_payload = payload
+        if (
+            not task_payload.file_ids
+            and fallback_file_ids
+            and UPLOAD_REQUEST_HINT_PATTERN.search(source_request_message.content)
+        ):
+            task_payload = payload.model_copy(update={"file_ids": fallback_file_ids})
+
         task_response = create_message_and_task(
             db=db,
-            payload=payload,
+            payload=task_payload,
             existing_user_message=message,
-            task_request_content=request_content,
+            task_request_content=source_request_message.content,
         )
+        source_request_message.linked_task_id = task_response.task_id
+        db.commit()
         task_response.intent = intent_result.intent
         task_response.intent_confidence = intent_result.confidence
         task_response.awaiting_task_confirmation = False
@@ -709,7 +748,7 @@ def create_message(db: Session, payload: MessageCreateRequest) -> MessageCreateR
 
     if (
         intent_result.intent == "task"
-        and intent_result.confidence >= INTENT_TASK_CONFIDENCE_THRESHOLD
+        and intent_result.confidence >= settings.intent_task_confidence_threshold
     ):
         return _create_chat_mode_response(
             db,
