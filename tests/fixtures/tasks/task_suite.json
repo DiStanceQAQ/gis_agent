@@ -40,6 +40,50 @@
     }
   },
   {
+    "id": "approval_edit_plan_then_execute",
+    "category": "success",
+    "scenario": "create_only",
+    "message": "bbox(116.1,39.8,116.5,40.1) 在 2024-06-01 到 2024-06-30 的 NDVI，并导出 GeoTIFF",
+    "approval_action": "edit_and_approve",
+    "manual_plan_edit": {
+      "first_node_params": {
+        "crop": false
+      }
+    },
+    "expected": {
+      "status": "awaiting_approval",
+      "event_types": ["task_plan_built", "task_plan_drafted"],
+      "after_approve_status": "success",
+      "after_approve_event_types": [
+        "task_plan_validated",
+        "task_plan_approved",
+        "step_react_decision",
+        "function_call_requested",
+        "function_call_completed",
+        "task_completed"
+      ],
+      "after_approve_first_node_params": {
+        "crop": false
+      }
+    }
+  },
+  {
+    "id": "approval_reject_then_cancelled",
+    "category": "failure",
+    "scenario": "create_only",
+    "message": "bbox(116.1,39.8,116.5,40.1) 在 2024-06-01 到 2024-06-30 的 NDVI，并导出 GeoTIFF",
+    "approval_action": "reject",
+    "reject_reason": "先不执行，等我确认范围",
+    "expected": {
+      "status": "awaiting_approval",
+      "event_types": ["task_plan_built", "task_plan_drafted"],
+      "after_reject_status": "cancelled",
+      "after_reject_event_types": ["task_plan_rejected", "task_cancelled"],
+      "after_reject_error_code": "task_cancelled_by_user",
+      "after_reject_reason": "先不执行，等我确认范围"
+    }
+  },
+  {
     "id": "success_place_alias_summer",
     "category": "success",
     "scenario": "create_and_run",

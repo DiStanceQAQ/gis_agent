@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -28,6 +29,7 @@ from packages.domain.services.graph import runtime_helpers
 from packages.domain.services.graph.runner import run_task_graph
 from packages.domain.services.planner import PLAN_STATUS_NEEDS_CLARIFICATION, TaskPlan
 from packages.schemas.message import MessageCreateRequest
+from packages.schemas.operation_plan import OperationPlan
 from packages.schemas.task import ParsedTaskSpec
 
 
@@ -196,6 +198,29 @@ def _capture_task_state(task_id: str) -> dict[str, Any]:
         }
 
 
+def _build_manual_edited_plan(
+    operation_plan: OperationPlan,
+    *,
+    sample: dict[str, Any],
+) -> OperationPlan:
+    edit_spec = sample.get("manual_plan_edit") or {}
+    edited_payload = deepcopy(operation_plan.model_dump())
+    edited_payload["version"] = int(operation_plan.version) + 1
+    nodes = list(edited_payload.get("nodes") or [])
+    if nodes:
+        first_node_params = edit_spec.get("first_node_params")
+        if isinstance(first_node_params, dict):
+            nodes[0]["params"] = {**(nodes[0].get("params") or {}), **first_node_params}
+        export_formats = edit_spec.get("export_formats")
+        if isinstance(export_formats, list) and nodes[-1].get("op_name") == "artifact.export":
+            nodes[-1]["params"] = {
+                **(nodes[-1].get("params") or {}),
+                "formats": [str(item) for item in export_formats],
+            }
+    edited_payload["nodes"] = nodes
+    return OperationPlan(**edited_payload)
+
+
 def _assert_expected(result: dict[str, Any]) -> None:
     sample = result["sample"]
     expected = sample["expected"]
@@ -270,6 +295,25 @@ def _assert_expected(result: dict[str, Any]) -> None:
         assert after_approve["detail"].status == after_approve_status
         for event_type in expected.get("after_approve_event_types", []):
             assert event_type in after_approve["event_types"]
+        for key, value in expected.get("after_approve_first_node_params", {}).items():
+            assert after_approve["detail"].operation_plan is not None
+            assert (
+                after_approve["detail"].operation_plan.nodes[0].params.get(key) == value
+            )
+
+    after_reject_status = expected.get("after_reject_status")
+    if after_reject_status:
+        after_reject = result.get("after_reject")
+        assert after_reject is not None
+        assert after_reject["detail"].status == after_reject_status
+        for event_type in expected.get("after_reject_event_types", []):
+            assert event_type in after_reject["event_types"]
+        expected_error_code = expected.get("after_reject_error_code")
+        if expected_error_code is not None:
+            assert after_reject["detail"].error_code == expected_error_code
+        expected_reject_reason = expected.get("after_reject_reason")
+        if expected_reject_reason is not None:
+            assert after_reject["detail"].rejected_reason == expected_reject_reason
 
 
 @pytest.fixture
@@ -280,7 +324,13 @@ def sample_task_runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         sample = _load_task_sample(sample_input) if isinstance(sample_input, str) else sample_input
         _patch_sample_environment(monkeypatch, tmp_path, scenario=sample["scenario"])
         expected = sample.get("expected") or {}
-        manual_approval = bool(expected.get("after_approve_status"))
+        approval_action = sample.get("approval_action")
+        if approval_action is None:
+            if expected.get("after_approve_status"):
+                approval_action = "approve"
+            elif expected.get("after_reject_status"):
+                approval_action = "reject"
+        manual_approval = approval_action is not None
 
         initial_task_id: str | None = None
         target_task_id: str
@@ -336,16 +386,47 @@ def sample_task_runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         snapshot["initial_task_id"] = initial_task_id
 
         if manual_approval:
-            with SessionLocal() as db:
-                detail = orchestrator.get_task_detail(db, target_task_id)
-                assert detail.operation_plan is not None
-                orchestrator.approve_task_plan(
-                    db,
-                    target_task_id,
-                    approved_version=detail.operation_plan.version,
-                )
-            run_task_graph(target_task_id)
-            snapshot["after_approve"] = _capture_task_state(target_task_id)
+            if approval_action == "edit_and_approve":
+                with SessionLocal() as db:
+                    detail = orchestrator.get_task_detail(db, target_task_id)
+                    assert detail.operation_plan is not None
+                    edited_plan = _build_manual_edited_plan(detail.operation_plan, sample=sample)
+                    orchestrator.update_task_plan_draft(
+                        db,
+                        target_task_id,
+                        plan=edited_plan,
+                    )
+                    detail = orchestrator.get_task_detail(db, target_task_id)
+                    assert detail.operation_plan is not None
+                    orchestrator.approve_task_plan(
+                        db,
+                        target_task_id,
+                        approved_version=detail.operation_plan.version,
+                    )
+                run_task_graph(target_task_id)
+                snapshot["after_approve"] = _capture_task_state(target_task_id)
+            elif approval_action == "approve":
+                with SessionLocal() as db:
+                    detail = orchestrator.get_task_detail(db, target_task_id)
+                    assert detail.operation_plan is not None
+                    orchestrator.approve_task_plan(
+                        db,
+                        target_task_id,
+                        approved_version=detail.operation_plan.version,
+                    )
+                run_task_graph(target_task_id)
+                snapshot["after_approve"] = _capture_task_state(target_task_id)
+            elif approval_action == "reject":
+                with SessionLocal() as db:
+                    reject_reason = sample.get("reject_reason")
+                    orchestrator.reject_task_plan(
+                        db,
+                        target_task_id,
+                        reason=str(reject_reason) if reject_reason is not None else None,
+                    )
+                snapshot["after_reject"] = _capture_task_state(target_task_id)
+            else:  # pragma: no cover - defensive guard
+                raise AssertionError(f"Unsupported approval_action: {approval_action}")
 
         return snapshot
 
