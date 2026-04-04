@@ -6,7 +6,12 @@ import pytest
 
 from packages.domain.models import AOIRecord
 from packages.domain.services import catalog
-from packages.domain.services.catalog import CatalogCandidate, search_candidates
+from packages.domain.services.catalog import (
+    CATALOG_CANDIDATE_SUMMARY_SCHEMA_VERSION,
+    CatalogCandidate,
+    build_candidate_summaries,
+    search_candidates,
+)
 from packages.schemas.task import ParsedTaskSpec
 
 
@@ -157,3 +162,30 @@ def test_search_candidates_skips_live_search_when_time_range_missing(
     candidates = search_candidates(_spec(time_range=None), _aoi(), live_search=True)
 
     assert all(candidate.summary_json["source"] == "baseline_catalog" for candidate in candidates)
+
+
+def test_build_candidate_summaries_exposes_stable_contract() -> None:
+    summaries = build_candidate_summaries(
+        [
+            _candidate(
+                dataset_name="sentinel2",
+                score=0.91,
+                rank=1,
+            )
+        ]
+    )
+
+    assert len(summaries) == 1
+    summary = summaries[0]
+    assert summary["schema_version"] == CATALOG_CANDIDATE_SUMMARY_SCHEMA_VERSION
+    assert summary["dataset_name"] == "sentinel2"
+    assert summary["collection_id"] == "sentinel-2-l2a"
+    assert summary["recommendation_rank"] == 1
+    assert summary["quality"] == {
+        "scene_count": 6,
+        "coverage_ratio": 0.95,
+        "effective_pixel_ratio_estimate": 0.8,
+        "cloud_metric_summary": {"median": 12.0, "p75": 20.0},
+        "spatial_resolution": 10,
+        "temporal_density_note": "high",
+    }

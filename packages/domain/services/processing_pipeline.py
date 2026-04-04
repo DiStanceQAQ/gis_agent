@@ -4,6 +4,7 @@ import csv
 import json
 import sqlite3
 import struct
+import zlib
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ import shapefile
 from rasterio.errors import RasterioIOError
 from rasterio.enums import Resampling
 from rasterio.features import rasterize
+from rasterio.mask import mask as rasterio_mask
 from rasterio.transform import from_origin
 from rasterio.warp import calculate_default_transform, reproject, transform_geom
 from shapely.geometry import GeometryCollection, box, mapping, shape
@@ -24,7 +26,7 @@ def _pick_primary_raster_reference(references: dict[str, str]) -> str | None:
     for ref in references.values():
         if ref.lower().endswith(".tif") or ref.lower().endswith(".tiff"):
             return ref
-    return next(iter(references.values()), None)
+    return None
 
 
 def _pick_primary_vector_reference(references: dict[str, str]) -> str | None:
@@ -35,13 +37,23 @@ def _pick_primary_vector_reference(references: dict[str, str]) -> str | None:
 
 
 def _ensure_placeholder_artifacts(working_dir: Path, *, tif_path: str | None, png_path: str | None) -> tuple[str, str]:
-    resolved_tif = Path(tif_path) if tif_path else working_dir / "processing_output.tif"
-    resolved_png = Path(png_path) if png_path else working_dir / "processing_preview.png"
+    candidate_tif = Path(tif_path) if tif_path else None
+    resolved_tif = (
+        candidate_tif
+        if candidate_tif is not None and candidate_tif.suffix.lower() in {".tif", ".tiff"}
+        else working_dir / "processing_output.tif"
+    )
+    candidate_png = Path(png_path) if png_path else None
+    resolved_png = (
+        candidate_png
+        if candidate_png is not None and candidate_png.suffix.lower() == ".png"
+        else working_dir / "processing_preview.png"
+    )
 
     if not _is_supported_raster(resolved_tif):
         _create_default_raster(resolved_tif)
     if not resolved_png.exists():
-        resolved_png.write_bytes(b"processing-preview")
+        _write_png_preview_from_raster(raster_path=resolved_tif, png_path=resolved_png)
 
     return str(resolved_tif), str(resolved_png)
 
@@ -112,6 +124,54 @@ def _write_raster_copy(*, source_path: Path, output_path: Path) -> None:
         data = src.read()
         with rasterio.open(output_path, "w", **profile) as dst:
             dst.write(data)
+
+
+def _png_chunk(chunk_type: bytes, payload: bytes) -> bytes:
+    return (
+        len(payload).to_bytes(4, "big")
+        + chunk_type
+        + payload
+        + zlib.crc32(chunk_type + payload).to_bytes(4, "big")
+    )
+
+
+def _write_grayscale_png(path: Path, pixels: np.ndarray) -> None:
+    if pixels.ndim != 2:
+        raise ValueError("PNG preview expects a 2D grayscale array")
+    height, width = pixels.shape
+    raw_scanlines = b"".join(b"\x00" + pixels[row].tobytes() for row in range(height))
+    compressed = zlib.compress(raw_scanlines, level=9)
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0)
+    png_bytes = b"".join(
+        [
+            b"\x89PNG\r\n\x1a\n",
+            _png_chunk(b"IHDR", ihdr),
+            _png_chunk(b"IDAT", compressed),
+            _png_chunk(b"IEND", b""),
+        ]
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(png_bytes)
+
+
+def _write_png_preview_from_raster(*, raster_path: Path, png_path: Path) -> None:
+    if not _is_supported_raster(raster_path):
+        _create_default_raster(raster_path)
+
+    with rasterio.open(raster_path) as src:
+        data = src.read(1).astype("float32")
+        mask = _valid_data_mask(data, src.nodata)
+        preview = np.zeros(data.shape, dtype="uint8")
+        if mask.any():
+            valid_values = data[mask]
+            min_value = float(valid_values.min())
+            max_value = float(valid_values.max())
+            if max_value - min_value < 1e-8:
+                preview[mask] = 255
+            else:
+                normalized = (data - min_value) / (max_value - min_value)
+                preview[mask] = np.clip(normalized[mask] * 255.0, 0.0, 255.0).astype("uint8")
+    _write_grayscale_png(png_path, preview)
 
 
 def _valid_data_mask(data: np.ndarray, nodata: float | None) -> np.ndarray:
@@ -330,6 +390,73 @@ def _resolve_overlay_geometries(
     return geometries, crs_name
 
 
+def _resolve_explicit_geometries(
+    *,
+    node: dict[str, Any],
+    references: dict[str, str],
+    input_keys: tuple[str, ...],
+    path_param_keys: tuple[str, ...],
+    geometry_param_keys: tuple[str, ...],
+    geometries_param_keys: tuple[str, ...],
+    bbox_param_keys: tuple[str, ...],
+    crs_param_keys: tuple[str, ...],
+    fallback_crs: str = "EPSG:4326",
+) -> tuple[list[dict[str, Any]], str]:
+    inputs = node.get("inputs") or {}
+    params = node.get("params") or {}
+    geometries: list[dict[str, Any]] = []
+    detected_crs: str | None = None
+    has_explicit_input = False
+
+    for key in input_keys:
+        if key in inputs and inputs.get(key) is not None:
+            has_explicit_input = True
+            part, part_crs = _resolve_vector_input(inputs.get(key), references=references)
+            geometries.extend(part)
+            if part_crs:
+                detected_crs = part_crs
+    for key in path_param_keys:
+        if key in params and params.get(key) is not None:
+            has_explicit_input = True
+            part, part_crs = _resolve_vector_input(params.get(key), references=references)
+            geometries.extend(part)
+            if part_crs:
+                detected_crs = part_crs
+    for key in geometry_param_keys:
+        if key in params:
+            has_explicit_input = True
+        value = params.get(key)
+        if isinstance(value, dict) and value.get("type"):
+            geometries.append(value)
+    for key in geometries_param_keys:
+        if key in params:
+            has_explicit_input = True
+        value = params.get(key)
+        if isinstance(value, list):
+            for geom in value:
+                if isinstance(geom, dict) and geom.get("type"):
+                    geometries.append(geom)
+    for key in bbox_param_keys:
+        if key in params:
+            has_explicit_input = True
+        bbox = params.get(key)
+        if isinstance(bbox, list) and len(bbox) == 4:
+            minx, miny, maxx, maxy = [float(item) for item in bbox]
+            geometries.append(box(minx, miny, maxx, maxy).__geo_interface__)
+
+    if not has_explicit_input:
+        return [], fallback_crs
+    crs_name = next(
+        (
+            str(params.get(key))
+            for key in crs_param_keys
+            if params.get(key) is not None and str(params.get(key)).strip()
+        ),
+        None,
+    )
+    return geometries, crs_name or detected_crs or fallback_crs
+
+
 def _geometry_dicts_to_shapes(geometries: list[dict[str, Any]]) -> list[Any]:
     return [shape(geometry) for geometry in geometries if isinstance(geometry, dict)]
 
@@ -344,6 +471,24 @@ def _shape_to_geometry_list(geom: Any) -> list[dict[str, Any]]:
                 results.append(mapping(part))
         return results
     return [mapping(geom)]
+
+
+def _compute_zone_stats(values: np.ndarray, stats: list[str]) -> list[float | None]:
+    stat_values: list[float | None] = []
+    for stat in stats:
+        if values.size == 0:
+            stat_values.append(None)
+        elif stat == "mean":
+            stat_values.append(float(values.mean()))
+        elif stat == "min":
+            stat_values.append(float(values.min()))
+        elif stat == "max":
+            stat_values.append(float(values.max()))
+        elif stat == "sum":
+            stat_values.append(float(values.sum()))
+        else:
+            raise ValueError(f"Unsupported zonal_stats metric: {stat}")
+    return stat_values
 
 
 def _require_matching_crs(*, left_crs: str, right_crs: str, op_name: str) -> None:
@@ -584,6 +729,8 @@ def _compute_raster_metrics(tif_path: str) -> dict[str, object]:
 
 def run_processing_pipeline(*, task_id: str, plan_nodes: list[dict[str, Any]], working_dir: Path) -> dict[str, Any]:
     del task_id
+    if not plan_nodes:
+        raise ValueError("Operation plan nodes must not be empty.")
     working_dir.mkdir(parents=True, exist_ok=True)
 
     pending_nodes = [dict(node) for node in plan_nodes]
@@ -610,7 +757,43 @@ def run_processing_pipeline(*, task_id: str, plan_nodes: list[dict[str, Any]], w
                 output_ref = str(outputs.get("raster") or step_id or "raster_clip")
                 output_path = working_dir / f"{step_id or output_ref}.tif"
                 source_path = _resolve_raster_source(node=node, references=references, working_dir=working_dir)
-                _write_raster_copy(source_path=source_path, output_path=output_path)
+                clip_geometries, clip_crs = _resolve_explicit_geometries(
+                    node=node,
+                    references=references,
+                    input_keys=("aoi", "clip_vector", "vector"),
+                    path_param_keys=("aoi_path", "clip_path", "vector_path"),
+                    geometry_param_keys=("geometry", "clip_geometry"),
+                    geometries_param_keys=("geometries", "clip_geometries"),
+                    bbox_param_keys=("bbox", "clip_bbox"),
+                    crs_param_keys=("aoi_crs", "clip_crs", "source_crs"),
+                )
+                if clip_geometries:
+                    with rasterio.open(source_path) as src:
+                        clip_shapes = clip_geometries
+                        source_crs_name = str(clip_crs or "EPSG:4326")
+                        target_crs_name = str(src.crs) if src.crs else "EPSG:4326"
+                        if source_crs_name != target_crs_name:
+                            clip_shapes = [
+                                transform_geom(source_crs_name, target_crs_name, geometry)
+                                for geometry in clip_geometries
+                            ]
+
+                        clipped_data, clipped_transform = rasterio_mask(
+                            src,
+                            clip_shapes,
+                            crop=bool(params.get("crop", True)),
+                            all_touched=bool(params.get("all_touched", False)),
+                        )
+                        profile = src.profile.copy()
+                        profile.update(
+                            height=clipped_data.shape[1],
+                            width=clipped_data.shape[2],
+                            transform=clipped_transform,
+                        )
+                        with rasterio.open(output_path, "w", **profile) as dst:
+                            dst.write(clipped_data)
+                else:
+                    _write_raster_copy(source_path=source_path, output_path=output_path)
                 references[output_ref] = str(output_path)
             elif op_name == "raster.reproject":
                 output_ref = str(outputs.get("raster") or step_id or "raster_reproject")
@@ -697,31 +880,50 @@ def run_processing_pipeline(*, task_id: str, plan_nodes: list[dict[str, Any]], w
                 output_path = working_dir / f"{step_id or table_ref}.csv"
                 source_path = _resolve_raster_source(node=node, references=references, working_dir=working_dir)
                 stats = [str(item).lower() for item in (params.get("stats") or ["mean", "min", "max"])]
+                zone_geometries, zone_crs = _resolve_explicit_geometries(
+                    node=node,
+                    references=references,
+                    input_keys=("zones", "vector", "aoi"),
+                    path_param_keys=("zones_path", "zone_path"),
+                    geometry_param_keys=("zones_geometry", "zone_geometry", "geometry"),
+                    geometries_param_keys=("zones_geometries", "geometries"),
+                    bbox_param_keys=("zones_bbox",),
+                    crs_param_keys=("zones_crs", "zone_crs", "source_crs"),
+                )
                 with rasterio.open(source_path) as src:
                     data = src.read(1).astype("float32")
                     nodata = src.nodata
-                    mask = _valid_data_mask(data, nodata)
-                    values = data[mask]
-
-                stat_values: dict[str, float | None] = {}
-                for stat in stats:
-                    if values.size == 0:
-                        stat_values[stat] = None
-                    elif stat == "mean":
-                        stat_values[stat] = float(values.mean())
-                    elif stat == "min":
-                        stat_values[stat] = float(values.min())
-                    elif stat == "max":
-                        stat_values[stat] = float(values.max())
-                    elif stat == "sum":
-                        stat_values[stat] = float(values.sum())
+                    valid_mask = _valid_data_mask(data, nodata)
+                    rows: list[list[float | None | str]] = []
+                    if zone_geometries:
+                        target_crs_name = str(src.crs) if src.crs else "EPSG:4326"
+                        zones_for_raster = zone_geometries
+                        source_crs_name = str(zone_crs or "EPSG:4326")
+                        if source_crs_name != target_crs_name:
+                            zones_for_raster = [
+                                transform_geom(source_crs_name, target_crs_name, geometry)
+                                for geometry in zone_geometries
+                            ]
+                        for index, zone_geometry in enumerate(zones_for_raster, start=1):
+                            zone_mask = rasterize(
+                                [(zone_geometry, 1)],
+                                out_shape=(src.height, src.width),
+                                transform=src.transform,
+                                fill=0,
+                                all_touched=bool(params.get("all_touched", False)),
+                                dtype="uint8",
+                            ).astype(bool)
+                            zone_values = data[zone_mask & valid_mask]
+                            rows.append([str(index), *_compute_zone_stats(zone_values, stats)])
                     else:
-                        raise ValueError(f"Unsupported zonal_stats metric: {stat}")
+                        values = data[valid_mask]
+                        rows.append(["all", *_compute_zone_stats(values, stats)])
 
                 with output_path.open("w", newline="", encoding="utf-8") as csv_file:
                     writer = csv.writer(csv_file)
                     writer.writerow(["zone_id", *stats])
-                    writer.writerow(["all", *[stat_values[stat] for stat in stats]])
+                    for row in rows:
+                        writer.writerow(row)
                 references[table_ref] = str(output_path)
             elif op_name == "raster.terrain_slope":
                 output_ref = str(outputs.get("raster") or step_id or "raster_terrain_slope")
@@ -1198,7 +1400,15 @@ def run_processing_pipeline(*, task_id: str, plan_nodes: list[dict[str, Any]], w
                         produced_artifact_path = str(source_path)
                     elif fmt_name in {"png", "png_map"}:
                         png_path = working_dir / f"{step_id or 'export'}_preview.png"
-                        png_path.write_bytes(b"png-output")
+                        raster_source = Path(source_path)
+                        if not _is_supported_raster(raster_source):
+                            primary_raster = _pick_primary_raster_reference(references)
+                            if primary_raster is not None:
+                                raster_source = Path(primary_raster)
+                            else:
+                                raster_source = working_dir / f"{step_id or 'export'}_raster.tif"
+                                _create_default_raster(raster_source)
+                        _write_png_preview_from_raster(raster_path=raster_source, png_path=png_path)
                         artifacts.append(
                             {"artifact_type": "png_map", "path": str(png_path), "source_step": step_id}
                         )

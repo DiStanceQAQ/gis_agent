@@ -6,6 +6,7 @@ from packages.domain.services.orchestrator import (
     approve_task_plan,
     get_task_detail,
     get_task_events,
+    reject_task_plan,
     rerun_task,
     update_task_plan_draft,
 )
@@ -16,6 +17,7 @@ from packages.schemas.task import (
     TaskEventsResponse,
     TaskPlanApproveRequest,
     TaskPlanPatchRequest,
+    TaskPlanRejectRequest,
 )
 
 router = APIRouter(tags=["tasks"])
@@ -80,3 +82,16 @@ def approve_task_plan_endpoint(
     db: Session = Depends(get_db),
 ) -> TaskDetailResponse:
     return approve_task_plan(db=db, task_id=task_id, approved_version=payload.approved_version)
+
+
+@router.post(
+    "/tasks/{task_id}/reject",
+    response_model=TaskDetailResponse,
+    responses={400: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
+)
+def reject_task_plan_endpoint(
+    task_id: str,
+    payload: TaskPlanRejectRequest,
+    db: Session = Depends(get_db),
+) -> TaskDetailResponse:
+    return reject_task_plan(db=db, task_id=task_id, reason=payload.reason)

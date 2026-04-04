@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
+from packages.domain.services.operation_registry import list_operation_specs
 from packages.schemas.operation_plan import OperationNode, OperationPlan
 
 
@@ -73,3 +74,35 @@ def test_operation_node_accepts_registered_name_shape() -> None:
     )
 
     assert node.op_name == "raster.clip"
+
+
+@pytest.mark.parametrize(
+    "op_name",
+    [
+        "raster.mosaic",
+        "raster.reclassify",
+        "raster.mask",
+        "raster.rasterize",
+        "vector.clip",
+        "vector.union",
+        "vector.spatial_join",
+        "vector.repair",
+    ],
+)
+def test_operation_node_accepts_extended_registry_operations(op_name: str) -> None:
+    node = OperationNode(
+        step_id=f"step-{op_name.replace('.', '-')}",
+        op_name=op_name,
+        depends_on=[],
+        inputs={},
+        params={},
+        outputs={},
+        retry_policy={"max_retries": 0},
+    )
+    assert node.op_name == op_name
+
+
+def test_operation_schema_operation_names_align_with_registry() -> None:
+    schema_names = set(OperationNode.model_fields["op_name"].annotation.__args__)
+    registry_names = {spec.op_name for spec in list_operation_specs()}
+    assert schema_names == registry_names

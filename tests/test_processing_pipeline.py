@@ -68,15 +68,9 @@ def test_run_processing_pipeline_executes_clip_then_export(tmp_path) -> None:
     assert "artifacts" in outputs
 
 
-def test_run_processing_pipeline_empty_plan_still_returns_valid_raster(tmp_path) -> None:
-    outputs = run_processing_pipeline(task_id="task_empty", plan_nodes=[], working_dir=tmp_path)
-
-    tif_path = Path(outputs["tif_path"])
-    assert tif_path.exists()
-    with rasterio.open(tif_path) as dataset:
-        assert dataset.width > 0
-        assert dataset.height > 0
-    assert outputs["valid_pixel_ratio"] is not None
+def test_run_processing_pipeline_empty_plan_fails_fast(tmp_path) -> None:
+    with pytest.raises(ValueError, match="must not be empty"):
+        run_processing_pipeline(task_id="task_empty", plan_nodes=[], working_dir=tmp_path)
 
 
 def test_run_processing_pipeline_supports_phase1_raster_ops(tmp_path) -> None:
@@ -572,3 +566,97 @@ def test_vector_simplify_requires_positive_tolerance(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="positive tolerance"):
         run_processing_pipeline(task_id="task_vector_simplify", plan_nodes=plan_nodes, working_dir=tmp_path)
+
+
+def test_raster_clip_applies_bbox_crop(tmp_path) -> None:
+    source_raster = tmp_path / "clip_source.tif"
+    _create_test_raster(source_raster)
+
+    plan_nodes = [
+        {
+            "step_id": "clip_bbox",
+            "op_name": "raster.clip",
+            "depends_on": [],
+            "inputs": {},
+            "params": {
+                "source_path": str(source_raster),
+                "bbox": [116.0, 39.96, 116.04, 40.0],
+                "crop": True,
+            },
+            "outputs": {"raster": "r_clip"},
+        }
+    ]
+
+    outputs = run_processing_pipeline(task_id="task_clip_bbox", plan_nodes=plan_nodes, working_dir=tmp_path)
+    clipped_path = Path(outputs["tif_path"])
+
+    with rasterio.open(clipped_path) as dataset:
+        assert dataset.width < 8
+        assert dataset.height < 8
+        assert dataset.bounds.left >= 116.0
+        assert dataset.bounds.right <= 116.05 + 1e-6
+
+
+def test_raster_zonal_stats_outputs_per_zone_rows(tmp_path) -> None:
+    source_raster = tmp_path / "zonal_source.tif"
+    _create_test_raster(source_raster)
+
+    zones_geojson = tmp_path / "zones.geojson"
+    _write_test_geojson(
+        zones_geojson,
+        [
+            [[116.0, 39.92], [116.04, 39.92], [116.04, 40.0], [116.0, 40.0], [116.0, 39.92]],
+            [[116.04, 39.92], [116.08, 39.92], [116.08, 40.0], [116.04, 40.0], [116.04, 39.92]],
+        ],
+    )
+
+    plan_nodes = [
+        {
+            "step_id": "zonal_by_zone",
+            "op_name": "raster.zonal_stats",
+            "depends_on": [],
+            "inputs": {"zones": str(zones_geojson)},
+            "params": {"source_path": str(source_raster), "stats": ["mean", "min", "max"]},
+            "outputs": {"table": "z_stats"},
+        }
+    ]
+
+    run_processing_pipeline(task_id="task_zonal_rows", plan_nodes=plan_nodes, working_dir=tmp_path)
+    table_path = tmp_path / "zonal_by_zone.csv"
+    assert table_path.exists()
+
+    rows = table_path.read_text(encoding="utf-8").strip().splitlines()
+    assert rows[0] == "zone_id,mean,min,max"
+    assert len(rows) == 3
+
+    zone_1_values = [float(value) for value in rows[1].split(",")[1:]]
+    zone_2_values = [float(value) for value in rows[2].split(",")[1:]]
+    assert zone_1_values[0] != zone_2_values[0]
+
+
+def test_artifact_export_png_map_is_valid_png(tmp_path) -> None:
+    source_raster = tmp_path / "png_source.tif"
+    _create_test_raster(source_raster)
+
+    plan_nodes = [
+        {
+            "step_id": "clip_png",
+            "op_name": "raster.clip",
+            "depends_on": [],
+            "inputs": {},
+            "params": {"source_path": str(source_raster)},
+            "outputs": {"raster": "r_png"},
+        },
+        {
+            "step_id": "export_png",
+            "op_name": "artifact.export",
+            "depends_on": ["clip_png"],
+            "inputs": {"primary": "r_png"},
+            "params": {"formats": ["png_map"]},
+            "outputs": {"artifact": "a_png"},
+        },
+    ]
+
+    outputs = run_processing_pipeline(task_id="task_png_preview", plan_nodes=plan_nodes, working_dir=tmp_path)
+    png_path = next(Path(item["path"]) for item in outputs["artifacts"] if item["artifact_type"] == "png_map")
+    assert png_path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")

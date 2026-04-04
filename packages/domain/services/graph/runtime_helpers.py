@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -10,7 +11,11 @@ from packages.domain.config import get_settings
 from packages.domain.errors import ErrorCode
 from packages.domain.logging import get_logger
 from packages.domain.models import ArtifactRecord, TaskRunRecord
-from packages.domain.services.catalog import persist_candidates, search_candidates
+from packages.domain.services.catalog import (
+    build_candidate_summaries,
+    persist_candidates,
+    search_candidates,
+)
 from packages.domain.services.explanation import ExplanationContext, build_methods_text, build_summary_text
 from packages.domain.services.processing_pipeline import run_processing_pipeline
 from packages.domain.services.planner import (
@@ -64,6 +69,14 @@ class PipelineExecutionContext:
     pipeline_outputs: dict[str, object] | None = None
 
 
+@dataclass
+class StepReactDecision:
+    should_continue: bool
+    reasoning: str
+    function_name: str
+    function_arguments: dict[str, Any] = field(default_factory=dict)
+
+
 def _require_task_bbox(task: TaskRunRecord) -> list[float]:
     if task.aoi and task.aoi.bbox_bounds_json:
         return [float(value) for value in task.aoi.bbox_bounds_json]
@@ -97,12 +110,23 @@ def _tool_search_candidates(db: Session, task: TaskRunRecord, context: PipelineE
     persist_candidates(db, task=task, candidates=candidates)
     context.candidates = candidates
     context.candidate_qc = candidate_qc
+    candidate_summaries = build_candidate_summaries(candidates)
+    qc_detail = candidate_qc.to_dict()
 
     detail = {
         "candidate_count": len(candidates),
         "collections": [candidate.collection_id for candidate in candidates],
-        "qc": candidate_qc.to_dict(),
+        "qc": qc_detail,
+        "candidate_summaries": candidate_summaries,
     }
+    append_task_event(
+        db,
+        task_id=task.id,
+        event_type="task_catalog_candidates_ready",
+        step_name="search_candidates",
+        status=task.status,
+        detail=detail,
+    )
     if candidate_qc.status == "warn":
         append_task_event(
             db,
@@ -110,7 +134,10 @@ def _tool_search_candidates(db: Session, task: TaskRunRecord, context: PipelineE
             event_type="task_qc_warning",
             step_name="search_candidates",
             status=task.status,
-            detail=candidate_qc.to_dict(),
+            detail={
+                "qc": qc_detail,
+                "candidate_summaries": candidate_summaries,
+            },
         )
     return detail
 
@@ -445,6 +472,33 @@ def mark_current_step_failed(
     )
 
 
+def _build_step_react_decision(
+    *,
+    step_name: str,
+    tool_name: str,
+    title: str,
+    context: PipelineExecutionContext,
+) -> StepReactDecision:
+    parsed_dataset = context.parsed_spec.requested_dataset or "auto"
+    return StepReactDecision(
+        should_continue=True,
+        reasoning=(
+            f"当前步骤 {step_name} 依赖已满足，继续调用 {tool_name}（{title}）推进流程；"
+            f"数据源偏好={parsed_dataset}。"
+        ),
+        function_name=tool_name,
+        function_arguments={"step_name": step_name},
+    )
+
+
+def _build_step_react_observation(detail: dict[str, object]) -> dict[str, object]:
+    preview = {key: detail[key] for key in list(detail.keys())[:5]}
+    return {
+        "observation_keys": sorted(detail.keys()),
+        "observation_preview": preview,
+    }
+
+
 def execute_tool_step(
     db: Session,
     task: TaskRunRecord,
@@ -456,6 +510,49 @@ def execute_tool_step(
     handler,
     start: float,
 ) -> None:
+    react_decision = _build_step_react_decision(
+        step_name=step_name,
+        tool_name=tool_name,
+        title=title,
+        context=context,
+    )
+    append_task_event(
+        db,
+        task_id=task.id,
+        event_type="step_react_decision",
+        step_name=step_name,
+        status=task.status,
+        detail={
+            "should_continue": react_decision.should_continue,
+            "reasoning": react_decision.reasoning,
+            "function_name": react_decision.function_name,
+            "function_arguments": react_decision.function_arguments,
+        },
+    )
+    if not react_decision.should_continue:
+        raise AgentRuntimeError(
+            error_code=ErrorCode.TASK_RUNTIME_FAILED,
+            message=f"ReAct decision blocked step execution: {step_name}",
+            detail={"step_name": step_name, "reasoning": react_decision.reasoning},
+        )
+    if react_decision.function_name != tool_name:
+        raise AgentRuntimeError(
+            error_code=ErrorCode.TASK_RUNTIME_UNKNOWN_TOOL,
+            message=f"ReAct selected unknown tool: {react_decision.function_name}",
+            detail={"step_name": step_name, "tool_name": react_decision.function_name},
+        )
+    append_task_event(
+        db,
+        task_id=task.id,
+        event_type="function_call_requested",
+        step_name=step_name,
+        status=task.status,
+        detail={
+            "function_name": react_decision.function_name,
+            "arguments": react_decision.function_arguments,
+        },
+    )
+
     set_step_status(db, task, step_name, STEP_STATUS_RUNNING)
     task.plan_json = set_task_plan_step_status(
         task.plan_json,
@@ -492,6 +589,22 @@ def execute_tool_step(
         step_name=step_name,
         status=task.status,
         detail={"tool_name": tool_name, "title": title},
+    )
+    append_task_event(
+        db,
+        task_id=task.id,
+        event_type="function_call_completed",
+        step_name=step_name,
+        status=task.status,
+        detail={"function_name": react_decision.function_name},
+    )
+    append_task_event(
+        db,
+        task_id=task.id,
+        event_type="step_react_observation",
+        step_name=step_name,
+        status=task.status,
+        detail=_build_step_react_observation(detail),
     )
     db.commit()
 

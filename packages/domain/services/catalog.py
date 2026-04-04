@@ -41,6 +41,75 @@ class CatalogCandidate:
     summary_json: dict[str, object]
 
 
+CATALOG_CANDIDATE_SUMMARY_SCHEMA_VERSION = "v1"
+
+
+def _to_int(value: Any, *, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        return int(value)
+    return default
+
+
+def _to_float(value: Any, *, default: float = 0.0) -> float:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    return default
+
+
+def build_candidate_summary(candidate: Any) -> dict[str, object]:
+    cloud_metric_summary_raw = getattr(candidate, "cloud_metric_summary", None)
+    cloud_metric_summary_dict = cloud_metric_summary_raw if isinstance(cloud_metric_summary_raw, dict) else {}
+    cloud_metric_summary = {
+        "median": round(_to_float(cloud_metric_summary_dict.get("median")), 3),
+        "p75": round(_to_float(cloud_metric_summary_dict.get("p75")), 3),
+    }
+
+    scene_count = _to_int(getattr(candidate, "scene_count", 0))
+    coverage_ratio = _to_float(getattr(candidate, "coverage_ratio", 0.0))
+    effective_pixel_ratio_estimate = _to_float(
+        getattr(candidate, "effective_pixel_ratio_estimate", 0.0)
+    )
+    spatial_resolution = _to_int(getattr(candidate, "spatial_resolution", 0))
+    temporal_density_note_value = getattr(candidate, "temporal_density_note", None)
+    temporal_density_note = str(temporal_density_note_value) if temporal_density_note_value is not None else None
+
+    quality_summary = {
+        "scene_count": scene_count,
+        "coverage_ratio": round(coverage_ratio, 3),
+        "effective_pixel_ratio_estimate": round(effective_pixel_ratio_estimate, 3),
+        "cloud_metric_summary": cloud_metric_summary,
+        "spatial_resolution": spatial_resolution,
+        "temporal_density_note": temporal_density_note,
+    }
+
+    summary_json_raw = getattr(candidate, "summary_json", None)
+    summary_json = summary_json_raw if isinstance(summary_json_raw, dict) else None
+
+    return {
+        "schema_version": CATALOG_CANDIDATE_SUMMARY_SCHEMA_VERSION,
+        "dataset_name": getattr(candidate, "dataset_name", None),
+        "collection_id": getattr(candidate, "collection_id", None),
+        "scene_count": scene_count,
+        "coverage_ratio": round(coverage_ratio, 3),
+        "effective_pixel_ratio_estimate": round(effective_pixel_ratio_estimate, 3),
+        "cloud_metric_summary": cloud_metric_summary,
+        "spatial_resolution": spatial_resolution,
+        "temporal_density_note": temporal_density_note,
+        "suitability_score": round(_to_float(getattr(candidate, "suitability_score", 0.0)), 3),
+        "recommendation_rank": _to_int(getattr(candidate, "recommendation_rank", 0)),
+        "summary_json": summary_json,
+        "quality": quality_summary,
+    }
+
+
+def build_candidate_summaries(candidates: list[Any]) -> list[dict[str, object]]:
+    return [build_candidate_summary(candidate) for candidate in candidates]
+
+
 COLLECTION_PROFILES = (
     CollectionProfile(
         dataset_name="sentinel2",

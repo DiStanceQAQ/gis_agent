@@ -144,6 +144,8 @@ class TaskDetailResponse(BaseModel):
     error_code: str | None = None
     error_message: str | None = None
     clarification_message: str | None = None
+    rejected_reason: str | None = None
+    rejected_at: datetime | None = None
 
 
 class RerunTaskRequest(BaseModel):
@@ -156,3 +158,7 @@ class TaskPlanPatchRequest(BaseModel):
 
 class TaskPlanApproveRequest(BaseModel):
     approved_version: int = Field(ge=1)
+
+
+class TaskPlanRejectRequest(BaseModel):
+    reason: str | None = Field(default=None, max_length=500)

@@ -24,6 +24,7 @@ class ErrorCode:
     AOI_AREA_TOO_LARGE = "aoi_area_too_large"
 
     TASK_RUNTIME_FAILED = "task_runtime_failed"
+    TASK_CANCELLED_BY_USER = "task_cancelled_by_user"
     TASK_RUNTIME_UNKNOWN_TOOL = "task_runtime_unknown_tool"
     TASK_RUNTIME_INVALID_STATE_TRANSITION = "task_runtime_invalid_state_transition"
     TASK_RUNTIME_TIMEOUT = "task_runtime_timeout"

@@ -50,6 +50,12 @@ def _detect_cycle(graph: dict[str, list[str]]) -> bool:
 
 
 def validate_operation_plan(plan: OperationPlan) -> OperationPlan:
+    if not plan.nodes:
+        raise AppError.bad_request(
+            error_code=ErrorCode.PLAN_SCHEMA_INVALID,
+            message="Operation plan must include at least one node.",
+            detail={"reason": "empty_nodes"},
+        )
     graph = _build_dependency_graph(plan)
     if _detect_cycle(graph):
         raise AppError.bad_request(

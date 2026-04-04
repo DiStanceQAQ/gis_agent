@@ -19,7 +19,7 @@ from packages.domain.models import (
 )
 from packages.domain.services import orchestrator
 from packages.domain.services.planner import TaskPlan, TaskPlanStep
-from packages.domain.services.task_state import TASK_STATUS_AWAITING_APPROVAL
+from packages.domain.services.task_state import TASK_STATUS_AWAITING_APPROVAL, TASK_STATUS_CANCELLED
 from packages.schemas.operation_plan import OperationNode, OperationPlan
 from packages.schemas.task import ParsedTaskSpec
 
@@ -263,6 +263,67 @@ def test_approve_task_plan_rejects_version_mismatch_with_plan_edit_invalid(clien
         _cleanup_session(session_id)
 
 
+def test_reject_task_plan_cancels_without_queue(client: TestClient) -> None:
+    session_id = _create_session()
+    queued: list[str] = []
+    try:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(orchestrator, "_queue_or_run", lambda task_id: queued.append(task_id))
+            payload = _create_message(client, session_id)
+            reject_response = client.post(
+                f"/api/v1/tasks/{payload['task_id']}/reject",
+                json={"reason": "这次先不执行"},
+            )
+
+        assert reject_response.status_code == 200
+        rejected_detail = reject_response.json()
+        assert queued == []
+        assert rejected_detail["status"] == TASK_STATUS_CANCELLED
+        assert rejected_detail["error_code"] == "task_cancelled_by_user"
+        assert rejected_detail["rejected_reason"] == "这次先不执行"
+    finally:
+        _cleanup_session(session_id)
+
+
+def test_reject_task_plan_writes_rejected_and_cancelled_events(client: TestClient) -> None:
+    session_id = _create_session()
+    try:
+        payload = _create_message(client, session_id)
+        reject_response = client.post(
+            f"/api/v1/tasks/{payload['task_id']}/reject",
+            json={"reason": "计划不合理，先终止"},
+        )
+        assert reject_response.status_code == 200
+
+        events_response = client.get(f"/api/v1/tasks/{payload['task_id']}/events")
+        assert events_response.status_code == 200
+        event_types = [item["event_type"] for item in events_response.json()["events"]]
+        assert "task_plan_rejected" in event_types
+        assert "task_cancelled" in event_types
+    finally:
+        _cleanup_session(session_id)
+
+
+def test_reject_task_plan_requires_awaiting_approval_status(client: TestClient) -> None:
+    session_id = _create_session()
+    try:
+        payload = _create_message(client, session_id)
+        first_reject = client.post(
+            f"/api/v1/tasks/{payload['task_id']}/reject",
+            json={"reason": "先不跑"},
+        )
+        assert first_reject.status_code == 200
+
+        second_reject = client.post(
+            f"/api/v1/tasks/{payload['task_id']}/reject",
+            json={"reason": "再次拒绝"},
+        )
+        assert second_reject.status_code == 400
+        assert second_reject.json()["error"]["code"] == "plan_approval_required"
+    finally:
+        _cleanup_session(session_id)
+
+
 def test_patch_task_plan_rejects_unknown_dependency_with_plan_edit_invalid(client: TestClient) -> None:
     session_id = _create_session()
     try:
@@ -289,6 +350,33 @@ def test_patch_task_plan_rejects_unknown_dependency_with_plan_edit_invalid(clien
                             "retry_policy": {"max_retries": 0},
                         }
                     ],
+                }
+            },
+        )
+
+        assert response.status_code == 400
+        body = response.json()
+        assert body["error"]["code"] == "plan_edit_invalid"
+    finally:
+        _cleanup_session(session_id)
+
+
+def test_patch_task_plan_rejects_empty_nodes_with_plan_edit_invalid(client: TestClient) -> None:
+    session_id = _create_session()
+    try:
+        payload = _create_message(client, session_id)
+        detail = client.get(f"/api/v1/tasks/{payload['task_id']}").json()
+        operation_plan = detail["operation_plan"]
+        assert operation_plan is not None
+
+        response = client.patch(
+            f"/api/v1/tasks/{payload['task_id']}/plan",
+            json={
+                "operation_plan": {
+                    "version": operation_plan["version"] + 1,
+                    "status": "draft",
+                    "missing_fields": [],
+                    "nodes": [],
                 }
             },
         )

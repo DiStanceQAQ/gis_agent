@@ -13,11 +13,27 @@ AllowedOperationName = Literal[
     "raster.resample",
     "raster.band_math",
     "raster.zonal_stats",
+    "raster.terrain_slope",
+    "raster.terrain_aspect",
+    "raster.hillshade",
+    "raster.mosaic",
+    "raster.reclassify",
+    "raster.mask",
+    "raster.rasterize",
     "vector.buffer",
+    "vector.clip",
+    "vector.intersection",
+    "vector.dissolve",
+    "vector.reproject",
+    "vector.union",
+    "vector.erase",
+    "vector.simplify",
+    "vector.spatial_join",
+    "vector.repair",
     "artifact.export",
 ]
 
-OperationPlanStatus = Literal["draft", "validated", "approved"]
+OperationPlanStatus = Literal["draft", "validated", "approved", "rejected"]
 
 
 class OperationNode(BaseModel):

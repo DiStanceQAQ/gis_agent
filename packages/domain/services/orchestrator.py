@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime, timezone
 
 from fastapi import UploadFile
 from sqlalchemy.orm import Session, selectinload
@@ -25,6 +26,7 @@ from packages.domain.services.aoi import (
 )
 from packages.domain.services.agent_runtime import run_task_runtime
 from packages.domain.services.input_slots import classify_uploaded_inputs
+from packages.domain.services.operation_plan_defaults import build_default_operation_plan
 from packages.domain.services.planner import PLAN_STATUS_NEEDS_CLARIFICATION, build_task_plan
 from packages.domain.services.parser import (
     extract_parser_failure_error,
@@ -38,6 +40,7 @@ from packages.domain.services.task_events import append_task_event, list_task_ev
 from packages.domain.services.task_state import (
     TASK_STATUS_APPROVED,
     TASK_STATUS_AWAITING_APPROVAL,
+    TASK_STATUS_CANCELLED,
     TASK_STATUS_QUEUED,
     TASK_STATUS_WAITING_CLARIFICATION,
     set_task_status,
@@ -101,6 +104,15 @@ def _validate_operation_plan_for_edit(plan: OperationPlan) -> OperationPlan:
                 },
             ) from exc
         raise
+
+
+def _parse_iso_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 def create_session(db: Session) -> SessionResponse:
@@ -191,11 +203,10 @@ def _queue_or_run(task_id: str) -> None:
 
 
 def _build_initial_operation_plan(task_plan: TaskPlanResponse) -> OperationPlan:
-    return OperationPlan(
+    return build_default_operation_plan(
         version=1,
         status="draft",
         missing_fields=list(task_plan.missing_fields),
-        nodes=[],
     )
 
 
@@ -576,6 +587,8 @@ def get_task_detail(db: Session, task_id: str) -> TaskDetailResponse:
         error_code=task.error_code,
         error_message=task.error_message,
         clarification_message=(task_spec or {}).get("clarification_message"),
+        rejected_reason=(task.plan_json or {}).get("rejected_reason"),
+        rejected_at=_parse_iso_datetime((task.plan_json or {}).get("rejected_at")),
     )
 
 
@@ -660,6 +673,57 @@ def approve_task_plan(db: Session, task_id: str, approved_version: int) -> TaskD
     )
     db.commit()
     _queue_or_run(task.id)
+    return get_task_detail(db=db, task_id=task.id)
+
+
+def reject_task_plan(db: Session, task_id: str, reason: str | None = None) -> TaskDetailResponse:
+    task = _load_task(db, task_id)
+    if task.status != TASK_STATUS_AWAITING_APPROVAL or not task.plan_json:
+        raise AppError.bad_request(
+            error_code=ErrorCode.PLAN_APPROVAL_REQUIRED,
+            message="Task plan is not awaiting approval.",
+            detail={"task_id": task_id},
+        )
+
+    rejected_reason = (reason or "").strip() or "rejected_by_user"
+    operation_plan_data = task.plan_json.get("operation_plan") or {}
+    if operation_plan_data:
+        current_plan = OperationPlan(**operation_plan_data)
+        rejected_plan = current_plan.model_copy(update={"status": "rejected"})
+        operation_plan_data = rejected_plan.model_dump()
+
+    updated_plan_json: dict[str, object] = {
+        **task.plan_json,
+        "rejected_reason": rejected_reason,
+        "rejected_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if operation_plan_data:
+        updated_plan_json["operation_plan"] = operation_plan_data
+    task.plan_json = updated_plan_json
+    write_task_error(
+        task,
+        error_code=ErrorCode.TASK_CANCELLED_BY_USER,
+        error_message=f"Task plan rejected by user: {rejected_reason}",
+    )
+    append_task_event(
+        db,
+        task_id=task.id,
+        event_type="task_plan_rejected",
+        status=task.status,
+        detail={
+            "reason": rejected_reason,
+            "operation_plan_version": (task.plan_json or {}).get("operation_plan_version"),
+        },
+    )
+    set_task_status(
+        db,
+        task,
+        TASK_STATUS_CANCELLED,
+        current_step="awaiting_approval",
+        event_type="task_cancelled",
+        detail={"reason": rejected_reason, "source": "user_reject"},
+    )
+    db.commit()
     return get_task_detail(db=db, task_id=task.id)
 
 

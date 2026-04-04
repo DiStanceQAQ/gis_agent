@@ -212,6 +212,9 @@ def test_langgraph_runtime_success_event_sequence_is_ordered(
             _, events = list_task_events(db, task_id=task_id, since_id=0)
             task = db.get(TaskRunRecord, task_id)
             assert task is not None
+            search_step_detail = next(
+                step.detail_json for step in task.steps if step.step_name == "search_candidates"
+            )
 
         assert len(events) > 0
         event_types = [event.event_type for event in events]
@@ -223,6 +226,19 @@ def test_langgraph_runtime_success_event_sequence_is_ordered(
         completed_index = event_types.index("task_completed")
         assert started_index < completed_index
 
+        catalog_event = next(event for event in events if event.event_type == "task_catalog_candidates_ready")
+        assert catalog_event.step_name == "search_candidates"
+        assert isinstance(catalog_event.detail_json, dict)
+        assert "candidate_summaries" in catalog_event.detail_json
+        assert "qc" in catalog_event.detail_json
+        first_summary = (catalog_event.detail_json.get("candidate_summaries") or [{}])[0]
+        assert first_summary.get("quality") is not None
+        assert first_summary["quality"]["cloud_metric_summary"]["median"] >= 0
+        assert first_summary["quality"]["coverage_ratio"] >= 0
+        assert first_summary["quality"]["temporal_density_note"] in {"none", "low", "medium", "high"}
+
+        assert search_step_detail == catalog_event.detail_json
+
         expected_steps = [
             "normalize_aoi",
             "search_candidates",
@@ -230,7 +246,31 @@ def test_langgraph_runtime_success_event_sequence_is_ordered(
             "run_processing_pipeline",
             "generate_outputs",
         ]
+        react_decision_events = [event for event in events if event.event_type == "step_react_decision"]
+        react_observation_events = [event for event in events if event.event_type == "step_react_observation"]
+        function_call_requested_events = [
+            event for event in events if event.event_type == "function_call_requested"
+        ]
+        function_call_completed_events = [
+            event for event in events if event.event_type == "function_call_completed"
+        ]
+
+        assert len(react_decision_events) == len(expected_steps)
+        assert len(react_observation_events) == len(expected_steps)
+        assert len(function_call_requested_events) == len(expected_steps)
+        assert len(function_call_completed_events) == len(expected_steps)
+
         for step_name in expected_steps:
+            react_decision_index = next(
+                index
+                for index, event in enumerate(events)
+                if event.event_type == "step_react_decision" and event.step_name == step_name
+            )
+            function_call_requested_index = next(
+                index
+                for index, event in enumerate(events)
+                if event.event_type == "function_call_requested" and event.step_name == step_name
+            )
             step_started = next(
                 index
                 for index, event in enumerate(events)
@@ -241,7 +281,19 @@ def test_langgraph_runtime_success_event_sequence_is_ordered(
                 for index, event in enumerate(events)
                 if event.event_type == "tool_execution_completed" and event.step_name == step_name
             )
+            function_call_completed_index = next(
+                index
+                for index, event in enumerate(events)
+                if event.event_type == "function_call_completed" and event.step_name == step_name
+            )
+            react_observation_index = next(
+                index
+                for index, event in enumerate(events)
+                if event.event_type == "step_react_observation" and event.step_name == step_name
+            )
+            assert react_decision_index < function_call_requested_index < step_started
             assert step_started < step_completed
+            assert step_completed <= function_call_completed_index < react_observation_index
             assert started_index < step_started < completed_index
     finally:
         _cleanup_session(session_id)

@@ -17,3 +17,14 @@ def test_validate_operation_plan_rejects_cycle() -> None:
     with pytest.raises(AppError) as exc:
         validate_operation_plan(plan)
     assert exc.value.error_code == ErrorCode.PLAN_DEPENDENCY_CYCLE
+
+
+def test_validate_operation_plan_rejects_empty_nodes() -> None:
+    plan = OperationPlan(
+        version=1,
+        status="draft",
+        nodes=[],
+    )
+    with pytest.raises(AppError) as exc:
+        validate_operation_plan(plan)
+    assert exc.value.error_code == ErrorCode.PLAN_SCHEMA_INVALID
