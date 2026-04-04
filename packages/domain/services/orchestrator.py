@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timezone
+import re
 
 from fastapi import UploadFile
 from sqlalchemy.orm import Session, selectinload
@@ -25,7 +26,9 @@ from packages.domain.services.aoi import (
     upsert_task_aoi,
 )
 from packages.domain.services.agent_runtime import run_task_runtime
+from packages.domain.services.chat import generate_chat_reply
 from packages.domain.services.input_slots import classify_uploaded_inputs
+from packages.domain.services.intent import classify_message_intent, is_task_confirmation_message
 from packages.domain.services.operation_plan_defaults import build_default_operation_plan
 from packages.domain.services.planner import PLAN_STATUS_NEEDS_CLARIFICATION, build_task_plan
 from packages.domain.services.parser import (
@@ -64,6 +67,17 @@ from packages.schemas.task import (
 )
 
 logger = get_logger(__name__)
+
+INTENT_TASK_CONFIDENCE_THRESHOLD = 0.8
+INTENT_HISTORY_LIMIT = 12
+TASK_CONFIRMATION_PROMPT = "我理解你想发起一个 GIS 分析任务。请回复“好的，继续”或“开始执行”，我会为你生成计划并进入审批。"
+TASK_CONFIRMATION_MISSING_CONTEXT_PROMPT = (
+    "我收到了确认，但还没找到上一条可执行的任务请求。请先描述分析区域、时间范围和目标，再回复“好的，继续”。"
+)
+EXECUTABLE_REQUEST_HINT_PATTERN = re.compile(
+    r"(ndvi|植被|遥感|影像|sentinel|landsat|geotiff|tiff|地图|分析|计算|统计|监测|提取)",
+    re.IGNORECASE,
+)
 
 
 def _require_named_aoi_clarification(parsed: ParsedTaskSpec) -> ParsedTaskSpec:
@@ -200,6 +214,111 @@ def _queue_or_run(task_id: str) -> None:
         run_task_async.delay(task_id)
         return
     run_task_runtime(task_id)
+
+
+def _persist_message(
+    db: Session,
+    *,
+    session_id: str,
+    role: str,
+    content: str,
+    linked_task_id: str | None = None,
+) -> MessageRecord:
+    message = MessageRecord(
+        id=make_id("msg"),
+        session_id=session_id,
+        role=role,
+        content=content,
+        linked_task_id=linked_task_id,
+    )
+    db.add(message)
+    db.flush()
+    return message
+
+
+def _load_message_history(
+    db: Session,
+    *,
+    session_id: str,
+    exclude_message_id: str | None = None,
+    limit: int = INTENT_HISTORY_LIMIT,
+) -> list[dict[str, str]]:
+    query = db.query(MessageRecord).filter(MessageRecord.session_id == session_id)
+    if exclude_message_id is not None:
+        query = query.filter(MessageRecord.id != exclude_message_id)
+    records = (
+        query.order_by(MessageRecord.created_at.desc(), MessageRecord.id.desc())
+        .limit(limit)
+        .all()
+    )
+    return [{"role": record.role, "content": record.content} for record in reversed(records)]
+
+
+def _parse_candidate_request_content(content: str) -> ParsedTaskSpec:
+    try:
+        return parse_task_message(content, has_upload=False, db_session=None)
+    except TypeError:
+        return parse_task_message(content, has_upload=False)
+
+
+def _find_latest_executable_request_content(
+    db: Session,
+    *,
+    session_id: str,
+    current_message_id: str,
+) -> str | None:
+    prior_messages = (
+        db.query(MessageRecord)
+        .filter(
+            MessageRecord.session_id == session_id,
+            MessageRecord.role == "user",
+            MessageRecord.id != current_message_id,
+            MessageRecord.linked_task_id.is_(None),
+        )
+        .order_by(MessageRecord.created_at.desc(), MessageRecord.id.desc())
+        .limit(INTENT_HISTORY_LIMIT)
+        .all()
+    )
+
+    for message in prior_messages:
+        content = message.content.strip()
+        if not content or is_task_confirmation_message(content):
+            continue
+        if EXECUTABLE_REQUEST_HINT_PATTERN.search(content) is None:
+            continue
+        parsed = _parse_candidate_request_content(content)
+        if not parsed.need_confirmation and parsed.aoi_input and parsed.time_range:
+            return content
+    return None
+
+
+def _create_chat_mode_response(
+    db: Session,
+    *,
+    user_message_id: str,
+    session_id: str,
+    assistant_message: str,
+    intent: str,
+    intent_confidence: float,
+    awaiting_task_confirmation: bool = False,
+) -> MessageCreateResponse:
+    _persist_message(
+        db,
+        session_id=session_id,
+        role="assistant",
+        content=assistant_message,
+    )
+    db.commit()
+    return MessageCreateResponse(
+        message_id=user_message_id,
+        mode="chat",
+        task_id=None,
+        task_status=None,
+        assistant_message=assistant_message,
+        intent=intent,
+        intent_confidence=intent_confidence,
+        awaiting_task_confirmation=awaiting_task_confirmation,
+    )
 
 
 def _build_initial_operation_plan(task_plan: TaskPlanResponse) -> OperationPlan:
@@ -407,7 +526,13 @@ def _build_task(
     return task
 
 
-def create_message_and_task(db: Session, payload: MessageCreateRequest) -> MessageCreateResponse:
+def create_message_and_task(
+    db: Session,
+    payload: MessageCreateRequest,
+    *,
+    existing_user_message: MessageRecord | None = None,
+    task_request_content: str | None = None,
+) -> MessageCreateResponse:
     session = db.get(SessionRecord, payload.session_id)
     if session is None:
         raise AppError.not_found(
@@ -418,6 +543,8 @@ def create_message_and_task(db: Session, payload: MessageCreateRequest) -> Messa
 
     if session.title is None:
         session.title = payload.content[:60]
+
+    request_content = (task_request_content or payload.content).strip() or payload.content
 
     files = []
     if payload.file_ids:
@@ -435,14 +562,15 @@ def create_message_and_task(db: Session, payload: MessageCreateRequest) -> Messa
                 detail={"file_ids": missing_file_ids},
             )
 
-    message = MessageRecord(
-        id=make_id("msg"),
-        session_id=payload.session_id,
-        role="user",
-        content=payload.content,
-    )
-    db.add(message)
-    db.flush()
+    if existing_user_message is None:
+        message = _persist_message(
+            db,
+            session_id=payload.session_id,
+            role="user",
+            content=payload.content,
+        )
+    else:
+        message = existing_user_message
 
     provisional_task = TaskRunRecord(
         id=make_id("task"),
@@ -457,17 +585,17 @@ def create_message_and_task(db: Session, payload: MessageCreateRequest) -> Messa
 
     try:
         parsed = parse_task_message(
-            payload.content,
+            request_content,
             has_upload=bool(files),
             task_id=provisional_task.id,
             db_session=db,
         )
     except TypeError:
-        parsed = parse_task_message(payload.content, has_upload=bool(files))
+        parsed = parse_task_message(request_content, has_upload=bool(files))
     parsed, parent_task, override = _resolve_followup_context(
         db,
         session_id=payload.session_id,
-        content=payload.content,
+        content=request_content,
         parsed=parsed,
         has_upload=bool(files),
     )
@@ -513,12 +641,98 @@ def create_message_and_task(db: Session, payload: MessageCreateRequest) -> Messa
 
     return MessageCreateResponse(
         message_id=message.id,
+        mode="task",
         task_id=task.id,
         task_status=task.status,
         need_clarification=need_clarification,
         need_approval=need_approval,
         missing_fields=list(response_spec.get("missing_fields", [])),
         clarification_message=response_spec.get("clarification_message"),
+    )
+
+
+def create_message(db: Session, payload: MessageCreateRequest) -> MessageCreateResponse:
+    session = db.get(SessionRecord, payload.session_id)
+    if session is None:
+        raise AppError.not_found(
+            error_code=ErrorCode.SESSION_NOT_FOUND,
+            message="Session not found.",
+            detail={"session_id": payload.session_id},
+        )
+
+    if session.title is None:
+        session.title = payload.content[:60]
+
+    message = _persist_message(
+        db,
+        session_id=payload.session_id,
+        role="user",
+        content=payload.content,
+    )
+    history = _load_message_history(
+        db,
+        session_id=payload.session_id,
+        exclude_message_id=message.id,
+    )
+    intent_result = classify_message_intent(
+        payload.content,
+        history=history,
+        db_session=db,
+    )
+
+    if is_task_confirmation_message(payload.content):
+        request_content = _find_latest_executable_request_content(
+            db,
+            session_id=payload.session_id,
+            current_message_id=message.id,
+        )
+        if request_content is None:
+            return _create_chat_mode_response(
+                db,
+                user_message_id=message.id,
+                session_id=payload.session_id,
+                assistant_message=TASK_CONFIRMATION_MISSING_CONTEXT_PROMPT,
+                intent=intent_result.intent,
+                intent_confidence=intent_result.confidence,
+            )
+
+        task_response = create_message_and_task(
+            db=db,
+            payload=payload,
+            existing_user_message=message,
+            task_request_content=request_content,
+        )
+        task_response.intent = intent_result.intent
+        task_response.intent_confidence = intent_result.confidence
+        task_response.awaiting_task_confirmation = False
+        return task_response
+
+    if (
+        intent_result.intent == "task"
+        and intent_result.confidence >= INTENT_TASK_CONFIDENCE_THRESHOLD
+    ):
+        return _create_chat_mode_response(
+            db,
+            user_message_id=message.id,
+            session_id=payload.session_id,
+            assistant_message=TASK_CONFIRMATION_PROMPT,
+            intent=intent_result.intent,
+            intent_confidence=intent_result.confidence,
+            awaiting_task_confirmation=True,
+        )
+
+    assistant_message = generate_chat_reply(
+        user_message=payload.content,
+        history=history,
+        db_session=db,
+    )
+    return _create_chat_mode_response(
+        db,
+        user_message_id=message.id,
+        session_id=payload.session_id,
+        assistant_message=assistant_message,
+        intent=intent_result.intent,
+        intent_confidence=intent_result.confidence,
     )
 
 

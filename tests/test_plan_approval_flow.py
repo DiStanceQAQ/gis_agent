@@ -18,6 +18,7 @@ from packages.domain.models import (
     UploadedFileRecord,
 )
 from packages.domain.services import orchestrator
+from packages.domain.services.intent import IntentResult, is_task_confirmation_message
 from packages.domain.services.planner import TaskPlan, TaskPlanStep
 from packages.domain.services.task_state import TASK_STATUS_AWAITING_APPROVAL, TASK_STATUS_CANCELLED
 from packages.schemas.operation_plan import OperationNode, OperationPlan
@@ -27,6 +28,15 @@ from packages.schemas.task import ParsedTaskSpec
 @pytest.fixture(autouse=True)
 def _patched_plan_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(orchestrator, "_queue_or_run", lambda task_id: None)
+    monkeypatch.setattr(orchestrator, "generate_chat_reply", lambda **kwargs: "请确认是否开始执行任务。")
+
+    def _classify_intent(message: str, **kwargs) -> IntentResult:  # noqa: ANN003
+        del kwargs
+        if is_task_confirmation_message(message):
+            return IntentResult(intent="task", confidence=0.99, reason="用户确认执行任务。")
+        return IntentResult(intent="task", confidence=0.96, reason="用户正在创建 GIS 分析任务。")
+
+    monkeypatch.setattr(orchestrator, "classify_message_intent", _classify_intent)
     monkeypatch.setattr(
         orchestrator,
         "parse_task_message",
@@ -125,7 +135,21 @@ def _create_message(client: TestClient, session_id: str) -> dict:
         },
     )
     assert response.status_code == 200
-    return response.json()
+    payload = response.json()
+    if payload.get("task_id"):
+        return payload
+
+    assert payload["awaiting_task_confirmation"] is True
+    confirm_response = client.post(
+        "/api/v1/messages",
+        json={
+            "session_id": session_id,
+            "content": "好的，继续",
+            "file_ids": [],
+        },
+    )
+    assert confirm_response.status_code == 200
+    return confirm_response.json()
 
 
 def test_create_message_stops_at_awaiting_approval_and_skips_queue(client: TestClient) -> None:
