@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from packages.schemas.agent import LLMParsedSpec, LLMRecommendation, LLMTaskPlan
+from packages.schemas.agent import LLMParsedSpec, LLMReactStepDecision, LLMRecommendation, LLMTaskPlan
 from packages.schemas.task import ParsedTaskSpec, TaskPlanApproveRequest
 
 
@@ -76,6 +76,40 @@ def test_llm_recommendation_confidence_range() -> None:
     )
 
     assert payload.confidence == 0.86
+
+
+def test_llm_react_step_decision_continue_requires_function_name() -> None:
+    with pytest.raises(ValidationError):
+        LLMReactStepDecision(
+            decision="continue",
+            function_name=None,
+            arguments={},
+            reasoning_summary="需要继续执行",
+        )
+
+
+def test_llm_react_step_decision_continue_accepts_function_call() -> None:
+    payload = LLMReactStepDecision(
+        decision="continue",
+        function_name="processing.run",
+        arguments={"step_name": "run_processing_pipeline"},
+        reasoning_summary="依赖满足，继续执行处理步骤。",
+    )
+    assert payload.decision == "continue"
+    assert payload.function_name == "processing.run"
+
+
+def test_llm_react_step_decision_skip_or_fail_does_not_require_function_name() -> None:
+    skip_payload = LLMReactStepDecision(
+        decision="skip",
+        reasoning_summary="该步骤可以跳过。",
+    )
+    fail_payload = LLMReactStepDecision(
+        decision="fail",
+        reasoning_summary="前置条件未满足，终止。",
+    )
+    assert skip_payload.function_name is None
+    assert fail_payload.function_name is None
 
 
 @pytest.mark.parametrize("approved_version", [0, -1])

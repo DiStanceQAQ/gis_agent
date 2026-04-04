@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
-from typing import Any
 
+from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from packages.domain.config import get_settings
@@ -41,6 +41,7 @@ from packages.domain.services.task_state import (
     set_task_status,
 )
 from packages.domain.utils import make_id
+from packages.schemas.agent import LLMReactStepDecision
 from packages.schemas.task import ParsedTaskSpec
 
 logger = get_logger(__name__)
@@ -67,14 +68,6 @@ class PipelineExecutionContext:
     candidate_qc: object | None = None
     recommendation: dict[str, object] | None = None
     pipeline_outputs: dict[str, object] | None = None
-
-
-@dataclass
-class StepReactDecision:
-    should_continue: bool
-    reasoning: str
-    function_name: str
-    function_arguments: dict[str, Any] = field(default_factory=dict)
 
 
 def _require_task_bbox(task: TaskRunRecord) -> list[float]:
@@ -478,16 +471,16 @@ def _build_step_react_decision(
     tool_name: str,
     title: str,
     context: PipelineExecutionContext,
-) -> StepReactDecision:
+) -> LLMReactStepDecision:
     parsed_dataset = context.parsed_spec.requested_dataset or "auto"
-    return StepReactDecision(
-        should_continue=True,
-        reasoning=(
+    return LLMReactStepDecision(
+        decision="continue",
+        function_name=tool_name,
+        arguments={"step_name": step_name},
+        reasoning_summary=(
             f"当前步骤 {step_name} 依赖已满足，继续调用 {tool_name}（{title}）推进流程；"
             f"数据源偏好={parsed_dataset}。"
         ),
-        function_name=tool_name,
-        function_arguments={"step_name": step_name},
     )
 
 
@@ -510,12 +503,44 @@ def execute_tool_step(
     handler,
     start: float,
 ) -> None:
-    react_decision = _build_step_react_decision(
-        step_name=step_name,
-        tool_name=tool_name,
-        title=title,
-        context=context,
-    )
+    step_react_started = perf_counter()
+    step_react_round = 1
+    settings = get_settings()
+    step_react_max_rounds = int(getattr(settings, "agent_step_react_max_rounds", 1))
+    step_react_timeout_seconds = int(getattr(settings, "agent_step_react_timeout_seconds", 30))
+    if step_react_round > step_react_max_rounds:
+        raise AgentRuntimeError(
+            error_code=ErrorCode.TASK_RUNTIME_MAX_STEPS_EXCEEDED,
+            message=f"Step ReAct exceeded max rounds for {step_name}.",
+            detail={
+                "step_name": step_name,
+                "step_react_round": step_react_round,
+                "step_react_max_rounds": step_react_max_rounds,
+            },
+        )
+
+    try:
+        react_decision = _build_step_react_decision(
+            step_name=step_name,
+            tool_name=tool_name,
+            title=title,
+            context=context,
+        )
+    except ValidationError as exc:
+        raise AgentRuntimeError(
+            error_code=ErrorCode.TASK_LLM_REACT_SCHEMA_VALIDATION_FAILED,
+            message="Step ReAct decision failed schema validation.",
+            detail={"validation_errors": exc.errors()},
+        ) from exc
+    if step_react_timeout_seconds > 0 and (perf_counter() - step_react_started) > step_react_timeout_seconds:
+        raise AgentRuntimeError(
+            error_code=ErrorCode.TASK_RUNTIME_TIMEOUT,
+            message=f"Step ReAct timed out before tool execution: {step_name}",
+            detail={
+                "step_name": step_name,
+                "step_react_timeout_seconds": step_react_timeout_seconds,
+            },
+        )
     append_task_event(
         db,
         task_id=task.id,
@@ -523,17 +548,21 @@ def execute_tool_step(
         step_name=step_name,
         status=task.status,
         detail={
-            "should_continue": react_decision.should_continue,
-            "reasoning": react_decision.reasoning,
+            "decision": react_decision.decision,
+            "reasoning_summary": react_decision.reasoning_summary,
             "function_name": react_decision.function_name,
-            "function_arguments": react_decision.function_arguments,
+            "arguments": react_decision.arguments,
         },
     )
-    if not react_decision.should_continue:
+    if react_decision.decision != "continue":
         raise AgentRuntimeError(
             error_code=ErrorCode.TASK_RUNTIME_FAILED,
             message=f"ReAct decision blocked step execution: {step_name}",
-            detail={"step_name": step_name, "reasoning": react_decision.reasoning},
+            detail={
+                "step_name": step_name,
+                "decision": react_decision.decision,
+                "reasoning_summary": react_decision.reasoning_summary,
+            },
         )
     if react_decision.function_name != tool_name:
         raise AgentRuntimeError(
@@ -549,7 +578,7 @@ def execute_tool_step(
         status=task.status,
         detail={
             "function_name": react_decision.function_name,
-            "arguments": react_decision.function_arguments,
+            "arguments": react_decision.arguments,
         },
     )
 

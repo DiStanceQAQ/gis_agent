@@ -51,6 +51,8 @@ class Settings(BaseSettings):
     agent_max_steps: int = 12
     agent_max_tool_calls: int = 24
     agent_runtime_timeout_seconds: int = 900
+    agent_step_react_max_rounds: int = 1
+    agent_step_react_timeout_seconds: int = 30
 
     @property
     def allowed_origins_list(self) -> list[str]:

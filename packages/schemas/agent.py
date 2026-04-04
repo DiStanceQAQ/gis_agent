@@ -31,6 +31,8 @@ AllowedStepName = Literal[
     "generate_outputs",
 ]
 
+ReactDecision = Literal["continue", "skip", "fail"]
+
 
 class LLMTimeRange(BaseModel):
     start: str
@@ -90,6 +92,19 @@ class LLMTaskPlan(BaseModel):
         step_names = [item.step_name for item in self.steps]
         if len(step_names) != len(set(step_names)):
             raise ValueError("task plan steps must have unique step_name values")
+        return self
+
+
+class LLMReactStepDecision(BaseModel):
+    decision: ReactDecision
+    function_name: str | None = None
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    reasoning_summary: str
+
+    @model_validator(mode="after")
+    def validate_function_requirements(self) -> "LLMReactStepDecision":
+        if self.decision == "continue" and not self.function_name:
+            raise ValueError("function_name is required when decision=continue")
         return self
 
 

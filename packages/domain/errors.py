@@ -30,6 +30,7 @@ class ErrorCode:
     TASK_RUNTIME_TIMEOUT = "task_runtime_timeout"
     TASK_RUNTIME_MAX_STEPS_EXCEEDED = "task_runtime_max_steps_exceeded"
     TASK_RUNTIME_MAX_TOOL_CALLS_EXCEEDED = "task_runtime_max_tool_calls_exceeded"
+    TASK_LLM_REACT_SCHEMA_VALIDATION_FAILED = "task_llm_react_schema_validation_failed"
     TASK_LLM_PARSER_SCHEMA_VALIDATION_FAILED = "task_llm_parser_schema_validation_failed"
     TASK_LLM_PARSER_FAILED = "task_llm_parser_failed"
     TASK_LLM_PLANNER_SCHEMA_VALIDATION_FAILED = "task_llm_planner_schema_validation_failed"

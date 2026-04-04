@@ -62,6 +62,19 @@ def test_map_runtime_error_preserves_unknown_tool_code() -> None:
     assert detail["step_name"] == "foo"
 
 
+def test_map_runtime_error_preserves_react_schema_validation_code() -> None:
+    error = AgentRuntimeError(
+        error_code=ErrorCode.TASK_LLM_REACT_SCHEMA_VALIDATION_FAILED,
+        message="ReAct schema invalid",
+        detail={"field": "function_name"},
+    )
+
+    error_code, detail = _map_runtime_error(error)
+
+    assert error_code == ErrorCode.TASK_LLM_REACT_SCHEMA_VALIDATION_FAILED
+    assert detail["field"] == "function_name"
+
+
 def test_run_task_runtime_delegates_to_graph_runner(monkeypatch: pytest.MonkeyPatch) -> None:
     called: list[str] = []
 
