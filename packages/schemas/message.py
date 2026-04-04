@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class MessageCreateRequest(BaseModel):
@@ -22,3 +22,12 @@ class MessageCreateResponse(BaseModel):
     need_approval: bool = False
     missing_fields: list[str] = Field(default_factory=list)
     clarification_message: str | None = None
+
+    @model_validator(mode="after")
+    def validate_mode_fields(self) -> "MessageCreateResponse":
+        if self.mode == "task":
+            if not self.task_id:
+                raise ValueError("task_id is required when mode is 'task'")
+            if not self.task_status:
+                raise ValueError("task_status is required when mode is 'task'")
+        return self

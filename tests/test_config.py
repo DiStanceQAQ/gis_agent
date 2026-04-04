@@ -13,7 +13,15 @@ def test_llm_parser_planner_defaults_are_strict(monkeypatch: pytest.MonkeyPatch)
     assert settings.llm_planner_legacy_fallback is False
 
 
-def test_intent_router_defaults_are_enabled() -> None:
+def test_intent_router_defaults_are_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "GIS_AGENT_INTENT_ROUTER_ENABLED",
+        "GIS_AGENT_INTENT_TASK_CONFIDENCE_THRESHOLD",
+        "GIS_AGENT_INTENT_HISTORY_LIMIT",
+        "GIS_AGENT_INTENT_CONFIRMATION_KEYWORDS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
     settings = Settings()
 
     assert settings.intent_router_enabled is True
