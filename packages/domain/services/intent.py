@@ -73,7 +73,10 @@ def _fallback_intent_result(reason: str) -> IntentResult:
     return IntentResult(intent="ambiguous", confidence=0.0, reason=reason)
 
 
-def _coerce_intent(payload: dict[str, object]) -> IntentResult | None:
+def _coerce_intent(payload: object) -> IntentResult | None:
+    if not isinstance(payload, dict):
+        return None
+
     raw_intent = payload.get("intent")
     if not isinstance(raw_intent, str):
         return None
