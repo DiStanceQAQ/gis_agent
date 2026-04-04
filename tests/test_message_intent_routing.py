@@ -21,7 +21,9 @@ from packages.domain.models import (
     UploadedFileRecord,
 )
 from packages.domain.services import orchestrator
+from packages.domain.services import chat as chat_service
 from packages.domain.services.intent import IntentResult, is_task_confirmation_message
+from packages.domain.services.llm_client import LLMResponse, LLMUsage
 from packages.domain.services.planner import TaskPlan, TaskPlanStep
 from packages.domain.services.task_state import TASK_STATUS_AWAITING_APPROVAL
 from packages.schemas.task import ParsedTaskSpec
@@ -229,13 +231,25 @@ def test_second_chat_turn_replays_prior_assistant_message_into_generation_histor
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session_id = _create_session()
+    monkeypatch.setattr(orchestrator, "generate_chat_reply", chat_service.generate_chat_reply)
 
-    def _generate_chat_reply(*, user_message: str, history: list[dict[str, str]], db_session: object) -> str:  # noqa: ARG001
-        del db_session
-        has_prior_assistant = any(item.get("role") == "assistant" for item in history)
-        return "history-replayed" if has_prior_assistant else "history-initial"
+    def _fake_chat_json(self, **kwargs):  # noqa: ANN001
+        user_prompt = kwargs["user_prompt"]
+        if "history-initial" in user_prompt:
+            reply = "history-replayed"
+        else:
+            reply = "history-initial"
+        return LLMResponse(
+            model="fake-chat-model",
+            request_id="req-test",
+            content_text=f'{{"reply":"{reply}"}}',
+            content_json={"reply": reply},
+            usage=LLMUsage(),
+            latency_ms=0,
+            raw_payload={},
+        )
 
-    monkeypatch.setattr(orchestrator, "generate_chat_reply", _generate_chat_reply)
+    monkeypatch.setattr("packages.domain.services.chat.LLMClient.chat_json", _fake_chat_json)
 
     try:
         first_payload = _post_message(client, session_id, "你好，我们先随便聊聊。")
