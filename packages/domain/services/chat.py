@@ -28,9 +28,9 @@ def _build_chat_user_prompt(user_message: str, history: list[dict[str, str]]) ->
 
 def _extract_reply(content_json: dict[str, object]) -> str | None:
     reply = content_json.get("reply")
-    if reply is None:
+    if not isinstance(reply, str):
         return None
-    text = str(reply).strip()
+    text = reply.strip()
     return text or None
 
 

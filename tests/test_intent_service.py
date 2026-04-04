@@ -43,6 +43,7 @@ def _reset_fake_llm() -> None:
 def test_is_task_confirmation_message_detects_confirmation_keywords() -> None:
     assert is_task_confirmation_message("好的，继续")
     assert is_task_confirmation_message("OK")
+    assert is_task_confirmation_message("可以") is True
 
 
 @pytest.mark.parametrize(
@@ -51,6 +52,8 @@ def test_is_task_confirmation_message_detects_confirmation_keywords() -> None:
         "帮我分析 2024 年 6 月的 NDVI",
         "请解释一下什么是 NDVI",
         "",
+        "可以帮我分析NDVI吗",
+        "look at this map",
     ],
 )
 def test_is_task_confirmation_message_rejects_non_confirmations(message: str) -> None:
@@ -73,6 +76,26 @@ def test_classify_message_intent_falls_back_to_ambiguous_on_llm_error(monkeypatc
     assert "falling back to ambiguous" in result.reason
     assert _FakeLLMClient.calls[0]["phase"] == "intent"
     assert _FakeLLMClient.calls[0]["task_id"] == "task_123"
+
+
+def test_classify_message_intent_returns_task_for_explicit_confirmation_when_llm_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("packages.domain.services.intent.LLMClient", _FakeLLMClient)
+    _FakeLLMClient.error = RuntimeError("boom")
+
+    result = classify_message_intent(
+        "好的，继续",
+        history=[{"role": "assistant", "content": "上一轮"}],
+        task_id="task_confirmed",
+        db_session=object(),  # type: ignore[arg-type]
+    )
+
+    assert result.intent == "task"
+    assert result.confidence == 0.99
+    assert "explicit confirmation" in result.reason
+    assert _FakeLLMClient.calls[0]["phase"] == "intent"
+    assert _FakeLLMClient.calls[0]["task_id"] == "task_confirmed"
 
 
 def test_classify_message_intent_passes_through_valid_payload(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -99,6 +122,33 @@ def test_classify_message_intent_passes_through_valid_payload(monkeypatch: pytes
     )
     assert _FakeLLMClient.calls[0]["phase"] == "intent"
     assert _FakeLLMClient.calls[0]["task_id"] == "task_456"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"intent": "task", "confidence": "0.94", "reason": "The user asks for an NDVI analysis."},
+        {"intent": "task", "confidence": 1.5, "reason": "The user asks for an NDVI analysis."},
+        {"intent": "task", "confidence": True, "reason": "The user asks for an NDVI analysis."},
+        {"intent": "task", "confidence": 0.7, "reason": {"detail": "bad"}},
+    ],
+)
+def test_classify_message_intent_rejects_invalid_payload_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    payload: dict[str, Any],
+) -> None:
+    monkeypatch.setattr("packages.domain.services.intent.LLMClient", _FakeLLMClient)
+    _FakeLLMClient.response = _FakeIntentResponse(payload)
+
+    result = classify_message_intent(
+        "帮我分析 2024 年 6 月的 NDVI",
+        history=[{"role": "assistant", "content": "上一轮"}],
+        task_id="task_invalid_payload",
+        db_session=object(),  # type: ignore[arg-type]
+    )
+
+    assert result.intent == "ambiguous"
+    assert result.confidence == 0.0
 
 
 def test_generate_chat_reply_falls_back_on_llm_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -131,3 +181,27 @@ def test_generate_chat_reply_extracts_reply_field(monkeypatch: pytest.MonkeyPatc
     assert reply == "当然，我可以帮你。"
     assert _FakeLLMClient.calls[0]["phase"] == "chat"
     assert _FakeLLMClient.calls[0]["task_id"] == "task_012"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"reply": {"text": "当然，我可以帮你。"}},
+        {"reply": ["当然，我可以帮你。"]},
+    ],
+)
+def test_generate_chat_reply_rejects_non_string_reply_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    payload: dict[str, Any],
+) -> None:
+    monkeypatch.setattr("packages.domain.services.chat.LLMClient", _FakeLLMClient)
+    _FakeLLMClient.response = _FakeIntentResponse(payload)
+
+    reply = generate_chat_reply(
+        user_message="你好",
+        history=[{"role": "assistant", "content": "上一轮"}],
+        task_id="task_bad_reply",
+        db_session=object(),  # type: ignore[arg-type]
+    )
+
+    assert reply == CHAT_FALLBACK_TEXT
