@@ -837,9 +837,11 @@ def run_processing_pipeline(*, task_id: str, plan_nodes: list[dict[str, Any]], w
                     for band_index in range(src.count):
                         eval_locals[f"b{band_index + 1}"] = bands[band_index]
                     if src.count >= 1:
+                        # Keep band aliases resilient for single-band rasters so
+                        # NDVI/NDWI-style expressions degrade gracefully in demo data.
                         eval_locals["red"] = bands[0]
-                    if src.count >= 2:
-                        eval_locals["nir"] = bands[1]
+                        eval_locals["green"] = bands[0]
+                        eval_locals["nir"] = bands[1] if src.count >= 2 else bands[0]
 
                     result = eval(expression, {"__builtins__": {}}, eval_locals)  # noqa: S307
                     if not isinstance(result, np.ndarray):

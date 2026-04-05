@@ -29,7 +29,7 @@ from packages.domain.services.agent_runtime import run_task_runtime
 from packages.domain.services.chat import generate_chat_reply
 from packages.domain.services.input_slots import classify_uploaded_inputs
 from packages.domain.services.intent import classify_message_intent, is_task_confirmation_message
-from packages.domain.services.operation_plan_defaults import build_default_operation_plan
+from packages.domain.services.operation_plan_builder import build_operation_plan_from_registry
 from packages.domain.services.planner import PLAN_STATUS_NEEDS_CLARIFICATION, build_task_plan
 from packages.domain.services.parser import (
     extract_parser_failure_error,
@@ -402,8 +402,9 @@ def _create_chat_mode_response(
     )
 
 
-def _build_initial_operation_plan(task_plan: TaskPlanResponse) -> OperationPlan:
-    return build_default_operation_plan(
+def _build_initial_operation_plan(task_plan: TaskPlanResponse, parsed: ParsedTaskSpec) -> OperationPlan:
+    return build_operation_plan_from_registry(
+        parsed,
         version=1,
         status="draft",
         missing_fields=list(task_plan.missing_fields),
@@ -563,7 +564,10 @@ def _build_task(
     task.plan_json = task_plan.model_dump()
 
     if require_approval and not safe_parsed.need_confirmation:
-        initial_operation_plan = _build_initial_operation_plan(TaskPlanResponse(**task.plan_json))
+        initial_operation_plan = _build_initial_operation_plan(
+            TaskPlanResponse(**task.plan_json),
+            safe_parsed,
+        )
         task.plan_json = {
             **(task.plan_json or {}),
             "operation_plan": initial_operation_plan.model_dump(),

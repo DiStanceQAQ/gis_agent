@@ -15,7 +15,7 @@ from packages.domain.services.planner import (
     build_task_plan,
     set_task_plan_status,
 )
-from packages.domain.services.operation_plan_defaults import build_default_operation_plan
+from packages.domain.services.operation_plan_builder import build_operation_plan_from_registry
 from packages.domain.services.task_state import (
     TASK_STATUS_AWAITING_APPROVAL,
     TASK_STATUS_FAILED,
@@ -91,7 +91,8 @@ def plan_task_node(state: GISAgentState) -> GISAgentState:
         plan = build_task_plan(parsed, task_id=task_id)
         task.plan_json = plan.model_dump()
         if plan.status != PLAN_STATUS_NEEDS_CLARIFICATION and operation_plan_status is None:
-            default_plan = build_default_operation_plan(
+            default_plan = build_operation_plan_from_registry(
+                parsed,
                 version=1,
                 status="approved",
                 missing_fields=list(plan.missing_fields),
