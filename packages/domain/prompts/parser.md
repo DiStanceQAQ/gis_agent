@@ -4,8 +4,11 @@
 
 解析目标：
 
-1. 从用户输入提取 `aoi_input`、`aoi_source_type`、`time_range`、`analysis_type`、`preferred_output`。  
-2. 判断是否缺少关键信息；若缺失则设置 `need_confirmation=true` 并提供 `missing_fields` 与 `clarification_message`。  
+1. 从用户输入提取 `analysis_type` 与可执行参数：`aoi_input`、`aoi_source_type`、`time_range`、`operation_params`、`preferred_output`。  
+2. 按任务类型判断缺失信息：  
+   - 当 `analysis_type=clip`：优先要求 `operation_params.source_path` 与 `operation_params.clip_path`，不强制要求 `time_range`。  
+   - 其他分析类型：默认要求 `aoi_input` 与 `time_range`。  
+   若缺失则设置 `need_confirmation=true` 并提供 `missing_fields` 与 `clarification_message`。  
 3. 保留 `requested_dataset`、`user_priority`、`operation_params`。
 
 硬性约束：
@@ -18,3 +21,4 @@
    `aoi_input`、`aoi_source_type`、`time_range`、`requested_dataset`、`analysis_type`、`preferred_output`、`user_priority`、`need_confirmation`、`missing_fields`、`clarification_message`、`operation_params`。
 6. `aoi_source_type` 仅可取：`bbox`、`file_upload`、`admin_name`、`place_alias`。
 7. `requested_dataset` 仅可取：`sentinel2`、`landsat89` 或 `null`。
+8. `analysis_type` 支持：`ndvi`、`ndwi`、`band_math`、`filter`、`slope_aspect`、`buffer`、`clip`。

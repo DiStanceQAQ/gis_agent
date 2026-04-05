@@ -10,6 +10,7 @@ AnalysisType: TypeAlias = Literal[
     "FILTER",
     "SLOPE_ASPECT",
     "BUFFER",
+    "CLIP",
 ]
 
 _ANALYSIS_TYPE_ALIASES: dict[str, AnalysisType] = {
@@ -23,6 +24,11 @@ _ANALYSIS_TYPE_ALIASES: dict[str, AnalysisType] = {
     "slope-aspect": "SLOPE_ASPECT",
     "slopeaspect": "SLOPE_ASPECT",
     "buffer": "BUFFER",
+    "clip": "CLIP",
+    "raster_clip": "CLIP",
+    "raster-clip": "CLIP",
+    "raster.clip": "CLIP",
+    "crop": "CLIP",
 }
 
 _FILTER_METHODS = {"median", "mean", "gaussian"}
@@ -42,11 +48,11 @@ def normalize_analysis_type(value: Any) -> AnalysisType:
         return _ANALYSIS_TYPE_ALIASES[alias_key]
 
     upper_token = token.upper()
-    if upper_token in {"NDVI", "NDWI", "BAND_MATH", "FILTER", "SLOPE_ASPECT", "BUFFER"}:
+    if upper_token in {"NDVI", "NDWI", "BAND_MATH", "FILTER", "SLOPE_ASPECT", "BUFFER", "CLIP"}:
         return cast(AnalysisType, upper_token)
 
     raise ValueError(
-        "analysis_type must be one of ndvi/ndwi/band_math/filter/slope_aspect/buffer"
+        "analysis_type must be one of ndvi/ndwi/band_math/filter/slope_aspect/buffer/clip"
     )
 
 
@@ -118,6 +124,18 @@ def normalize_operation_params(analysis_type: AnalysisType, value: Any) -> dict[
             raise ValueError("BUFFER operation_params.distance_m must be a positive number")
         params["distance_m"] = distance_m
         params.pop("distance", None)
+        return params
+
+    if analysis_type == "CLIP":
+        for key in ("source_path", "clip_path", "output_path"):
+            value = params.get(key)
+            if value is None:
+                continue
+            params[key] = str(value).strip()
+        if "clip_crs" in params and params.get("clip_crs") is not None:
+            params["clip_crs"] = str(params["clip_crs"]).strip() or "EPSG:4326"
+        if "crop" in params and params.get("crop") is not None:
+            params["crop"] = bool(params["crop"])
         return params
 
     return params

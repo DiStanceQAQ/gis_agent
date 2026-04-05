@@ -42,6 +42,29 @@ def test_parse_time_range_and_outputs() -> None:
     assert parsed.analysis_type == "NDVI"
 
 
+def test_parse_clip_request_with_explicit_paths_is_actionable() -> None:
+    parsed = parse_task_message(
+        "请把 /Users/ljn/gis_data/CACD-2020.tif 按 /Users/ljn/gis_data/区划/xinjiang.geojson 裁剪，输出 /Users/ljn/gis_data/xinjiang.tif。",
+        has_upload=False,
+    )
+
+    assert parsed.analysis_type == "CLIP"
+    assert parsed.need_confirmation is False
+    assert parsed.missing_fields == []
+    assert parsed.operation_params["source_path"].endswith("CACD-2020.tif")
+    assert parsed.operation_params["clip_path"].endswith("xinjiang.geojson")
+    assert parsed.operation_params["output_path"].endswith("xinjiang.tif")
+
+
+def test_parse_clip_request_without_explicit_paths_requires_clarification() -> None:
+    parsed = parse_task_message("把栅格裁剪到新疆范围。", has_upload=False)
+
+    assert parsed.analysis_type == "CLIP"
+    assert parsed.need_confirmation is True
+    assert "source_path" in parsed.missing_fields
+    assert "clip_path" in parsed.missing_fields
+
+
 def test_parse_place_alias_sets_named_aoi_source_type() -> None:
     parsed = parse_task_message("帮我计算 2024 年 6 到 8 月北京西山的 NDVI。", has_upload=False)
 
@@ -273,6 +296,47 @@ def test_parse_task_message_uses_llm_main_chain(monkeypatch: pytest.MonkeyPatch)
     get_settings.cache_clear()
 
 
+def test_parse_task_message_accepts_llm_clip_payload_without_time_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GIS_AGENT_LLM_API_KEY", "test_key")
+    monkeypatch.setenv("GIS_AGENT_LLM_PARSER_ENABLED", "true")
+    monkeypatch.setenv("GIS_AGENT_LLM_PARSER_LEGACY_FALLBACK", "false")
+    get_settings.cache_clear()
+
+    def _fake_chat_json(self, **kwargs):  # noqa: ANN001
+        del self, kwargs
+        return _mock_llm_response(
+            {
+                "aoi_input": None,
+                "aoi_source_type": None,
+                "time_range": None,
+                "requested_dataset": None,
+                "analysis_type": "clip",
+                "preferred_output": "geotiff",
+                "user_priority": None,
+                "need_confirmation": False,
+                "missing_fields": [],
+                "clarification_message": None,
+                "operation_params": {
+                    "source_path": "/Users/ljn/gis_data/CACD-2020.tif",
+                    "clip_path": "/Users/ljn/gis_data/区划/xinjiang.geojson",
+                    "output_path": "/Users/ljn/gis_data/xinjiang.tif",
+                },
+            }
+        )
+
+    monkeypatch.setattr("packages.domain.services.parser.LLMClient.chat_json", _fake_chat_json)
+    parsed = parse_task_message("把 tif 裁剪到新疆范围。", has_upload=False)
+
+    assert parsed.analysis_type == "CLIP"
+    assert parsed.need_confirmation is False
+    assert parsed.missing_fields == []
+    assert parsed.operation_params["source_path"].endswith("CACD-2020.tif")
+    assert parsed.operation_params["clip_path"].endswith("xinjiang.geojson")
+    get_settings.cache_clear()
+
+
 def test_parse_task_message_retries_on_schema_validation_error(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GIS_AGENT_LLM_API_KEY", "test_key")
     monkeypatch.setenv("GIS_AGENT_LLM_PARSER_ENABLED", "true")
@@ -338,14 +402,14 @@ def test_parse_task_message_repair_prompt_handles_non_serializable_validation_ct
     prompts: list[str] = []
     responses = [
         _mock_llm_response(
-            {
-                "aoi_input": "bbox(116.1,39.8,116.5,40.1)",
-                "aoi_source_type": "bbox",
-                "time_range": {"start": "2024-06-01", "end": "2024-06-30"},
-                "analysis_type": "clip",
-                "preferred_output": "geotiff",
-                "user_priority": None,
-                "need_confirmation": False,
+                {
+                    "aoi_input": "bbox(116.1,39.8,116.5,40.1)",
+                    "aoi_source_type": "bbox",
+                    "time_range": {"start": "2024-06-01", "end": "2024-06-30"},
+                    "analysis_type": "clip_invalid",
+                    "preferred_output": "geotiff",
+                    "user_priority": None,
+                    "need_confirmation": False,
                 "missing_fields": [],
                 "clarification_message": None,
                 "operation_params": {},

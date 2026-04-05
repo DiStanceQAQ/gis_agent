@@ -65,6 +65,13 @@ FOLLOWUP_HINT_PATTERN = re.compile(
 )
 UPLOADED_AOI_HINT_PATTERN = re.compile(r"(?:上传|边界|文件|刚上传|上传的)", flags=re.IGNORECASE)
 BBOX_LITERAL_PATTERN = re.compile(r"(bbox\s*\([^)]*\)|\[[^\]]+\])", flags=re.IGNORECASE)
+CLIP_INTENT_PATTERN = re.compile(r"(?:裁剪|裁切|clip|mask|掩膜)", flags=re.IGNORECASE)
+RASTER_HINT_PATTERN = re.compile(r"(?:栅格|影像|raster|tif|tiff)", flags=re.IGNORECASE)
+RASTER_PATH_PATTERN = re.compile(r"((?:[A-Za-z]:)?/[^\s,，。；;]+?\.(?:tif|tiff|img|vrt|jp2))", flags=re.IGNORECASE)
+VECTOR_PATH_PATTERN = re.compile(
+    r"((?:[A-Za-z]:)?/[^\s,，。；;]+?\.(?:geojson|json|shp|gpkg|kml))",
+    flags=re.IGNORECASE,
+)
 
 OUTPUT_HINTS = {
     "geotiff": ("geotiff", "tiff", "tif"),
@@ -107,6 +114,8 @@ class ParseState:
     user_priority: str = "balanced"
     aoi_input: str | None = None
     aoi_source_type: str | None = None
+    analysis_type: str = "NDVI"
+    operation_params: dict[str, Any] = field(default_factory=dict)
 
 
 def _normalize_message(text: str) -> str:
@@ -275,6 +284,68 @@ def _extract_explicit_bbox_text(text: str) -> str | None:
     return None
 
 
+def _clean_path_candidate(path_text: str) -> str:
+    return path_text.strip().strip("\"'`“”‘’，。；;")
+
+
+def _extract_path_matches(pattern: re.Pattern[str], text: str) -> list[str]:
+    matches: list[str] = []
+    seen: set[str] = set()
+    for match in pattern.finditer(text):
+        candidate = _clean_path_candidate(match.group(1))
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        matches.append(candidate)
+    return matches
+
+
+def _is_clip_request(message: str) -> bool:
+    if CLIP_INTENT_PATTERN.search(message) and RASTER_HINT_PATTERN.search(message):
+        return True
+    raster_paths = _extract_path_matches(RASTER_PATH_PATTERN, message)
+    vector_paths = _extract_path_matches(VECTOR_PATH_PATTERN, message)
+    return bool(raster_paths and vector_paths)
+
+
+def _extract_clip_operation_params(message: str, *, has_upload: bool) -> dict[str, Any]:
+    del has_upload
+    raster_paths = _extract_path_matches(RASTER_PATH_PATTERN, message)
+    vector_paths = _extract_path_matches(VECTOR_PATH_PATTERN, message)
+
+    params: dict[str, Any] = {"crop": True, "clip_crs": "EPSG:4326"}
+    if raster_paths:
+        params["source_path"] = raster_paths[0]
+    if len(raster_paths) > 1:
+        params["output_path"] = raster_paths[1]
+    if vector_paths:
+        params["clip_path"] = vector_paths[0]
+    return params
+
+
+def _collect_missing_fields(
+    *,
+    analysis_type: str,
+    aoi_input: str | None,
+    time_range: dict[str, str] | None,
+    operation_params: dict[str, Any],
+) -> list[str]:
+    if analysis_type == "CLIP":
+        missing: list[str] = []
+        if not str(operation_params.get("source_path") or "").strip():
+            missing.append("source_path")
+        if not str(operation_params.get("clip_path") or "").strip():
+            missing.append("clip_path")
+        return missing
+
+    missing_fields: list[str] = []
+    if not aoi_input:
+        missing_fields.append("aoi")
+    if time_range is None:
+        missing_fields.append("time_range")
+    return missing_fields
+
+
 def _extract_aoi(state: ParseState) -> None:
     cleaned = _remove_token_hints(state.remaining_text)
     aoi_candidate = _clean_aoi_text(cleaned)
@@ -311,6 +382,14 @@ def _build_parse_state(message: str, *, has_upload: bool, include_default_output
         preferred_output=_detect_preferred_output(normalized, include_defaults=include_default_outputs),
         user_priority=_detect_user_priority(normalized),
     )
+    if _is_clip_request(normalized):
+        state.analysis_type = "CLIP"
+        state.operation_params = _extract_clip_operation_params(normalized, has_upload=has_upload)
+        if include_default_outputs and "geotiff" not in state.preferred_output:
+            state.preferred_output.insert(0, "geotiff")
+        state.requested_dataset = None
+        state.time_range = None
+        return state
     _extract_aoi(state)
     return state
 
@@ -320,20 +399,22 @@ def is_followup_request(message: str) -> bool:
 
 
 def _build_parsed_spec_from_state(state: ParseState) -> ParsedTaskSpec:
-    missing_fields: list[str] = []
-    if not state.aoi_input:
-        missing_fields.append("aoi")
-    if state.time_range is None:
-        missing_fields.append("time_range")
+    missing_fields = _collect_missing_fields(
+        analysis_type=state.analysis_type,
+        aoi_input=state.aoi_input,
+        time_range=state.time_range,
+        operation_params=state.operation_params,
+    )
 
     return ParsedTaskSpec(
         aoi_input=state.aoi_input,
         aoi_source_type=state.aoi_source_type,
         time_range=state.time_range,
         requested_dataset=state.requested_dataset,
-        analysis_type="NDVI",
+        analysis_type=state.analysis_type,
         preferred_output=state.preferred_output,
         user_priority=state.user_priority,
+        operation_params=state.operation_params,
         need_confirmation=bool(missing_fields),
         missing_fields=missing_fields,
         created_from=date.today().isoformat(),
@@ -378,8 +459,13 @@ def _build_parser_user_prompt(message: str, has_upload: bool) -> str:
         "has_upload": has_upload,
         "allowed_aoi_source_type": ["bbox", "file_upload", "admin_name", "place_alias"],
         "allowed_dataset": ["sentinel2", "landsat89"],
+        "allowed_analysis_type": ["ndvi", "ndwi", "band_math", "filter", "slope_aspect", "buffer", "clip"],
         "allowed_output": ["png_map", "geotiff", "methods_text"],
         "required_time_range_format": {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"},
+        "required_fields_hint": {
+            "clip": ["analysis_type", "operation_params.source_path", "operation_params.clip_path"],
+            "other": ["aoi_input", "aoi_source_type", "time_range"],
+        },
         "required_fields": [
             "aoi_input",
             "aoi_source_type",
@@ -423,6 +509,30 @@ def _build_parser_repair_user_prompt(
 
 
 def _build_parser_failure_spec(message: str, *, has_upload: bool, reason: str) -> ParsedTaskSpec:
+    normalized = _normalize_message(message)
+    if _is_clip_request(normalized):
+        operation_params = _extract_clip_operation_params(normalized, has_upload=has_upload)
+        missing_fields = _collect_missing_fields(
+            analysis_type="CLIP",
+            aoi_input=None,
+            time_range=None,
+            operation_params=operation_params,
+        )
+        return ParsedTaskSpec(
+            aoi_input=None,
+            aoi_source_type=None,
+            time_range=None,
+            requested_dataset=None,
+            analysis_type="CLIP",
+            preferred_output=["geotiff"],
+            user_priority="balanced",
+            operation_params=operation_params,
+            need_confirmation=bool(missing_fields),
+            missing_fields=missing_fields,
+            clarification_message="任务解析失败，请补充源栅格与裁剪范围路径后重试。",
+            created_from=f"llm_parse_failed:{reason[:120]}",
+        )
+
     missing_fields = ["time_range"]
     if not has_upload:
         missing_fields.insert(0, "aoi")
@@ -445,7 +555,33 @@ def _build_parser_failure_spec(message: str, *, has_upload: bool, reason: str) -
     )
 
 
-def _normalize_llm_parsed_spec(payload: LLMParsedSpec, *, has_upload: bool) -> ParsedTaskSpec:
+def _coerce_llm_parser_payload(raw_payload: Any) -> dict[str, Any]:
+    if not isinstance(raw_payload, dict):
+        return {}
+
+    payload = dict(raw_payload)
+    preferred_output = payload.get("preferred_output")
+    if isinstance(preferred_output, str):
+        payload["preferred_output"] = [preferred_output]
+    elif preferred_output is None:
+        payload["preferred_output"] = ["png_map", "methods_text"]
+
+    user_priority = payload.get("user_priority")
+    if user_priority is None:
+        payload["user_priority"] = "balanced"
+
+    missing_fields = payload.get("missing_fields")
+    if isinstance(missing_fields, str):
+        payload["missing_fields"] = [missing_fields]
+    elif missing_fields is None:
+        payload["missing_fields"] = []
+
+    if payload.get("operation_params") is None:
+        payload["operation_params"] = {}
+    return payload
+
+
+def _normalize_llm_parsed_spec(payload: LLMParsedSpec, *, has_upload: bool, message: str) -> ParsedTaskSpec:
     aoi_input = payload.aoi_input
     aoi_source_type = payload.aoi_source_type
     time_range = payload.time_range.model_dump() if payload.time_range is not None else None
@@ -457,7 +593,11 @@ def _normalize_llm_parsed_spec(payload: LLMParsedSpec, *, has_upload: bool) -> P
     need_confirmation = bool(payload.need_confirmation)
     missing_fields = list(payload.missing_fields)
 
-    if has_upload and not aoi_input:
+    if analysis_type == "CLIP":
+        inferred_operation_params = _extract_clip_operation_params(_normalize_message(message), has_upload=has_upload)
+        operation_params = {**inferred_operation_params, **operation_params}
+
+    if has_upload and not aoi_input and analysis_type != "CLIP":
         aoi_input = "uploaded_aoi"
         aoi_source_type = "file_upload"
 
@@ -469,10 +609,14 @@ def _normalize_llm_parsed_spec(payload: LLMParsedSpec, *, has_upload: bool) -> P
             detected_bbox=detected_bbox,
         )
 
-    if not aoi_input:
-        missing_fields.append("aoi")
-    if time_range is None:
-        missing_fields.append("time_range")
+    missing_fields.extend(
+        _collect_missing_fields(
+            analysis_type=analysis_type,
+            aoi_input=aoi_input,
+            time_range=time_range,
+            operation_params=operation_params,
+        )
+    )
     missing_fields = list(dict.fromkeys(missing_fields))
     need_confirmation = need_confirmation or bool(missing_fields)
 
@@ -519,8 +663,9 @@ def _parse_task_message_with_llm(
             db_session=db_session,
         )
         try:
-            payload = LLMParsedSpec.model_validate(response.content_json)
-            return _normalize_llm_parsed_spec(payload, has_upload=has_upload)
+            coerced_payload = _coerce_llm_parser_payload(response.content_json)
+            payload = LLMParsedSpec.model_validate(coerced_payload)
+            return _normalize_llm_parsed_spec(payload, has_upload=has_upload, message=message)
         except ValidationError as exc:
             last_error = "schema_validation_failed"
             if attempt >= parser_retries:
@@ -528,7 +673,7 @@ def _parse_task_message_with_llm(
             attempt += 1
             user_prompt = _build_parser_repair_user_prompt(
                 base_prompt=base_user_prompt,
-                previous_json=response.content_json,
+                previous_json=coerced_payload if "coerced_payload" in locals() else {},
                 validation_errors=exc.errors(),
             )
 

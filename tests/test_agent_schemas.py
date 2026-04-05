@@ -29,6 +29,21 @@ def test_parsed_task_spec_normalizes_analysis_type_and_operation_params() -> Non
     assert payload.operation_params["index"] == "ndwi"
 
 
+def test_parsed_task_spec_supports_clip_analysis_type() -> None:
+    payload = ParsedTaskSpec(
+        analysis_type="clip",
+        operation_params={
+            "source_path": "/Users/ljn/gis_data/CACD-2020.tif",
+            "clip_path": "/Users/ljn/gis_data/区划/xinjiang.geojson",
+            "output_path": "/Users/ljn/gis_data/xinjiang.tif",
+        },
+    )
+
+    assert payload.analysis_type == "CLIP"
+    assert payload.operation_params["source_path"].endswith("CACD-2020.tif")
+    assert payload.operation_params["clip_path"].endswith("xinjiang.geojson")
+
+
 def test_llm_parsed_spec_band_math_requires_expression() -> None:
     with pytest.raises(ValidationError):
         LLMParsedSpec(

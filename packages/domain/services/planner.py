@@ -63,6 +63,11 @@ def _format_time_range(time_range: dict[str, str] | None) -> str:
 
 
 def _build_objective(parsed: ParsedTaskSpec) -> str:
+    if parsed.analysis_type == "CLIP":
+        source_path = str(parsed.operation_params.get("source_path") or "输入栅格")
+        clip_path = str(parsed.operation_params.get("clip_path") or "裁剪范围")
+        return f"将 {source_path} 按 {clip_path} 执行栅格裁剪并发布可下载结果。"
+
     aoi_text = parsed.aoi_input or "当前研究区"
     time_text = _format_time_range(parsed.time_range)
     dataset_text = parsed.requested_dataset or "自动选择数据源"
@@ -70,6 +75,15 @@ def _build_objective(parsed: ParsedTaskSpec) -> str:
 
 
 def _build_reasoning_summary(parsed: ParsedTaskSpec) -> str:
+    if parsed.analysis_type == "CLIP":
+        summary_parts = [
+            "先解析输入栅格与裁剪范围路径",
+            "再生成可审批的操作计划并执行栅格裁剪与结果导出",
+        ]
+        if parsed.need_confirmation:
+            summary_parts.append("当前参数不完整，计划会先停在待澄清状态")
+        return "；".join(summary_parts) + "。"
+
     summary_parts = [
         "先把自然语言请求收敛为结构化任务",
         "再按 AOI、目录搜索、规则推荐、栅格处理和结果发布执行",
