@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     llm_recommendation_enabled: bool = True
     llm_recommendation_schema_retries: int = 2
     llm_recommendation_legacy_fallback: bool = True
+    llm_step_react_enabled: bool = True
+    llm_step_react_schema_retries: int = 1
+    llm_step_react_legacy_fallback: bool = True
     agent_max_steps: int = 12
     agent_max_tool_calls: int = 24
     agent_runtime_timeout_seconds: int = 900

@@ -3,6 +3,9 @@ import inspect
 from packages.domain.services.graph import nodes as graph_nodes
 from packages.domain.services.graph import runtime_helpers
 from packages.domain.errors import ErrorCode
+from packages.domain.config import get_settings
+from packages.domain.models import TaskRunRecord, TaskSpecRecord
+from packages.domain.services.llm_client import LLMResponse, LLMUsage
 from packages.domain.services.graph import builder as graph_builder
 from packages.domain.services.graph.builder import build_task_graph
 from packages.domain.services.graph.routes import (
@@ -15,6 +18,7 @@ from packages.domain.services.graph.routes import (
     route_after_search_candidates,
 )
 from packages.domain.services.task_state import TASK_STATUS_AWAITING_APPROVAL, TASK_STATUS_QUEUED
+from packages.schemas.task import ParsedTaskSpec
 
 
 def test_route_after_parse_to_clarification() -> None:
@@ -264,3 +268,116 @@ def test_plan_task_node_preserves_approved_operation_plan(monkeypatch) -> None: 
     result = graph_nodes.plan_task_node({"task_id": "task_approved"})
     assert result["plan_status"] == "ready"
     assert result["need_clarification"] is False
+
+
+def test_runtime_step_skips_unplanned_step_without_tool_call(monkeypatch) -> None:  # noqa: ANN001
+    task = TaskRunRecord(
+        id="task_clip",
+        session_id="ses_clip",
+        user_message_id="msg_clip",
+        status="running",
+    )
+    task.task_spec = TaskSpecRecord(
+        task_id=task.id,
+        aoi_input="uploaded_aoi",
+        aoi_source_type="file_upload",
+        preferred_output=["geotiff"],
+        user_priority="balanced",
+        need_confirmation=False,
+        raw_spec_json={
+            "analysis_type": "CLIP",
+            "operation_params": {
+                "source_path": "/tmp/source.tif",
+                "clip_path": "/tmp/aoi.geojson",
+            },
+        },
+    )
+    task.plan_json = {
+        "status": "running",
+        "steps": [
+            {"step_name": "plan_task"},
+            {"step_name": "normalize_aoi"},
+            {"step_name": "run_processing_pipeline"},
+            {"step_name": "generate_outputs"},
+        ],
+    }
+
+    class _FakeSession:
+        def __enter__(self):  # noqa: ANN204
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            del exc_type, exc, tb
+
+        def get(self, model, task_id):  # noqa: ANN001
+            del model, task_id
+            return task
+
+        def commit(self) -> None:
+            return None
+
+        def flush(self) -> None:
+            return None
+
+        def add(self, record) -> None:  # noqa: ANN001
+            del record
+            return None
+
+    monkeypatch.setattr("packages.domain.services.graph.nodes.SessionLocal", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "packages.domain.services.graph.nodes.runtime_helpers.execute_tool_step",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected tool execution")),  # noqa: ARG005
+    )
+
+    state = {
+        "task_id": task.id,
+        "runtime_started_at": runtime_helpers.perf_counter(),
+        "tool_calls": 0,
+        "runtime_context": runtime_helpers.PipelineExecutionContext(parsed_spec=ParsedTaskSpec()),
+    }
+    result = graph_nodes._run_runtime_step(state, step_name="search_candidates")
+
+    assert result["plan_status"] == "running"
+    assert result["tool_calls"] == 0
+
+
+def test_step_react_decision_uses_llm_when_enabled(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setenv("GIS_AGENT_LLM_API_KEY", "test-key")
+    monkeypatch.setenv("GIS_AGENT_LLM_STEP_REACT_ENABLED", "true")
+    get_settings.cache_clear()
+
+    calls = {"count": 0}
+
+    def _fake_chat_json(self, **kwargs):  # noqa: ANN001
+        del self
+        calls["count"] += 1
+        assert kwargs["phase"] == "react_step"
+        return LLMResponse(
+            model="gpt-4o-mini",
+            request_id="req-react",
+            content_text="{}",
+            content_json={
+                "decision": "continue",
+                "function_name": "catalog.search",
+                "arguments": {"step_name": "search_candidates"},
+                "reasoning_summary": "继续执行目录搜索",
+            },
+            usage=LLMUsage(input_tokens=12, output_tokens=8, total_tokens=20),
+            latency_ms=11,
+            raw_payload={},
+        )
+
+    monkeypatch.setattr("packages.domain.services.graph.runtime_helpers.LLMClient.chat_json", _fake_chat_json)
+    decision = runtime_helpers._build_step_react_decision(
+        db=None,
+        task=TaskRunRecord(id="task_react", session_id="ses_react", user_message_id="msg_react"),
+        step_name="search_candidates",
+        tool_name="catalog.search",
+        title="搜索候选",
+        context=runtime_helpers.PipelineExecutionContext(parsed_spec=ParsedTaskSpec()),
+    )
+
+    assert calls["count"] == 1
+    assert decision.decision == "continue"
+    assert decision.function_name == "catalog.search"
+    get_settings.cache_clear()

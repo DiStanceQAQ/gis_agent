@@ -73,23 +73,36 @@ def _resolve_raster_source(
     inputs = node.get("inputs") or {}
     params = node.get("params") or {}
     step_id = str(node.get("step_id") or "step")
+    op_name = str(node.get("op_name") or "")
+    strict_source_required = bool(inputs.get("upload_id")) or op_name == "input.upload_raster"
+    source_from_explicit_ref = False
 
     input_ref = str(inputs.get("raster") or "")
     if input_ref and input_ref in references:
         source_path = Path(references[input_ref])
+        source_from_explicit_ref = True
     else:
         source_param = params.get("source_path")
         if source_param:
             source_path = Path(str(source_param))
+            source_from_explicit_ref = True
         else:
             primary_ref = _pick_primary_raster_reference(references)
             if primary_ref:
                 source_path = Path(primary_ref)
             else:
+                if strict_source_required:
+                    raise ValueError(
+                        f"{step_id} cannot resolve raster source: missing input ref and source_path."
+                    )
                 source_path = working_dir / f"{step_id}_source.tif"
                 _create_default_raster(source_path)
 
     if not _is_supported_raster(source_path):
+        if strict_source_required or source_from_explicit_ref:
+            raise ValueError(
+                f"{step_id} cannot resolve raster source: invalid raster at {source_path}."
+            )
         _create_default_raster(source_path)
     return source_path
 
@@ -103,11 +116,15 @@ def _resolve_vector_source(
     inputs = node.get("inputs") or {}
     params = node.get("params") or {}
     step_id = str(node.get("step_id") or "step")
+    op_name = str(node.get("op_name") or "")
+    strict_source_required = bool(inputs.get("upload_id")) or op_name == "input.upload_vector"
 
     upload_ref = str(inputs.get("upload_id") or "")
     source_candidate: Path | None = None
+    source_from_explicit_ref = False
     if upload_ref and upload_ref in references:
         source_candidate = Path(references[upload_ref])
+        source_from_explicit_ref = True
     else:
         source_param = (
             params.get("source_path")
@@ -117,6 +134,7 @@ def _resolve_vector_source(
         )
         if source_param:
             source_candidate = Path(str(source_param))
+            source_from_explicit_ref = True
         else:
             primary_ref = _pick_primary_vector_reference(references)
             if primary_ref:
@@ -125,6 +143,11 @@ def _resolve_vector_source(
     if source_candidate and source_candidate.exists():
         return source_candidate
 
+    if strict_source_required or source_from_explicit_ref:
+        raise ValueError(
+            f"{step_id} cannot resolve vector source: missing upload ref/path or file does not exist."
+        )
+
     fallback = working_dir / f"{step_id}_source.geojson"
     _write_geojson(fallback, [_default_geometry()], crs="EPSG:4326")
     return fallback
@@ -132,7 +155,7 @@ def _resolve_vector_source(
 
 def _write_raster_copy(*, source_path: Path, output_path: Path) -> None:
     if not _is_supported_raster(source_path):
-        _create_default_raster(source_path)
+        raise ValueError(f"Invalid raster source for copy: {source_path}")
     with rasterio.open(source_path) as src:
         profile = src.profile.copy()
         data = src.read()
@@ -170,7 +193,7 @@ def _write_grayscale_png(path: Path, pixels: np.ndarray) -> None:
 
 def _write_png_preview_from_raster(*, raster_path: Path, png_path: Path) -> None:
     if not _is_supported_raster(raster_path):
-        _create_default_raster(raster_path)
+        raise ValueError(f"Invalid raster source for png preview: {raster_path}")
 
     with rasterio.open(raster_path) as src:
         data = src.read(1).astype("float32")
@@ -237,7 +260,7 @@ def _resolve_raster_sources(
     resolved: list[Path] = []
     for path in sources:
         if not _is_supported_raster(path):
-            _create_default_raster(path)
+            raise ValueError(f"Invalid raster source for mosaic: {path}")
         resolved.append(path)
     return resolved
 

@@ -179,6 +179,17 @@ def _prepare_runtime_start(
     return None
 
 
+def _is_step_enabled_for_plan(task: TaskRunRecord, *, step_name: str) -> bool:
+    planned_steps = {
+        str(step.get("step_name"))
+        for step in (task.plan_json or {}).get("steps", [])
+        if step.get("step_name")
+    }
+    if not planned_steps:
+        return True
+    return step_name in planned_steps
+
+
 def _run_runtime_step(state: GISAgentState, *, step_name: str) -> GISAgentState:
     task_id = state["task_id"]
     start = float(state.get("runtime_started_at", perf_counter()))
@@ -200,6 +211,24 @@ def _run_runtime_step(state: GISAgentState, *, step_name: str) -> GISAgentState:
             early = _prepare_runtime_start(db=db, task=task, state=state, start=start)
             if early is not None:
                 return early
+
+        if not _is_step_enabled_for_plan(task, step_name=step_name):
+            runtime_helpers.append_task_event(
+                db,
+                task_id=task.id,
+                event_type="step_skipped_by_plan",
+                step_name=step_name,
+                status=task.status,
+                detail={"reason": "step_not_in_plan"},
+            )
+            db.commit()
+            return {
+                "need_clarification": False,
+                "plan_status": PLAN_STATUS_RUNNING,
+                "runtime_context": context,
+                "runtime_started_at": start,
+                "tool_calls": tool_calls,
+            }
 
         try:
             runtime_helpers.check_runtime_limits(

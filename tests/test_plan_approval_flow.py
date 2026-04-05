@@ -267,6 +267,31 @@ def test_approve_task_plan_queues_execution(client: TestClient) -> None:
         _cleanup_session(session_id)
 
 
+def test_approve_task_plan_response_includes_execution_submission_metadata(client: TestClient) -> None:
+    session_id = _create_session()
+    queued: list[str] = []
+    try:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(orchestrator, "_queue_or_run", lambda task_id: queued.append(task_id))
+            payload = _create_message(client, session_id)
+            detail = client.get(f"/api/v1/tasks/{payload['task_id']}").json()
+            operation_plan = detail["operation_plan"]
+            assert operation_plan is not None
+
+            approve_response = client.post(
+                f"/api/v1/tasks/{payload['task_id']}/approve",
+                json={"approved_version": operation_plan["version"]},
+            )
+        assert approve_response.status_code == 200
+        approved_detail = approve_response.json()
+        assert queued == [payload["task_id"]]
+        assert approved_detail["execution_submitted"] is True
+        assert isinstance(approved_detail["execution_mode"], str)
+        assert approved_detail["approval_required"] is False
+    finally:
+        _cleanup_session(session_id)
+
+
 def test_approve_task_plan_rejects_version_mismatch_with_plan_edit_invalid(client: TestClient) -> None:
     session_id = _create_session()
     try:

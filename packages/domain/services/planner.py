@@ -58,6 +58,17 @@ class TaskPlan(BaseModel):
     error_message: str | None = None
 
 
+def _required_step_sequence(parsed: ParsedTaskSpec) -> list[str]:
+    if parsed.analysis_type == "CLIP":
+        return [
+            "plan_task",
+            "normalize_aoi",
+            "run_processing_pipeline",
+            "generate_outputs",
+        ]
+    return list(STEP_SEQUENCE)
+
+
 def _format_time_range(time_range: dict[str, str] | None) -> str:
     if not time_range:
         return "未指定时间范围"
@@ -102,9 +113,10 @@ def _build_reasoning_summary(parsed: ParsedTaskSpec) -> str:
 def _build_steps_legacy(parsed: ParsedTaskSpec) -> list[TaskPlanStep]:
     requested_dataset = parsed.requested_dataset or "auto"
     tool_definitions = {definition.step_name: definition for definition in list_tool_definitions()}
+    required_step_sequence = _required_step_sequence(parsed)
 
     steps: list[TaskPlanStep] = []
-    for step_name in STEP_SEQUENCE:
+    for step_name in required_step_sequence:
         definition = tool_definitions.get(step_name)
         if definition is None:
             continue
@@ -170,9 +182,11 @@ def _normalize_step_name(step_name: str) -> str:
     return _STEP_NAME_ALIASES.get(step_name, step_name)
 
 
-def _normalize_llm_steps(steps: list[Any]) -> list[TaskPlanStep]:
+def _normalize_llm_steps(steps: list[Any], parsed: ParsedTaskSpec) -> list[TaskPlanStep]:
     tool_definitions = {definition.step_name: definition for definition in list_tool_definitions()}
-    required_step_names = [step_name for step_name in STEP_SEQUENCE if step_name in tool_definitions]
+    required_step_names = [
+        step_name for step_name in _required_step_sequence(parsed) if step_name in tool_definitions
+    ]
 
     llm_steps_by_name: dict[str, Any] = {}
     for step in steps:
@@ -251,7 +265,7 @@ def _normalize_llm_task_plan(payload: LLMTaskPlan, parsed: ParsedTaskSpec) -> Ta
     status = PLAN_STATUS_NEEDS_CLARIFICATION if parsed.need_confirmation or missing_fields else PLAN_STATUS_READY
     objective = payload.objective.strip() or _build_objective(parsed)
     reasoning_summary = payload.reasoning_summary.strip() or _build_reasoning_summary(parsed)
-    normalized_steps = _normalize_llm_steps(payload.steps)
+    normalized_steps = _normalize_llm_steps(payload.steps, parsed)
     normalized_operation_plan_nodes: list[dict[str, Any]] = []
     if payload.operation_plan_nodes:
         try:
@@ -318,7 +332,7 @@ def _build_planner_user_prompt(parsed: ParsedTaskSpec) -> str:
             "steps",
             "operation_plan_nodes",
         ],
-        "required_step_names": list(STEP_SEQUENCE),
+        "required_step_names": _required_step_sequence(parsed),
         "tool_whitelist": tool_whitelist,
         "operation_whitelist": operation_whitelist,
     }

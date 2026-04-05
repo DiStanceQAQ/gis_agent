@@ -358,3 +358,67 @@ def test_build_task_plan_returns_error_code_when_schema_validation_exhausted(
     assert plan.error_code == ErrorCode.TASK_LLM_PLANNER_SCHEMA_VALIDATION_FAILED
     assert plan.error_message is not None
     get_settings.cache_clear()
+
+
+def test_build_task_plan_accepts_clip_minimal_step_chain(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GIS_AGENT_LLM_API_KEY", "test_key")
+    monkeypatch.setenv("GIS_AGENT_LLM_PLANNER_ENABLED", "true")
+    monkeypatch.setenv("GIS_AGENT_LLM_PLANNER_LEGACY_FALLBACK", "false")
+    get_settings.cache_clear()
+
+    payload = _valid_plan_payload()
+    payload["steps"] = [
+        {
+            "step_name": "plan_task",
+            "tool_name": "planner.build",
+            "title": "规划任务",
+            "purpose": "生成任务计划",
+            "depends_on": [],
+        },
+        {
+            "step_name": "normalize_aoi",
+            "tool_name": "aoi.normalize",
+            "title": "标准化 AOI",
+            "purpose": "标准化输入边界",
+            "depends_on": ["plan_task"],
+        },
+        {
+            "step_name": "run_processing_pipeline",
+            "tool_name": "processing.run",
+            "title": "执行裁剪",
+            "purpose": "执行裁剪流程",
+            "depends_on": ["normalize_aoi"],
+        },
+        {
+            "step_name": "generate_outputs",
+            "tool_name": "artifacts.publish",
+            "title": "发布结果",
+            "purpose": "导出裁剪产物",
+            "depends_on": ["run_processing_pipeline"],
+        },
+    ]
+
+    def _fake_chat_json(self, **kwargs):  # noqa: ANN001
+        del self, kwargs
+        return _mock_llm_plan_response(payload)
+
+    monkeypatch.setattr("packages.domain.services.planner.LLMClient.chat_json", _fake_chat_json)
+    parsed = ParsedTaskSpec(
+        analysis_type="CLIP",
+        aoi_input="uploaded_aoi",
+        aoi_source_type="file_upload",
+        operation_params={
+            "source_path": "/tmp/source.tif",
+            "clip_path": "/tmp/aoi.geojson",
+            "output_path": "/tmp/xinjiang.tif",
+        },
+    )
+    plan = build_task_plan(parsed)
+
+    assert [step.step_name for step in plan.steps] == [
+        "plan_task",
+        "normalize_aoi",
+        "run_processing_pipeline",
+        "generate_outputs",
+    ]
+    get_settings.cache_clear()

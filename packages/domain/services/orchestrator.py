@@ -926,6 +926,12 @@ def get_task_detail(db: Session, task_id: str) -> TaskDetailResponse:
         task_id=task.id,
         parent_task_id=task.parent_task_id,
         status=task.status,
+        approval_required=task.status == TASK_STATUS_AWAITING_APPROVAL,
+        execution_mode=(task.plan_json or {}).get("execution_mode"),
+        execution_submitted=bool(
+            (task.plan_json or {}).get("execution_submitted")
+            or task.status in {"queued", "running", "success", "failed"}
+        ),
         current_step=task.current_step,
         analysis_type=task.analysis_type,
         created_at=task.created_at,
@@ -1037,10 +1043,13 @@ def approve_task_plan(db: Session, task_id: str, approved_version: int) -> TaskD
         )
 
     approved_plan = validated_plan.model_copy(update={"status": "approved"})
+    execution_mode = get_settings().execution_mode
     task.plan_json = {
         **task.plan_json,
         "operation_plan": approved_plan.model_dump(),
         "operation_plan_version": approved_plan.version,
+        "execution_mode": execution_mode,
+        "execution_submitted": True,
     }
     set_task_status(
         db,
@@ -1054,7 +1063,7 @@ def approve_task_plan(db: Session, task_id: str, approved_version: int) -> TaskD
         task,
         TASK_STATUS_QUEUED,
         event_type="task_queued",
-        detail={"execution_mode": get_settings().execution_mode},
+        detail={"execution_mode": execution_mode},
     )
     db.commit()
     _queue_or_run(task.id)
@@ -1205,12 +1214,18 @@ def rerun_task(db: Session, task_id: str, override: dict | None) -> TaskDetailRe
     )
 
     if task.task_spec is not None and not task.task_spec.need_confirmation:
+        execution_mode = get_settings().execution_mode
+        task.plan_json = {
+            **(task.plan_json or {}),
+            "execution_mode": execution_mode,
+            "execution_submitted": True,
+        }
         append_task_event(
             db,
             task_id=task.id,
             event_type="task_queued",
             status=task.status,
-            detail={"execution_mode": get_settings().execution_mode, "rerun": True},
+            detail={"execution_mode": execution_mode, "rerun": True},
         )
     db.commit()
     if task.task_spec is not None and not task.task_spec.need_confirmation:

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from time import perf_counter
 
@@ -12,6 +14,7 @@ from packages.domain.config import get_settings
 from packages.domain.errors import ErrorCode
 from packages.domain.logging import get_logger
 from packages.domain.models import ArtifactRecord, TaskRunRecord
+from packages.domain.services.llm_client import LLMClient, LLMClientError
 from packages.domain.services.catalog import (
     build_candidate_summaries,
     persist_candidates,
@@ -472,7 +475,43 @@ def mark_current_step_failed(
     )
 
 
-def _build_step_react_decision(
+@lru_cache
+def _load_step_react_system_prompt() -> str:
+    prompt_path = Path(__file__).resolve().parents[2] / "prompts" / "react_step.md"
+    return prompt_path.read_text(encoding="utf-8")
+
+
+def _build_step_react_user_prompt(
+    *,
+    step_name: str,
+    tool_name: str,
+    title: str,
+    context: PipelineExecutionContext,
+) -> str:
+    payload = {
+        "task": "react_step_decision",
+        "language": "zh-CN",
+        "step": {
+            "step_name": step_name,
+            "tool_name": tool_name,
+            "title": title,
+        },
+        "parsed_spec": context.parsed_spec.model_dump(),
+        "runtime_context": {
+            "candidate_count": len(context.candidates),
+            "has_recommendation": context.recommendation is not None,
+            "has_pipeline_outputs": context.pipeline_outputs is not None,
+        },
+        "constraints": {
+            "allowed_function_name": tool_name,
+            "allowed_decisions": ["continue", "skip", "fail"],
+        },
+        "required_fields": ["decision", "function_name", "arguments", "reasoning_summary"],
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def _build_deterministic_step_react_decision(
     *,
     step_name: str,
     tool_name: str,
@@ -488,6 +527,163 @@ def _build_step_react_decision(
             f"当前步骤 {step_name} 依赖已满足，继续调用 {tool_name}（{title}）推进流程；"
             f"数据源偏好={parsed_dataset}。"
         ),
+    )
+
+
+def _build_step_react_decision(
+    *,
+    db: Session | None,
+    task: TaskRunRecord,
+    step_name: str,
+    tool_name: str,
+    title: str,
+    context: PipelineExecutionContext,
+) -> LLMReactStepDecision:
+    settings = get_settings()
+    use_llm = bool(getattr(settings, "llm_step_react_enabled", True))
+    fallback_enabled = bool(getattr(settings, "llm_step_react_legacy_fallback", True))
+    schema_retries = max(0, int(getattr(settings, "llm_step_react_schema_retries", 1)))
+    llm_base_url = getattr(settings, "llm_base_url", None)
+    llm_model = getattr(settings, "llm_model", None)
+    llm_temperature = float(getattr(settings, "llm_temperature", 0.2))
+    llm_config_complete = bool(isinstance(llm_base_url, str) and llm_base_url.strip() and llm_model)
+
+    if not use_llm:
+        if db is not None:
+            _write_react_step_log(
+                db=db,
+                task=task,
+                step_name=step_name,
+                tool_name=tool_name,
+                status="success",
+                latency_ms=0,
+                error_message="llm_step_react_disabled",
+            )
+        return _build_deterministic_step_react_decision(
+            step_name=step_name,
+            tool_name=tool_name,
+            title=title,
+            context=context,
+        )
+    if not llm_config_complete:
+        if db is not None:
+            _write_react_step_log(
+                db=db,
+                task=task,
+                step_name=step_name,
+                tool_name=tool_name,
+                status="success",
+                latency_ms=0,
+                error_message="llm_step_react_config_incomplete_fallback",
+            )
+        return _build_deterministic_step_react_decision(
+            step_name=step_name,
+            tool_name=tool_name,
+            title=title,
+            context=context,
+        )
+
+    system_prompt = _load_step_react_system_prompt()
+    user_prompt = _build_step_react_user_prompt(
+        step_name=step_name,
+        tool_name=tool_name,
+        title=title,
+        context=context,
+    )
+    client = LLMClient(settings)
+    attempt = 0
+    last_validation_errors: list[dict[str, object]] = []
+
+    while attempt <= schema_retries:
+        try:
+            response = client.chat_json(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                model=str(llm_model),
+                temperature=llm_temperature,
+                phase="react_step",
+                task_id=task.id,
+                db_session=db,
+            )
+        except LLMClientError as exc:
+            if fallback_enabled:
+                logger.warning(
+                    "step_react.llm_failed step_name=%s detail=%s fallback=deterministic",
+                    step_name,
+                    exc.detail,
+                )
+                if db is not None:
+                    _write_react_step_log(
+                        db=db,
+                        task=task,
+                        step_name=step_name,
+                        tool_name=tool_name,
+                        status="success",
+                        latency_ms=0,
+                        error_message="llm_step_react_failed_fallback",
+                    )
+                return _build_deterministic_step_react_decision(
+                    step_name=step_name,
+                    tool_name=tool_name,
+                    title=title,
+                    context=context,
+                )
+            raise AgentRuntimeError(
+                error_code=ErrorCode.TASK_RUNTIME_FAILED,
+                message=f"Step ReAct LLM request failed: {step_name}",
+                detail={"step_name": step_name, "llm_detail": exc.detail},
+            ) from exc
+
+        try:
+            return LLMReactStepDecision.model_validate(response.content_json)
+        except ValidationError as exc:
+            last_validation_errors = [
+                {"loc": list(item.get("loc", ())), "msg": item.get("msg"), "type": item.get("type")}
+                for item in exc.errors()
+            ]
+            if attempt >= schema_retries:
+                break
+            attempt += 1
+            user_prompt = json.dumps(
+                {
+                    "task": "repair_invalid_step_react_json",
+                    "instructions": "上一轮输出未通过 schema 校验。请仅输出修复后的 JSON。",
+                    "previous_json": response.content_json,
+                    "validation_errors": last_validation_errors,
+                    "allowed_function_name": tool_name,
+                    "step_name": step_name,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+
+    if fallback_enabled:
+        logger.warning(
+            "step_react.schema_failed step_name=%s fallback=deterministic errors=%s",
+            step_name,
+            last_validation_errors,
+        )
+        if db is not None:
+            _write_react_step_log(
+                db=db,
+                task=task,
+                step_name=step_name,
+                tool_name=tool_name,
+                status="success",
+                latency_ms=0,
+                error_message="llm_step_react_schema_failed_fallback",
+            )
+        return _build_deterministic_step_react_decision(
+            step_name=step_name,
+            tool_name=tool_name,
+            title=title,
+            context=context,
+        )
+
+    raise AgentRuntimeError(
+        error_code=ErrorCode.TASK_LLM_REACT_SCHEMA_VALIDATION_FAILED,
+        message="Step ReAct decision failed schema validation.",
+        detail={"step_name": step_name, "validation_errors": last_validation_errors},
     )
 
 
@@ -553,35 +749,13 @@ def execute_tool_step(
             },
         )
 
-    try:
-        react_decision = _build_step_react_decision(
-            step_name=step_name,
-            tool_name=tool_name,
-            title=title,
-            context=context,
-        )
-    except ValidationError as exc:
-        _write_react_step_log(
-            db=db,
-            task=task,
-            step_name=step_name,
-            tool_name=tool_name,
-            status="failed",
-            latency_ms=int((perf_counter() - step_react_started) * 1000),
-            error_message="step_react_schema_validation_failed",
-        )
-        raise AgentRuntimeError(
-            error_code=ErrorCode.TASK_LLM_REACT_SCHEMA_VALIDATION_FAILED,
-            message="Step ReAct decision failed schema validation.",
-            detail={"validation_errors": exc.errors()},
-        ) from exc
-    _write_react_step_log(
+    react_decision = _build_step_react_decision(
         db=db,
         task=task,
         step_name=step_name,
         tool_name=tool_name,
-        status="success",
-        latency_ms=int((perf_counter() - step_react_started) * 1000),
+        title=title,
+        context=context,
     )
     if step_react_timeout_seconds > 0 and (perf_counter() - step_react_started) > step_react_timeout_seconds:
         raise AgentRuntimeError(

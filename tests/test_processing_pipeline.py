@@ -6,7 +6,11 @@ import pytest
 import rasterio
 from rasterio.transform import from_origin
 
-from packages.domain.services.processing_pipeline import _resolve_vector_source, run_processing_pipeline
+from packages.domain.services.processing_pipeline import (
+    _resolve_raster_source,
+    _resolve_vector_source,
+    run_processing_pipeline,
+)
 
 
 def _create_test_raster(path: Path, *, offset: float = 0.0, mask_first_pixel: bool = False) -> None:
@@ -45,13 +49,23 @@ def _write_test_geojson(path: Path, polygons: list[list[list[float]]]) -> None:
 
 
 def test_run_processing_pipeline_executes_clip_then_export(tmp_path) -> None:
+    source_raster = tmp_path / "clip_source.tif"
+    clip_vector = tmp_path / "clip_aoi.geojson"
+    _create_test_raster(source_raster)
+    _write_test_geojson(
+        clip_vector,
+        polygons=[
+            [[116.0, 39.96], [116.03, 39.96], [116.03, 40.0], [116.0, 40.0], [116.0, 39.96]],
+        ],
+    )
+
     plan_nodes = [
         {
             "step_id": "clip1",
             "op_name": "raster.clip",
             "depends_on": [],
             "inputs": {},
-            "params": {"crop": True},
+            "params": {"crop": True, "source_path": str(source_raster), "clip_path": str(clip_vector)},
             "outputs": {"raster": "r1"},
         },
         {
@@ -175,6 +189,28 @@ def test_resolve_vector_source_accepts_clip_path_param(tmp_path) -> None:
     resolved = _resolve_vector_source(node=node, references={}, working_dir=tmp_path)
 
     assert resolved == clip_vector
+
+
+def test_resolve_raster_source_raises_when_no_usable_input(tmp_path) -> None:
+    node = {
+        "step_id": "upload_raster_1",
+        "inputs": {"upload_id": "missing_upload"},
+        "params": {},
+    }
+
+    with pytest.raises(ValueError, match="cannot resolve raster source"):
+        _resolve_raster_source(node=node, references={}, working_dir=tmp_path)
+
+
+def test_resolve_vector_source_raises_when_no_usable_input(tmp_path) -> None:
+    node = {
+        "step_id": "upload_vector_1",
+        "inputs": {"upload_id": "missing_upload"},
+        "params": {},
+    }
+
+    with pytest.raises(ValueError, match="cannot resolve vector source"):
+        _resolve_vector_source(node=node, references={}, working_dir=tmp_path)
 
 
 def test_run_processing_pipeline_supports_phase1_raster_ops(tmp_path) -> None:

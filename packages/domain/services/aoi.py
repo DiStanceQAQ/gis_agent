@@ -509,7 +509,28 @@ def normalize_task_aoi(
     if task.task_spec.aoi_source_type == "file_upload":
         if not uploaded_files:
             return None
-        uploaded_file = uploaded_files[0]
+
+        raw_spec = task.task_spec.raw_spec_json or {}
+        upload_slots = raw_spec.get("upload_slots") if isinstance(raw_spec, dict) else {}
+        upload_slots = upload_slots if isinstance(upload_slots, dict) else {}
+
+        uploaded_by_id = {item.id: item for item in uploaded_files}
+        preferred_vector_id = str(upload_slots.get("input_vector_file_id") or "").strip()
+        uploaded_file = (
+            uploaded_by_id.get(preferred_vector_id)
+            if preferred_vector_id
+            else next(
+                (
+                    item
+                    for item in uploaded_files
+                    if item.file_type in {"geojson", "shp_zip", "vector_gpkg"}
+                ),
+                None,
+            )
+        )
+        if uploaded_file is None:
+            uploaded_file = uploaded_files[0]
+
         if uploaded_file.file_type == "geojson":
             return normalize_geojson_file(uploaded_file)
         if uploaded_file.file_type == "shp_zip":
@@ -517,7 +538,11 @@ def normalize_task_aoi(
         raise AppError.bad_request(
             error_code=ErrorCode.AOI_UNSUPPORTED_FILE_TYPE,
             message="Uploaded AOI file type is not supported yet.",
-            detail={"file_id": uploaded_file.id, "file_type": uploaded_file.file_type},
+            detail={
+                "file_id": uploaded_file.id,
+                "file_type": uploaded_file.file_type,
+                "preferred_vector_file_id": preferred_vector_id or None,
+            },
         )
 
     if task.task_spec.aoi_input:

@@ -289,3 +289,74 @@ def test_normalize_bbox_text_rejects_invalid_bbox() -> None:
         normalize_bbox_text("[116.5,39.8,116.1,40.1]")
 
     assert exc_info.value.error_code == ErrorCode.AOI_INVALID_BBOX
+
+
+def test_normalize_task_aoi_prefers_vector_upload_slot_over_first_uploaded_file(tmp_path: Path) -> None:
+    geojson_payload = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {"name": "slot-aoi"},
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        [
+                            [116.1, 39.8],
+                            [116.5, 39.8],
+                            [116.5, 40.1],
+                            [116.1, 40.1],
+                            [116.1, 39.8],
+                        ]
+                    ],
+                },
+            }
+        ],
+    }
+    geojson_path = tmp_path / "aoi.geojson"
+    geojson_path.write_text(json.dumps(geojson_payload), encoding="utf-8")
+
+    raster_path = tmp_path / "source.tif"
+    raster_path.write_bytes(b"placeholder")
+
+    task = TaskRunRecord(id="task_slot", session_id="ses_slot", user_message_id="msg_slot")
+    task.task_spec = TaskSpecRecord(
+        task_id="task_slot",
+        aoi_input="uploaded_aoi",
+        aoi_source_type="file_upload",
+        preferred_output=["png_map"],
+        user_priority="balanced",
+        need_confirmation=False,
+        raw_spec_json={
+            "upload_slots": {
+                "input_raster_file_id": "file_raster",
+                "input_vector_file_id": "file_vector",
+            }
+        },
+    )
+    uploaded_files = [
+        UploadedFileRecord(
+            id="file_raster",
+            session_id="ses_slot",
+            original_name="source.tif",
+            file_type="raster_tiff",
+            storage_key=str(raster_path),
+            size_bytes=raster_path.stat().st_size,
+            checksum="sha256-raster",
+        ),
+        UploadedFileRecord(
+            id="file_vector",
+            session_id="ses_slot",
+            original_name="aoi.geojson",
+            file_type="geojson",
+            storage_key=str(geojson_path),
+            size_bytes=geojson_path.stat().st_size,
+            checksum="sha256-vector",
+        ),
+    ]
+
+    normalized = normalize_task_aoi(task=task, uploaded_files=uploaded_files)
+
+    assert normalized is not None
+    assert normalized.source_file_id == "file_vector"
+    assert normalized.name == "slot-aoi"

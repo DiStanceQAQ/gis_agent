@@ -124,6 +124,9 @@ class TaskDetailResponse(BaseModel):
     task_id: str
     parent_task_id: str | None = None
     status: str
+    approval_required: bool | None = None
+    execution_mode: str | None = None
+    execution_submitted: bool | None = None
     current_step: str | None = None
     analysis_type: str
     created_at: datetime | None = None
