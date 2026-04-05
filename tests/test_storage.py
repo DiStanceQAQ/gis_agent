@@ -125,6 +125,7 @@ def test_detect_file_type_supports_upload_first_raster_vector() -> None:
     assert storage.detect_file_type("a.tif") == "raster_tiff"
     assert storage.detect_file_type("a.tiff") == "raster_tiff"
     assert storage.detect_file_type("zones.geojson") == "geojson"
+    assert storage.detect_file_type("zones.shp") == "shp"
     assert storage.detect_file_type("zones.shp.zip") == "shp_zip"
 
 

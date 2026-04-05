@@ -40,6 +40,7 @@ from packages.domain.services.task_state import (
     STEP_STATUS_FAILED,
     STEP_STATUS_PENDING,
     STEP_STATUS_RUNNING,
+    STEP_STATUS_SKIPPED,
     STEP_STATUS_SUCCESS,
     TASK_STATUS_WAITING_CLARIFICATION,
     set_step_status,
@@ -732,135 +733,219 @@ def execute_tool_step(
     title: str,
     handler,
     start: float,
-) -> None:
+) -> bool:
     step_react_started = perf_counter()
-    step_react_round = 1
     settings = get_settings()
-    step_react_max_rounds = int(getattr(settings, "agent_step_react_max_rounds", 1))
+    step_react_max_rounds = max(1, int(getattr(settings, "agent_step_react_max_rounds", 1)))
     step_react_timeout_seconds = int(getattr(settings, "agent_step_react_timeout_seconds", 30))
-    if step_react_round > step_react_max_rounds:
-        raise AgentRuntimeError(
-            error_code=ErrorCode.TASK_RUNTIME_MAX_STEPS_EXCEEDED,
-            message=f"Step ReAct exceeded max rounds for {step_name}.",
+    for step_react_round in range(1, step_react_max_rounds + 1):
+        if step_react_timeout_seconds > 0 and (perf_counter() - step_react_started) > step_react_timeout_seconds:
+            raise AgentRuntimeError(
+                error_code=ErrorCode.TASK_RUNTIME_TIMEOUT,
+                message=f"Step ReAct timed out before tool execution: {step_name}",
+                detail={
+                    "step_name": step_name,
+                    "step_react_round": step_react_round,
+                    "step_react_timeout_seconds": step_react_timeout_seconds,
+                },
+            )
+
+        react_decision = _build_step_react_decision(
+            db=db,
+            task=task,
+            step_name=step_name,
+            tool_name=tool_name,
+            title=title,
+            context=context,
+        )
+        append_task_event(
+            db,
+            task_id=task.id,
+            event_type="step_react_decision",
+            step_name=step_name,
+            status=task.status,
             detail={
-                "step_name": step_name,
+                "decision": react_decision.decision,
+                "reasoning_summary": react_decision.reasoning_summary,
+                "function_name": react_decision.function_name,
+                "arguments": react_decision.arguments,
                 "step_react_round": step_react_round,
                 "step_react_max_rounds": step_react_max_rounds,
             },
         )
 
-    react_decision = _build_step_react_decision(
-        db=db,
-        task=task,
-        step_name=step_name,
-        tool_name=tool_name,
-        title=title,
-        context=context,
-    )
-    if step_react_timeout_seconds > 0 and (perf_counter() - step_react_started) > step_react_timeout_seconds:
-        raise AgentRuntimeError(
-            error_code=ErrorCode.TASK_RUNTIME_TIMEOUT,
-            message=f"Step ReAct timed out before tool execution: {step_name}",
-            detail={
-                "step_name": step_name,
-                "step_react_timeout_seconds": step_react_timeout_seconds,
-            },
-        )
-    append_task_event(
-        db,
-        task_id=task.id,
-        event_type="step_react_decision",
-        step_name=step_name,
-        status=task.status,
-        detail={
-            "decision": react_decision.decision,
-            "reasoning_summary": react_decision.reasoning_summary,
-            "function_name": react_decision.function_name,
-            "arguments": react_decision.arguments,
-        },
-    )
-    if react_decision.decision != "continue":
-        raise AgentRuntimeError(
-            error_code=ErrorCode.TASK_RUNTIME_FAILED,
-            message=f"ReAct decision blocked step execution: {step_name}",
-            detail={
-                "step_name": step_name,
-                "decision": react_decision.decision,
+        if react_decision.decision == "skip":
+            skip_detail = {
+                "decision": "skip",
                 "reasoning_summary": react_decision.reasoning_summary,
+                "step_react_round": step_react_round,
+                "step_react_max_rounds": step_react_max_rounds,
+            }
+            set_step_status(db, task, step_name, STEP_STATUS_SKIPPED, detail=skip_detail)
+            task.plan_json = set_task_plan_step_status(
+                task.plan_json,
+                step_name=step_name,
+                status=STEP_STATUS_SKIPPED,
+                detail=skip_detail,
+            )
+            append_task_event(
+                db,
+                task_id=task.id,
+                event_type="step_skipped_by_react",
+                step_name=step_name,
+                status=task.status,
+                detail=skip_detail,
+            )
+            append_task_event(
+                db,
+                task_id=task.id,
+                event_type="step_react_observation",
+                step_name=step_name,
+                status=task.status,
+                detail=_build_step_react_observation(skip_detail),
+            )
+            db.commit()
+            return False
+
+        if react_decision.decision == "fail":
+            raise AgentRuntimeError(
+                error_code=ErrorCode.TASK_RUNTIME_FAILED,
+                message=f"ReAct decision marked step as failed: {step_name}",
+                detail={
+                    "step_name": step_name,
+                    "decision": react_decision.decision,
+                    "reasoning_summary": react_decision.reasoning_summary,
+                    "step_react_round": step_react_round,
+                    "step_react_max_rounds": step_react_max_rounds,
+                },
+            )
+
+        if react_decision.function_name != tool_name:
+            if step_react_round < step_react_max_rounds:
+                append_task_event(
+                    db,
+                    task_id=task.id,
+                    event_type="step_react_retry",
+                    step_name=step_name,
+                    status=task.status,
+                    detail={
+                        "reason": "function_name_mismatch",
+                        "expected_function_name": tool_name,
+                        "actual_function_name": react_decision.function_name,
+                        "step_react_round": step_react_round,
+                        "step_react_max_rounds": step_react_max_rounds,
+                    },
+                )
+                db.commit()
+                continue
+            raise AgentRuntimeError(
+                error_code=ErrorCode.TASK_RUNTIME_UNKNOWN_TOOL,
+                message=f"ReAct selected unknown tool: {react_decision.function_name}",
+                detail={
+                    "step_name": step_name,
+                    "tool_name": react_decision.function_name,
+                    "step_react_round": step_react_round,
+                    "step_react_max_rounds": step_react_max_rounds,
+                },
+            )
+
+        append_task_event(
+            db,
+            task_id=task.id,
+            event_type="function_call_requested",
+            step_name=step_name,
+            status=task.status,
+            detail={
+                "function_name": react_decision.function_name,
+                "arguments": react_decision.arguments,
             },
         )
-    if react_decision.function_name != tool_name:
-        raise AgentRuntimeError(
-            error_code=ErrorCode.TASK_RUNTIME_UNKNOWN_TOOL,
-            message=f"ReAct selected unknown tool: {react_decision.function_name}",
-            detail={"step_name": step_name, "tool_name": react_decision.function_name},
+
+        set_step_status(db, task, step_name, STEP_STATUS_RUNNING)
+        task.plan_json = set_task_plan_step_status(
+            task.plan_json,
+            step_name=step_name,
+            status=STEP_STATUS_RUNNING,
+            detail={"tool_name": tool_name, "title": title},
         )
-    append_task_event(
-        db,
-        task_id=task.id,
-        event_type="function_call_requested",
-        step_name=step_name,
-        status=task.status,
+        append_task_event(
+            db,
+            task_id=task.id,
+            event_type="tool_execution_started",
+            step_name=step_name,
+            status=task.status,
+            detail={"tool_name": tool_name, "title": title},
+        )
+        db.commit()
+
+        try:
+            if step_name == "generate_outputs":
+                detail = handler(db, task, context, start=start)
+            else:
+                detail = handler(db, task, context)
+        except Exception as exc:
+            error_code, error_detail = map_runtime_error(exc)
+            failure_detail = {
+                "tool_name": tool_name,
+                "title": title,
+                "error_code": error_code,
+                "error_message": str(exc),
+            }
+            failure_detail.update(error_detail)
+            append_task_event(
+                db,
+                task_id=task.id,
+                event_type="tool_execution_failed",
+                step_name=step_name,
+                status=task.status,
+                detail=failure_detail,
+            )
+            db.commit()
+            raise
+
+        set_step_status(db, task, step_name, STEP_STATUS_SUCCESS, detail=detail)
+        task.plan_json = set_task_plan_step_status(
+            task.plan_json,
+            step_name=step_name,
+            status=STEP_STATUS_SUCCESS,
+            detail=detail,
+        )
+        append_task_event(
+            db,
+            task_id=task.id,
+            event_type="tool_execution_completed",
+            step_name=step_name,
+            status=task.status,
+            detail={"tool_name": tool_name, "title": title},
+        )
+        append_task_event(
+            db,
+            task_id=task.id,
+            event_type="function_call_completed",
+            step_name=step_name,
+            status=task.status,
+            detail={"function_name": react_decision.function_name},
+        )
+        append_task_event(
+            db,
+            task_id=task.id,
+            event_type="step_react_observation",
+            step_name=step_name,
+            status=task.status,
+            detail=_build_step_react_observation(detail),
+        )
+        db.commit()
+        return True
+
+    raise AgentRuntimeError(
+        error_code=ErrorCode.TASK_RUNTIME_MAX_STEPS_EXCEEDED,
+        message=f"Step ReAct exceeded max rounds for {step_name}.",
         detail={
-            "function_name": react_decision.function_name,
-            "arguments": react_decision.arguments,
+            "step_name": step_name,
+            "step_react_round": step_react_max_rounds,
+            "step_react_max_rounds": step_react_max_rounds,
         },
     )
-
-    set_step_status(db, task, step_name, STEP_STATUS_RUNNING)
-    task.plan_json = set_task_plan_step_status(
-        task.plan_json,
-        step_name=step_name,
-        status=STEP_STATUS_RUNNING,
-        detail={"tool_name": tool_name, "title": title},
-    )
-    append_task_event(
-        db,
-        task_id=task.id,
-        event_type="tool_execution_started",
-        step_name=step_name,
-        status=task.status,
-        detail={"tool_name": tool_name, "title": title},
-    )
-    db.commit()
-
-    if step_name == "generate_outputs":
-        detail = handler(db, task, context, start=start)
-    else:
-        detail = handler(db, task, context)
-
-    set_step_status(db, task, step_name, STEP_STATUS_SUCCESS, detail=detail)
-    task.plan_json = set_task_plan_step_status(
-        task.plan_json,
-        step_name=step_name,
-        status=STEP_STATUS_SUCCESS,
-        detail=detail,
-    )
-    append_task_event(
-        db,
-        task_id=task.id,
-        event_type="tool_execution_completed",
-        step_name=step_name,
-        status=task.status,
-        detail={"tool_name": tool_name, "title": title},
-    )
-    append_task_event(
-        db,
-        task_id=task.id,
-        event_type="function_call_completed",
-        step_name=step_name,
-        status=task.status,
-        detail={"function_name": react_decision.function_name},
-    )
-    append_task_event(
-        db,
-        task_id=task.id,
-        event_type="step_react_observation",
-        step_name=step_name,
-        status=task.status,
-        detail=_build_step_react_observation(detail),
-    )
-    db.commit()
 
 
 TOOL_REGISTRY = {

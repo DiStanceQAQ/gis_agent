@@ -426,8 +426,72 @@ def normalize_geojson_file(uploaded_file: UploadedFileRecord) -> NormalizedAOI:
     )
 
 
-def normalize_shp_zip_file(uploaded_file: UploadedFileRecord) -> NormalizedAOI:
+def _normalize_shp_from_path(
+    *,
+    uploaded_file: UploadedFileRecord,
+    shp_path: Path,
+    search_root: Path | None,
+    validation_message: str,
+) -> NormalizedAOI:
     shapefile = _import_shapefile_module()
+    reader = shapefile.Reader(str(shp_path))
+    shapes = reader.shapes()
+    if not shapes:
+        raise AppError.bad_request(
+            error_code=ErrorCode.AOI_PARSE_FAILED,
+            message="Shapefile contains no shapes.",
+            detail={"file_id": uploaded_file.id},
+        )
+
+    geometries: list[dict[str, Any]] = []
+    for shape_record in shapes:
+        if shape_record.shapeType not in {
+            shapefile.POLYGON,
+            shapefile.POLYGONM,
+            shapefile.POLYGONZ,
+        }:
+            raise AppError.bad_request(
+                error_code=ErrorCode.AOI_PARSE_FAILED,
+                message="Only polygon shapefiles are supported.",
+                detail={"shape_type": shape_record.shapeType},
+            )
+        geometries.append(shape_record.__geo_interface__)
+
+    source_crs = _load_prj_crs(search_root or shp_path.parent, shp_path)
+    final_validation = validation_message
+    if source_crs is None:
+        final_validation += "; assumed EPSG:4326"
+
+    return _finalize_geometry(
+        _geometry_collection(geometries),
+        source_type="file_upload",
+        name=uploaded_file.original_name,
+        source_file_id=uploaded_file.id,
+        source_crs=source_crs or TARGET_CRS,
+        validation_message=final_validation,
+    )
+
+
+def normalize_shp_file(uploaded_file: UploadedFileRecord) -> NormalizedAOI:
+    if uploaded_file.file_type != "shp":
+        raise AppError.bad_request(
+            error_code=ErrorCode.AOI_UNSUPPORTED_FILE_TYPE,
+            message="Uploaded AOI file type is not supported yet.",
+            detail={"file_id": uploaded_file.id, "file_type": uploaded_file.file_type},
+        )
+
+    from packages.domain.services.storage import materialize_storage_path
+
+    with materialize_storage_path(uploaded_file.storage_key, suffix=".shp") as shp_path:
+        return _normalize_shp_from_path(
+            uploaded_file=uploaded_file,
+            shp_path=shp_path,
+            search_root=shp_path.parent,
+            validation_message="normalized from uploaded shapefile",
+        )
+
+
+def normalize_shp_zip_file(uploaded_file: UploadedFileRecord) -> NormalizedAOI:
     if uploaded_file.file_type != "shp_zip":
         raise AppError.bad_request(
             error_code=ErrorCode.AOI_UNSUPPORTED_FILE_TYPE,
@@ -459,41 +523,11 @@ def normalize_shp_zip_file(uploaded_file: UploadedFileRecord) -> NormalizedAOI:
             )
 
         shp_path = shp_files[0]
-        reader = shapefile.Reader(str(shp_path))
-        shapes = reader.shapes()
-        if not shapes:
-            raise AppError.bad_request(
-                error_code=ErrorCode.AOI_PARSE_FAILED,
-                message="Shapefile archive contains no shapes.",
-                detail={"file_id": uploaded_file.id},
-            )
-
-        geometries: list[dict[str, Any]] = []
-        for shape_record in shapes:
-            if shape_record.shapeType not in {
-                shapefile.POLYGON,
-                shapefile.POLYGONM,
-                shapefile.POLYGONZ,
-            }:
-                raise AppError.bad_request(
-                    error_code=ErrorCode.AOI_PARSE_FAILED,
-                    message="Only polygon shapefiles are supported.",
-                    detail={"shape_type": shape_record.shapeType},
-                )
-            geometries.append(shape_record.__geo_interface__)
-
-        source_crs = _load_prj_crs(temp_path, shp_path)
-        validation_message = "normalized from uploaded shapefile zip"
-        if source_crs is None:
-            validation_message += "; assumed EPSG:4326"
-
-        return _finalize_geometry(
-            _geometry_collection(geometries),
-            source_type="file_upload",
-            name=uploaded_file.original_name,
-            source_file_id=uploaded_file.id,
-            source_crs=source_crs or TARGET_CRS,
-            validation_message=validation_message,
+        return _normalize_shp_from_path(
+            uploaded_file=uploaded_file,
+            shp_path=shp_path,
+            search_root=temp_path,
+            validation_message="normalized from uploaded shapefile zip",
         )
 
 
@@ -523,7 +557,7 @@ def normalize_task_aoi(
                 (
                     item
                     for item in uploaded_files
-                    if item.file_type in {"geojson", "shp_zip", "vector_gpkg"}
+                    if item.file_type in {"geojson", "shp", "shp_zip", "vector_gpkg"}
                 ),
                 None,
             )
@@ -533,6 +567,8 @@ def normalize_task_aoi(
 
         if uploaded_file.file_type == "geojson":
             return normalize_geojson_file(uploaded_file)
+        if uploaded_file.file_type == "shp":
+            return normalize_shp_file(uploaded_file)
         if uploaded_file.file_type == "shp_zip":
             return normalize_shp_zip_file(uploaded_file)
         raise AppError.bad_request(

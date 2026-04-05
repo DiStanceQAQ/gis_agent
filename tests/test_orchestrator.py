@@ -112,7 +112,7 @@ def test_merge_task_spec_applies_followup_time_override() -> None:
 def test_classify_uploaded_inputs_prefers_raster_and_vector_slots() -> None:
     files = [
         type("F", (), {"id": "f1", "file_type": "raster_tiff"})(),
-        type("F", (), {"id": "f2", "file_type": "geojson"})(),
+        type("F", (), {"id": "f2", "file_type": "shp"})(),
     ]
     slots = classify_uploaded_inputs(files)
     assert slots["input_raster_file_id"] == "f1"

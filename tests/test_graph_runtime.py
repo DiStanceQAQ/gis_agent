@@ -1,4 +1,7 @@
 import inspect
+from types import SimpleNamespace
+
+import pytest
 
 from packages.domain.services.graph import nodes as graph_nodes
 from packages.domain.services.graph import runtime_helpers
@@ -19,6 +22,7 @@ from packages.domain.services.graph.routes import (
 )
 from packages.domain.services.task_state import TASK_STATUS_AWAITING_APPROVAL, TASK_STATUS_QUEUED
 from packages.schemas.task import ParsedTaskSpec
+from packages.schemas.agent import LLMReactStepDecision
 
 
 def test_route_after_parse_to_clarification() -> None:
@@ -381,3 +385,174 @@ def test_step_react_decision_uses_llm_when_enabled(monkeypatch) -> None:  # noqa
     assert decision.decision == "continue"
     assert decision.function_name == "catalog.search"
     get_settings.cache_clear()
+
+
+class _FakeDB:
+    def add(self, record) -> None:  # noqa: ANN001
+        del record
+
+    def flush(self) -> None:
+        return None
+
+    def commit(self) -> None:
+        return None
+
+
+def test_execute_tool_step_supports_step_react_retry_rounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    task = TaskRunRecord(id="task_retry", session_id="ses_retry", user_message_id="msg_retry", status="running")
+    task.plan_json = {
+        "status": "running",
+        "steps": [
+            {"step_name": "search_candidates", "status": "pending"},
+        ],
+    }
+    context = runtime_helpers.PipelineExecutionContext(parsed_spec=ParsedTaskSpec())
+    events: list[str] = []
+    decisions = iter(
+        [
+            LLMReactStepDecision(
+                decision="continue",
+                function_name="unknown.tool",
+                arguments={"step_name": "search_candidates"},
+                reasoning_summary="第一轮误选工具",
+            ),
+            LLMReactStepDecision(
+                decision="continue",
+                function_name="catalog.search",
+                arguments={"step_name": "search_candidates"},
+                reasoning_summary="第二轮修正为正确工具",
+            ),
+        ]
+    )
+    handler_calls = {"count": 0}
+
+    monkeypatch.setattr(
+        runtime_helpers,
+        "get_settings",
+        lambda: SimpleNamespace(agent_step_react_max_rounds=2, agent_step_react_timeout_seconds=30),
+    )
+    monkeypatch.setattr(runtime_helpers, "_build_step_react_decision", lambda **kwargs: next(decisions))
+    monkeypatch.setattr(runtime_helpers, "append_task_event", lambda *args, **kwargs: events.append(kwargs["event_type"]))
+
+    def _handler(db, task, context):  # noqa: ANN001
+        del db, task, context
+        handler_calls["count"] += 1
+        return {"ok": True}
+
+    runtime_helpers.execute_tool_step(
+        _FakeDB(),
+        task,
+        context,
+        step_name="search_candidates",
+        tool_name="catalog.search",
+        title="搜索候选",
+        handler=_handler,
+        start=runtime_helpers.perf_counter(),
+    )
+
+    assert events.count("step_react_decision") == 2
+    assert "step_react_retry" in events
+    assert handler_calls["count"] == 1
+
+
+def test_execute_tool_step_skip_marks_step_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
+    task = TaskRunRecord(id="task_skip", session_id="ses_skip", user_message_id="msg_skip", status="running")
+    task.plan_json = {
+        "status": "running",
+        "steps": [
+            {"step_name": "search_candidates", "status": "pending"},
+        ],
+    }
+    context = runtime_helpers.PipelineExecutionContext(parsed_spec=ParsedTaskSpec())
+    events: list[str] = []
+
+    monkeypatch.setattr(
+        runtime_helpers,
+        "get_settings",
+        lambda: SimpleNamespace(agent_step_react_max_rounds=1, agent_step_react_timeout_seconds=30),
+    )
+    monkeypatch.setattr(
+        runtime_helpers,
+        "_build_step_react_decision",
+        lambda **kwargs: LLMReactStepDecision(
+            decision="skip",
+            function_name=None,
+            arguments={"step_name": "search_candidates"},
+            reasoning_summary="当前上下文允许跳过",
+        ),
+    )
+    monkeypatch.setattr(runtime_helpers, "append_task_event", lambda *args, **kwargs: events.append(kwargs["event_type"]))
+
+    def _handler(db, task, context):  # noqa: ANN001
+        del db, task, context
+        raise AssertionError("handler should not run for skip decision")
+
+    runtime_helpers.execute_tool_step(
+        _FakeDB(),
+        task,
+        context,
+        step_name="search_candidates",
+        tool_name="catalog.search",
+        title="搜索候选",
+        handler=_handler,
+        start=runtime_helpers.perf_counter(),
+    )
+
+    step = next(item for item in task.steps if item.step_name == "search_candidates")
+    assert step.status == "skipped"
+    plan_step = next(item for item in (task.plan_json or {}).get("steps", []) if item.get("step_name") == "search_candidates")
+    assert plan_step.get("status") == "skipped"
+    assert "step_skipped_by_react" in events
+    assert "tool_execution_started" not in events
+    assert "tool_execution_completed" not in events
+
+
+def test_execute_tool_step_emits_tool_execution_failed_when_handler_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = TaskRunRecord(id="task_tool_fail", session_id="ses_tool_fail", user_message_id="msg_tool_fail", status="running")
+    task.plan_json = {
+        "status": "running",
+        "steps": [
+            {"step_name": "search_candidates", "status": "pending"},
+        ],
+    }
+    context = runtime_helpers.PipelineExecutionContext(parsed_spec=ParsedTaskSpec())
+    events: list[str] = []
+
+    monkeypatch.setattr(
+        runtime_helpers,
+        "get_settings",
+        lambda: SimpleNamespace(agent_step_react_max_rounds=1, agent_step_react_timeout_seconds=30),
+    )
+    monkeypatch.setattr(
+        runtime_helpers,
+        "_build_step_react_decision",
+        lambda **kwargs: LLMReactStepDecision(
+            decision="continue",
+            function_name="catalog.search",
+            arguments={"step_name": "search_candidates"},
+            reasoning_summary="正常执行",
+        ),
+    )
+    monkeypatch.setattr(runtime_helpers, "append_task_event", lambda *args, **kwargs: events.append(kwargs["event_type"]))
+
+    def _handler(db, task, context):  # noqa: ANN001
+        del db, task, context
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        runtime_helpers.execute_tool_step(
+            _FakeDB(),
+            task,
+            context,
+            step_name="search_candidates",
+            tool_name="catalog.search",
+            title="搜索候选",
+            handler=_handler,
+            start=runtime_helpers.perf_counter(),
+        )
+
+    assert "tool_execution_started" in events
+    assert "tool_execution_failed" in events
+    assert "tool_execution_completed" not in events

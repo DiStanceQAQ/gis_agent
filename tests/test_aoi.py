@@ -282,6 +282,60 @@ def test_normalize_shp_zip_file_reprojects_prj(tmp_path: Path) -> None:
     assert "assumed EPSG:4326" not in normalized.validation_message
 
 
+def test_normalize_task_aoi_supports_single_shp_file(tmp_path: Path) -> None:
+    shp_dir = tmp_path / "single_shape"
+    shp_dir.mkdir()
+    writer = shapefile.Writer(str(shp_dir / "aoi"))
+    writer.field("name", "C")
+    writer.poly(
+        [
+            [
+                [116.1, 39.8],
+                [116.5, 39.8],
+                [116.5, 40.1],
+                [116.1, 40.1],
+                [116.1, 39.8],
+            ]
+        ]
+    )
+    writer.record("single-shp")
+    writer.close()
+
+    shp_path = shp_dir / "aoi.shp"
+
+    task = TaskRunRecord(id="task_single_shp", session_id="ses_single_shp", user_message_id="msg_single_shp")
+    task.task_spec = TaskSpecRecord(
+        task_id="task_single_shp",
+        aoi_input="uploaded_aoi",
+        aoi_source_type="file_upload",
+        preferred_output=["png_map"],
+        user_priority="balanced",
+        need_confirmation=False,
+        raw_spec_json={
+            "upload_slots": {
+                "input_vector_file_id": "file_shp",
+            }
+        },
+    )
+    uploaded_files = [
+        UploadedFileRecord(
+            id="file_shp",
+            session_id="ses_single_shp",
+            original_name="aoi.shp",
+            file_type="shp",
+            storage_key=str(shp_path),
+            size_bytes=shp_path.stat().st_size,
+            checksum="sha256-shp",
+        )
+    ]
+
+    normalized = normalize_task_aoi(task=task, uploaded_files=uploaded_files)
+
+    assert normalized is not None
+    assert normalized.source_file_id == "file_shp"
+    assert normalized.bbox_bounds == [116.1, 39.8, 116.5, 40.1]
+
+
 def test_normalize_bbox_text_rejects_invalid_bbox() -> None:
     from packages.domain.errors import AppError, ErrorCode
 

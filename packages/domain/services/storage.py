@@ -402,6 +402,8 @@ def detect_file_type(filename: str) -> str:
     lower_name = filename.lower()
     if lower_name.endswith(".geojson") or lower_name.endswith(".json"):
         return "geojson"
+    if lower_name.endswith(".shp"):
+        return "shp"
     if lower_name.endswith(".zip"):
         return "shp_zip"
     if lower_name.endswith(".tif") or lower_name.endswith(".tiff"):

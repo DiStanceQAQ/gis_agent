@@ -245,7 +245,7 @@ def _run_runtime_step(state: GISAgentState, *, step_name: str) -> GISAgentState:
                     detail={"step_name": step_name},
                 )
 
-            runtime_helpers.execute_tool_step(
+            tool_executed = runtime_helpers.execute_tool_step(
                 db,
                 task,
                 context,
@@ -255,7 +255,8 @@ def _run_runtime_step(state: GISAgentState, *, step_name: str) -> GISAgentState:
                 handler=handler,
                 start=start,
             )
-            tool_calls += 1
+            if tool_executed:
+                tool_calls += 1
 
             if step_name == "generate_outputs":
                 task.plan_json = set_task_plan_status(task.plan_json, PLAN_STATUS_SUCCESS)
