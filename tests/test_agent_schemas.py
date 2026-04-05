@@ -1,9 +1,18 @@
 from __future__ import annotations
 
+from typing import get_args
+
 import pytest
 from pydantic import ValidationError
 
-from packages.schemas.agent import LLMParsedSpec, LLMReactStepDecision, LLMRecommendation, LLMTaskPlan
+from packages.schemas.agent import (
+    AllowedStepName,
+    AllowedToolName,
+    LLMParsedSpec,
+    LLMReactStepDecision,
+    LLMRecommendation,
+    LLMTaskPlan,
+)
 from packages.schemas.task import ParsedTaskSpec, TaskPlanApproveRequest
 
 
@@ -125,6 +134,11 @@ def test_llm_react_step_decision_skip_or_fail_does_not_require_function_name() -
     )
     assert skip_payload.function_name is None
     assert fail_payload.function_name is None
+
+
+def test_agent_schema_literals_do_not_include_legacy_ndvi_entries() -> None:
+    assert "ndvi.run" not in get_args(AllowedToolName)
+    assert "run_ndvi_pipeline" not in get_args(AllowedStepName)
 
 
 @pytest.mark.parametrize("approved_version", [0, -1])

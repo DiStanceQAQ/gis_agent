@@ -15,7 +15,7 @@ GIS Agent 的第一版工程骨架。当前这套代码优先解决三件事：
 - 会输出 Sentinel-2 / Landsat 的候选对比和推荐结果
 - 前端结果页已支持主推 / 备选数据源的细粒度对比卡，可直接查看云量、景数、分辨率和目录来源
 - AOI 已改为使用 PostGIS 几何字段存储，并支持“已配置 AOI 注册表”里的行政区名 / 别名确定性解析
-- 仓库里已经带有真实 STAC 检索、AOI 标准化和 NDVI pipeline，默认会优先尝试真实链路
+- 仓库里已经带有真实 STAC 检索、AOI 标准化和通用 processing pipeline，默认会优先尝试真实链路
 
 当前推荐按这份执行清单推进开发：
 
@@ -245,7 +245,6 @@ npm run check:web
 对应回归在：
 
 - [test_task_samples.py](/Users/ljn/gis_agent/tests/test_task_samples.py)
-- [test_ndvi_pipeline.py](/Users/ljn/gis_agent/tests/test_ndvi_pipeline.py)
 
 当前样例总数已经到 20 条，覆盖：
 

@@ -14,7 +14,6 @@ AllowedToolName = Literal[
     "aoi.normalize",
     "catalog.search",
     "recommendation.rank",
-    "ndvi.run",
     "processing.run",
     "raster.compute",
     "terrain.derive",
@@ -27,7 +26,6 @@ AllowedStepName = Literal[
     "normalize_aoi",
     "search_candidates",
     "recommend_dataset",
-    "run_ndvi_pipeline",
     "run_processing_pipeline",
     "generate_outputs",
 ]

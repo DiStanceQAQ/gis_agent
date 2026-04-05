@@ -29,11 +29,6 @@ PLAN_STATUS_RUNNING = "running"
 PLAN_STATUS_SUCCESS = "success"
 PLAN_STATUS_FAILED = "failed"
 
-_STEP_NAME_ALIASES = {
-    "run_ndvi_pipeline": "run_processing_pipeline",
-}
-
-
 class TaskPlanStep(BaseModel):
     step_name: str
     tool_name: str
@@ -179,7 +174,7 @@ def _build_planner_failure_plan(parsed: ParsedTaskSpec, *, reason: str) -> TaskP
 
 
 def _normalize_step_name(step_name: str) -> str:
-    return _STEP_NAME_ALIASES.get(step_name, step_name)
+    return step_name
 
 
 def _normalize_llm_steps(steps: list[Any], parsed: ParsedTaskSpec) -> list[TaskPlanStep]:

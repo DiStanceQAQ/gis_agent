@@ -10,7 +10,6 @@ from packages.domain.services.graph.runtime_helpers import (
     check_runtime_limits,
     map_runtime_error,
 )
-from packages.domain.services.ndvi_pipeline import run_real_ndvi_pipeline
 from packages.domain.services.recommendation import build_recommendation
 from packages.domain.services.storage import build_artifact_path, persist_artifact_file
 
@@ -41,7 +40,6 @@ __all__ = [
     "build_recommendation",
     "get_settings",
     "persist_artifact_file",
-    "run_real_ndvi_pipeline",
     "run_task_runtime",
     "search_candidates",
 ]
