@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from packages.schemas.operation_plan import AllowedOperationName
 from packages.schemas.analysis import AnalysisType, normalize_analysis_type, normalize_operation_params
 
 
@@ -86,12 +87,29 @@ class LLMTaskPlan(BaseModel):
     reasoning_summary: str
     missing_fields: list[str] = Field(default_factory=list)
     steps: list[LLMPlanStep]
+    operation_plan_nodes: list["LLMOperationNode"] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_steps(self) -> "LLMTaskPlan":
         step_names = [item.step_name for item in self.steps]
         if len(step_names) != len(set(step_names)):
             raise ValueError("task plan steps must have unique step_name values")
+        return self
+
+
+class LLMOperationNode(BaseModel):
+    step_id: str = Field(min_length=1)
+    op_name: AllowedOperationName
+    depends_on: list[str] = Field(default_factory=list)
+    inputs: dict[str, str] = Field(default_factory=dict)
+    params: dict[str, Any] = Field(default_factory=dict)
+    outputs: dict[str, str] = Field(default_factory=dict)
+    retry_policy: dict[str, int] = Field(default_factory=lambda: {"max_retries": 0})
+
+    @model_validator(mode="after")
+    def validate_step_id_not_blank(self) -> "LLMOperationNode":
+        if not self.step_id.strip():
+            raise ValueError("operation node step_id must not be blank")
         return self
 
 

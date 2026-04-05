@@ -87,6 +87,7 @@ class TaskPlanResponse(BaseModel):
     reasoning_summary: str
     missing_fields: list[str] = Field(default_factory=list)
     steps: list[TaskPlanStepResponse] = Field(default_factory=list)
+    operation_plan_nodes: list[dict[str, Any]] = Field(default_factory=list)
     error_code: str | None = None
     error_message: str | None = None
 

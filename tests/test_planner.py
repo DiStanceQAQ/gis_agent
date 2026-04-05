@@ -160,6 +160,7 @@ def _valid_plan_payload() -> dict:
                 "depends_on": ["run_processing_pipeline"],
             },
         ],
+        "operation_plan_nodes": [],
     }
 
 
@@ -243,6 +244,52 @@ def test_build_task_plan_falls_back_to_legacy_when_llm_unavailable(
 
     assert plan.mode == "agent_driven_gis_workspace"
     assert plan.status == PLAN_STATUS_READY
+
+
+def test_build_task_plan_accepts_llm_operation_plan_nodes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GIS_AGENT_LLM_API_KEY", "test_key")
+    monkeypatch.setenv("GIS_AGENT_LLM_PLANNER_ENABLED", "true")
+    monkeypatch.setenv("GIS_AGENT_LLM_PLANNER_LEGACY_FALLBACK", "false")
+    get_settings.cache_clear()
+
+    payload = _valid_plan_payload()
+    payload["operation_plan_nodes"] = [
+        {
+            "step_id": "step_1_raster_reproject",
+            "op_name": "raster.reproject",
+            "depends_on": [],
+            "inputs": {},
+            "params": {"source_path": "/tmp/source.tif", "target_crs": "EPSG:3857"},
+            "outputs": {"raster": "r_proj"},
+            "retry_policy": {"max_retries": 0},
+        },
+        {
+            "step_id": "step_2_artifact_export",
+            "op_name": "artifact.export",
+            "depends_on": ["step_1_raster_reproject"],
+            "inputs": {"primary": "r_proj"},
+            "params": {"formats": ["geotiff"]},
+            "outputs": {"artifact": "a_out"},
+            "retry_policy": {"max_retries": 0},
+        },
+    ]
+
+    def _fake_chat_json(self, **kwargs):  # noqa: ANN001
+        del self, kwargs
+        return _mock_llm_plan_response(payload)
+
+    monkeypatch.setattr("packages.domain.services.planner.LLMClient.chat_json", _fake_chat_json)
+    parsed = ParsedTaskSpec(
+        aoi_input="bbox(116.1,39.8,116.5,40.1)",
+        aoi_source_type="bbox",
+        time_range={"start": "2024-06-01", "end": "2024-06-30"},
+    )
+    plan = build_task_plan(parsed)
+
+    assert len(plan.operation_plan_nodes) == 2
+    assert plan.operation_plan_nodes[0]["op_name"] == "raster.reproject"
+    assert plan.operation_plan_nodes[-1]["op_name"] == "artifact.export"
+    get_settings.cache_clear()
 
 
 def test_build_task_plan_returns_error_code_when_schema_validation_exhausted(

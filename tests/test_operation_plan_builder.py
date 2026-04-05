@@ -41,7 +41,7 @@ def test_build_operation_plan_for_ndvi_uses_band_math_then_export() -> None:
     assert plan.nodes[1].inputs["primary"] == plan.nodes[0].outputs["raster"]
 
 
-def test_build_operation_plan_for_buffer_keeps_raster_compatible_chain() -> None:
+def test_build_operation_plan_for_buffer_defaults_to_vector_export() -> None:
     parsed = ParsedTaskSpec(
         analysis_type="BUFFER",
         operation_params={"distance_m": 300},
@@ -49,8 +49,8 @@ def test_build_operation_plan_for_buffer_keeps_raster_compatible_chain() -> None
 
     plan = build_operation_plan_from_registry(parsed, status="draft", version=1, missing_fields=[])
 
-    assert [node.op_name for node in plan.nodes] == ["raster.clip", "artifact.export"]
-    assert plan.nodes[1].params["formats"] == ["geotiff", "png_map"]
+    assert [node.op_name for node in plan.nodes] == ["vector.buffer", "artifact.export"]
+    assert plan.nodes[1].params["formats"] == ["geojson"]
 
 
 def test_build_operation_plan_supports_custom_operation_sequence() -> None:

@@ -16,6 +16,7 @@ from packages.domain.services.planner import (
     set_task_plan_status,
 )
 from packages.domain.services.operation_plan_builder import build_operation_plan_from_registry
+from packages.domain.services.plan_guard import validate_operation_plan
 from packages.domain.services.task_state import (
     TASK_STATUS_AWAITING_APPROVAL,
     TASK_STATUS_FAILED,
@@ -27,7 +28,8 @@ from packages.domain.services.task_state import (
     write_task_error,
 )
 from packages.domain.services.tool_registry import get_tool_definition
-from packages.schemas.task import ParsedTaskSpec
+from packages.schemas.operation_plan import OperationNode, OperationPlan
+from packages.schemas.task import ParsedTaskSpec, TaskPlanResponse
 
 from . import runtime_helpers
 from .state import GISAgentState
@@ -91,7 +93,21 @@ def plan_task_node(state: GISAgentState) -> GISAgentState:
         plan = build_task_plan(parsed, task_id=task_id)
         task.plan_json = plan.model_dump()
         if plan.status != PLAN_STATUS_NEEDS_CLARIFICATION and operation_plan_status is None:
-            default_plan = build_operation_plan_from_registry(
+            candidate: OperationPlan | None = None
+            try:
+                task_plan_payload = TaskPlanResponse(**task.plan_json)
+                if task_plan_payload.operation_plan_nodes:
+                    candidate = OperationPlan(
+                        version=1,
+                        status="approved",
+                        missing_fields=list(plan.missing_fields),
+                        nodes=[OperationNode.model_validate(node) for node in task_plan_payload.operation_plan_nodes],
+                    )
+                    candidate = validate_operation_plan(candidate).model_copy(update={"status": "approved"})
+            except Exception:  # pragma: no cover - fallback guard
+                candidate = None
+
+            default_plan = candidate or build_operation_plan_from_registry(
                 parsed,
                 version=1,
                 status="approved",

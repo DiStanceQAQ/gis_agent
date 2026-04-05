@@ -2,8 +2,12 @@ from geoalchemy2.elements import WKTElement
 
 from packages.domain.models import AOIRecord, TaskRunRecord, TaskSpecRecord
 from packages.domain.services.input_slots import classify_uploaded_inputs
-from packages.domain.services.orchestrator import _merge_task_spec, should_inherit_original_aoi
-from packages.schemas.task import ParsedTaskSpec
+from packages.domain.services.orchestrator import (
+    _build_initial_operation_plan,
+    _merge_task_spec,
+    should_inherit_original_aoi,
+)
+from packages.schemas.task import ParsedTaskSpec, TaskPlanResponse
 
 
 def test_should_inherit_original_aoi_when_only_time_changes() -> None:
@@ -113,3 +117,43 @@ def test_classify_uploaded_inputs_prefers_raster_and_vector_slots() -> None:
     slots = classify_uploaded_inputs(files)
     assert slots["input_raster_file_id"] == "f1"
     assert slots["input_vector_file_id"] == "f2"
+
+
+def test_build_initial_operation_plan_prefers_planner_operation_nodes() -> None:
+    task_plan = TaskPlanResponse(
+        version="agent-v2",
+        mode="llm_plan_execute_gis_workspace",
+        status="ready",
+        objective="test",
+        reasoning_summary="test",
+        missing_fields=[],
+        steps=[],
+        operation_plan_nodes=[
+            {
+                "step_id": "step_1_raster_reproject",
+                "op_name": "raster.reproject",
+                "depends_on": [],
+                "inputs": {},
+                "params": {"source_path": "/tmp/source.tif", "target_crs": "EPSG:3857"},
+                "outputs": {"raster": "r_proj"},
+                "retry_policy": {"max_retries": 0},
+            },
+            {
+                "step_id": "step_2_artifact_export",
+                "op_name": "artifact.export",
+                "depends_on": ["step_1_raster_reproject"],
+                "inputs": {"primary": "r_proj"},
+                "params": {"formats": ["geotiff"]},
+                "outputs": {"artifact": "a_out"},
+                "retry_policy": {"max_retries": 0},
+            },
+        ],
+    )
+    parsed = ParsedTaskSpec(
+        aoi_input="bbox(116.1,39.8,116.5,40.1)",
+        aoi_source_type="bbox",
+        time_range={"start": "2024-06-01", "end": "2024-06-30"},
+    )
+
+    operation_plan = _build_initial_operation_plan(task_plan, parsed)
+    assert [node.op_name for node in operation_plan.nodes] == ["raster.reproject", "artifact.export"]

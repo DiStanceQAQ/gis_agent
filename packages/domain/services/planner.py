@@ -10,11 +10,14 @@ from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.orm import Session
 
 from packages.domain.config import get_settings
-from packages.domain.errors import ErrorCode
+from packages.domain.errors import AppError, ErrorCode
 from packages.domain.logging import get_logger
 from packages.domain.services.llm_client import LLMClient, LLMClientError
+from packages.domain.services.operation_registry import list_operation_specs
+from packages.domain.services.plan_guard import validate_operation_plan
 from packages.domain.services.tool_registry import list_tool_definitions
 from packages.domain.services.task_state import STEP_SEQUENCE, STEP_STATUS_FAILED, STEP_STATUS_PENDING
+from packages.schemas.operation_plan import OperationNode, OperationPlan
 from packages.schemas.agent import LLMTaskPlan
 from packages.schemas.task import ParsedTaskSpec
 
@@ -50,6 +53,7 @@ class TaskPlan(BaseModel):
     reasoning_summary: str
     missing_fields: list[str] = Field(default_factory=list)
     steps: list[TaskPlanStep] = Field(default_factory=list)
+    operation_plan_nodes: list[dict[str, Any]] = Field(default_factory=list)
     error_code: str | None = None
     error_message: str | None = None
 
@@ -156,6 +160,7 @@ def _build_planner_failure_plan(parsed: ParsedTaskSpec, *, reason: str) -> TaskP
         reasoning_summary=f"规划阶段失败（{reason[:120]}），需要补充上下文后重试。",
         missing_fields=missing_fields,
         steps=_build_steps_legacy(parsed),
+        operation_plan_nodes=[],
         error_code=error_code,
         error_message=error_message,
     )
@@ -213,6 +218,19 @@ def _normalize_llm_task_plan(payload: LLMTaskPlan, parsed: ParsedTaskSpec) -> Ta
     objective = payload.objective.strip() or _build_objective(parsed)
     reasoning_summary = payload.reasoning_summary.strip() or _build_reasoning_summary(parsed)
     normalized_steps = _normalize_llm_steps(payload.steps)
+    normalized_operation_plan_nodes: list[dict[str, Any]] = []
+    if payload.operation_plan_nodes:
+        try:
+            candidate = OperationPlan(
+                version=1,
+                status="draft",
+                missing_fields=missing_fields,
+                nodes=[OperationNode.model_validate(node.model_dump()) for node in payload.operation_plan_nodes],
+            )
+            validated = validate_operation_plan(candidate)
+            normalized_operation_plan_nodes = [node.model_dump() for node in validated.nodes]
+        except AppError as exc:
+            raise ValueError(f"invalid_operation_plan_nodes:{exc.error_code}") from exc
 
     return TaskPlan(
         version=payload.version or "agent-v2",
@@ -222,6 +240,7 @@ def _normalize_llm_task_plan(payload: LLMTaskPlan, parsed: ParsedTaskSpec) -> Ta
         reasoning_summary=reasoning_summary,
         missing_fields=missing_fields,
         steps=normalized_steps,
+        operation_plan_nodes=normalized_operation_plan_nodes,
         error_code=None,
         error_message=None,
     )
@@ -243,6 +262,15 @@ def _build_planner_user_prompt(parsed: ParsedTaskSpec) -> str:
         }
         for definition in list_tool_definitions()
     ]
+    operation_whitelist = [
+        {
+            "op_name": spec.op_name,
+            "input_types": spec.input_types,
+            "output_types": spec.output_types,
+            "default_params": spec.default_params,
+        }
+        for spec in list_operation_specs()
+    ]
     payload = {
         "task": "build_gis_task_plan",
         "language": "zh-CN",
@@ -254,9 +282,11 @@ def _build_planner_user_prompt(parsed: ParsedTaskSpec) -> str:
             "reasoning_summary",
             "missing_fields",
             "steps",
+            "operation_plan_nodes",
         ],
         "required_step_names": list(STEP_SEQUENCE),
         "tool_whitelist": tool_whitelist,
+        "operation_whitelist": operation_whitelist,
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
 

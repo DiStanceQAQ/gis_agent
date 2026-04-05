@@ -29,7 +29,7 @@ def _default_operations_for_analysis(parsed: ParsedTaskSpec) -> list[str]:
             return ["raster.terrain_aspect"]
         return ["raster.terrain_slope"]
     if analysis_type == "BUFFER":
-        return ["raster.clip"]
+        return ["vector.buffer"]
     if analysis_type == "CLIP":
         return ["raster.clip"]
     return ["raster.clip"]

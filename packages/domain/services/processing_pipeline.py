@@ -1467,17 +1467,29 @@ def run_processing_pipeline(*, task_id: str, plan_nodes: list[dict[str, Any]], w
             raise ValueError(f"Operation plan has unresolved dependencies for steps: {unresolved}")
 
     primary_tif = exported_tif_path or _pick_primary_raster_reference(references)
-    if primary_tif is None or not _is_supported_raster(Path(primary_tif)):
-        raise ValueError("Processing pipeline did not produce a valid raster output.")
-    tif_path = str(Path(primary_tif))
+    tif_path: str | None = None
+    png_path: str | None = None
+    metrics = {
+        "valid_pixel_ratio": None,
+        "ndvi_min": None,
+        "ndvi_max": None,
+        "ndvi_mean": None,
+        "output_width": None,
+        "output_height": None,
+        "output_crs": None,
+    }
 
-    if exported_png_path is not None and Path(exported_png_path).exists():
+    if primary_tif is not None and _is_supported_raster(Path(primary_tif)):
+        tif_path = str(Path(primary_tif))
+        if exported_png_path is not None and Path(exported_png_path).exists():
+            png_path = str(Path(exported_png_path))
+        else:
+            preview_png_path = working_dir / "processing_preview.png"
+            _write_png_preview_from_raster(raster_path=Path(tif_path), png_path=preview_png_path)
+            png_path = str(preview_png_path)
+        metrics = _compute_raster_metrics(tif_path)
+    elif exported_png_path is not None and Path(exported_png_path).exists():
         png_path = str(Path(exported_png_path))
-    else:
-        preview_png_path = working_dir / "processing_preview.png"
-        _write_png_preview_from_raster(raster_path=Path(tif_path), png_path=preview_png_path)
-        png_path = str(preview_png_path)
-    metrics = _compute_raster_metrics(tif_path)
 
     return {
         "mode": "operation_plan",

@@ -195,8 +195,10 @@ def _tool_generate_outputs(
         raise RuntimeError("Pipeline outputs missing before generate_outputs.")
 
     pipeline_outputs = context.pipeline_outputs
-    tif_path = str(pipeline_outputs["tif_path"])
-    png_path = str(pipeline_outputs["png_path"])
+    tif_path_raw = pipeline_outputs.get("tif_path")
+    png_path_raw = pipeline_outputs.get("png_path")
+    tif_path = str(tif_path_raw) if tif_path_raw else None
+    png_path = str(png_path_raw) if png_path_raw else None
     methods_path = build_artifact_path(task.id, "methods.md")
     summary_path = build_artifact_path(task.id, "summary.md")
 
@@ -234,20 +236,23 @@ def _tool_generate_outputs(
             source_step=str(artifact.get("source_step") or "run_processing_pipeline"),
         )
 
-    if not any(item["artifact_type"] == "png_map" for item in artifact_specs):
+    if png_path and not any(item["artifact_type"] == "png_map" for item in artifact_specs):
         _append_artifact_spec(
             artifact_type="png_map",
             path=png_path,
             source_step="run_processing_pipeline",
             mime_type="image/png",
         )
-    if not any(item["artifact_type"] == "geotiff" for item in artifact_specs):
+    if tif_path and not any(item["artifact_type"] == "geotiff" for item in artifact_specs):
         _append_artifact_spec(
             artifact_type="geotiff",
             path=tif_path,
             source_step="run_processing_pipeline",
             mime_type="image/tiff",
         )
+
+    if not artifact_specs:
+        raise RuntimeError("No exportable artifacts were produced by operation plan execution.")
 
     _append_artifact_spec(
         artifact_type="methods_md",

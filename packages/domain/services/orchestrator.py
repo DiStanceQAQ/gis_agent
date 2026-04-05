@@ -52,7 +52,7 @@ from packages.domain.services.task_state import (
 from packages.domain.utils import make_id, merge_dicts
 from packages.schemas.file import UploadedFileResponse
 from packages.schemas.message import MessageCreateRequest, MessageCreateResponse
-from packages.schemas.operation_plan import OperationPlan
+from packages.schemas.operation_plan import OperationNode, OperationPlan
 from packages.schemas.session import SessionResponse, SessionTaskItemResponse, SessionTasksResponse
 from packages.schemas.task import (
     ArtifactResponse,
@@ -403,6 +403,19 @@ def _create_chat_mode_response(
 
 
 def _build_initial_operation_plan(task_plan: TaskPlanResponse, parsed: ParsedTaskSpec) -> OperationPlan:
+    if task_plan.operation_plan_nodes:
+        try:
+            candidate = OperationPlan(
+                version=1,
+                status="draft",
+                missing_fields=list(task_plan.missing_fields),
+                nodes=[OperationNode.model_validate(node) for node in task_plan.operation_plan_nodes],
+            )
+            validated = validate_operation_plan(candidate)
+            return validated.model_copy(update={"status": "draft"})
+        except Exception as exc:  # pragma: no cover - fallback guard
+            logger.warning("task.operation_plan_from_planner_invalid detail=%s", repr(exc))
+
     return build_operation_plan_from_registry(
         parsed,
         version=1,

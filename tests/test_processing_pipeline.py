@@ -670,7 +670,7 @@ def test_artifact_export_png_map_is_valid_png(tmp_path) -> None:
     assert png_path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
 
 
-def test_run_processing_pipeline_vector_only_plan_fails_without_raster_output(tmp_path) -> None:
+def test_run_processing_pipeline_vector_only_plan_supports_non_raster_terminal(tmp_path) -> None:
     source_vector = tmp_path / "vector_only.geojson"
     _write_test_geojson(
         source_vector,
@@ -695,8 +695,11 @@ def test_run_processing_pipeline_vector_only_plan_fails_without_raster_output(tm
         },
     ]
 
-    with pytest.raises(ValueError, match="valid raster output"):
-        run_processing_pipeline(task_id="task_vector_only", plan_nodes=plan_nodes, working_dir=tmp_path)
+    outputs = run_processing_pipeline(task_id="task_vector_only", plan_nodes=plan_nodes, working_dir=tmp_path)
+    assert any(item["artifact_type"] == "geojson" for item in outputs["artifacts"])
+    assert outputs["tif_path"] is None
+    assert outputs["png_path"] is None
+    assert outputs["output_crs"] is None
 
 
 def test_artifact_export_geotiff_requires_real_raster_input(tmp_path) -> None:
