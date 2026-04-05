@@ -25,13 +25,14 @@ from packages.domain.services import chat as chat_service
 from packages.domain.services.intent import IntentResult, is_task_confirmation_message
 from packages.domain.services.llm_client import LLMResponse, LLMUsage
 from packages.domain.services.planner import TaskPlan, TaskPlanStep
-from packages.domain.services.task_state import TASK_STATUS_AWAITING_APPROVAL
+from packages.domain.services.task_state import TASK_STATUS_AWAITING_APPROVAL, TASK_STATUS_WAITING_CLARIFICATION
 from packages.schemas.task import ParsedTaskSpec
 
 
 TASK_REQUEST = "帮我分析 2024 年 6 月 bbox(116.1,39.8,116.5,40.1) 的 NDVI，并先生成计划。"
 FOLLOWUP_REQUEST = "改成 2023 年 6 月"
 UPLOAD_TASK_REQUEST = "请基于我刚上传的边界文件分析 2024 年 6 月 NDVI。"
+CLIP_TASK_REQUEST = "请把 /Users/ljn/gis_data/CACD-2020.tif 裁剪到新疆范围，并先给我计划。"
 
 
 @pytest.fixture(autouse=True)
@@ -44,7 +45,7 @@ def _patched_message_flow(monkeypatch: pytest.MonkeyPatch) -> None:
         del kwargs
         if is_task_confirmation_message(message):
             return IntentResult(intent="task", confidence=0.99, reason="用户已明确确认执行任务。")
-        if "NDVI" in message or "改成" in message:
+        if "NDVI" in message or "改成" in message or "裁剪" in message:
             return IntentResult(intent="task", confidence=0.95, reason="用户正在发起遥感分析任务。")
         return IntentResult(intent="chat", confidence=0.91, reason="用户正在进行普通对话。")
 
@@ -79,6 +80,22 @@ def _patched_message_flow(monkeypatch: pytest.MonkeyPatch) -> None:
                 need_confirmation=True,
                 missing_fields=["aoi"],
                 clarification_message="请补充 AOI。",
+                created_from="tests",
+            )
+        if message == CLIP_TASK_REQUEST:
+            assert has_upload is False
+            return ParsedTaskSpec(
+                aoi_input=None,
+                aoi_source_type=None,
+                time_range=None,
+                requested_dataset=None,
+                analysis_type="NDVI",
+                preferred_output=["png_map", "methods_text"],
+                user_priority="balanced",
+                operation_params={},
+                need_confirmation=True,
+                missing_fields=["aoi", "time_range"],
+                clarification_message="请补充 AOI 和时间范围。",
                 created_from="tests",
             )
         assert message == UPLOAD_TASK_REQUEST
@@ -291,6 +308,27 @@ def test_explicit_confirmation_uses_latest_request_and_creates_task(client: Test
         assert payload["task_id"]
         assert payload["task_status"] == TASK_STATUS_AWAITING_APPROVAL
         assert payload["need_approval"] is True
+        assert payload["awaiting_task_confirmation"] is False
+        assert payload["intent"] == "task"
+        assert payload["intent_confidence"] == 0.99
+    finally:
+        _cleanup_session(session_id)
+
+
+def test_explicit_confirmation_uses_latest_request_when_parser_context_is_incomplete(
+    client: TestClient,
+) -> None:
+    session_id = _create_session()
+    try:
+        first_payload = _post_message(client, session_id, CLIP_TASK_REQUEST)
+        assert first_payload["awaiting_task_confirmation"] is True
+
+        payload = _post_message(client, session_id, "好的，继续")
+
+        assert payload["mode"] == "task"
+        assert payload["task_id"]
+        assert payload["task_status"] == TASK_STATUS_WAITING_CLARIFICATION
+        assert payload["need_clarification"] is True
         assert payload["awaiting_task_confirmation"] is False
         assert payload["intent"] == "task"
         assert payload["intent_confidence"] == 0.99

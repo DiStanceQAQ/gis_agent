@@ -403,12 +403,21 @@ def _build_parser_repair_user_prompt(
     previous_json: dict[str, Any],
     validation_errors: list[dict[str, Any]],
 ) -> str:
+    def _json_safe(value: Any) -> Any:
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, dict):
+            return {str(key): _json_safe(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            return [_json_safe(item) for item in value]
+        return str(value)
+
     repair_payload = {
         "task": "repair_invalid_json_output",
         "instructions": "上一次 JSON 未通过后端 schema 校验。请仅返回修复后的 JSON，不要输出解释。",
         "original_prompt": base_prompt,
         "previous_json": previous_json,
-        "validation_errors": validation_errors,
+        "validation_errors": _json_safe(validation_errors),
     }
     return json.dumps(repair_payload, ensure_ascii=False, indent=2)
 

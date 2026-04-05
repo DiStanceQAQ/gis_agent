@@ -347,8 +347,12 @@ def _find_latest_executable_request_message(
 
         has_upload = has_recent_uploads and UPLOAD_REQUEST_HINT_PATTERN.search(content) is not None
         parsed = _parse_candidate_request_content(content, has_upload=has_upload)
-        if parsed.aoi_input and parsed.time_range:
+        if parsed.aoi_input or parsed.time_range or parsed.requested_dataset:
             return message
+        # Fallback: once the user has explicitly confirmed execution, we still treat
+        # the nearest pre-confirmation user request as executable context, even if
+        # parser extraction is incomplete for that message.
+        return message
     return None
 
 

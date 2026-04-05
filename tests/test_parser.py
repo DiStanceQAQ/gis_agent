@@ -326,6 +326,62 @@ def test_parse_task_message_retries_on_schema_validation_error(monkeypatch: pyte
     get_settings.cache_clear()
 
 
+def test_parse_task_message_repair_prompt_handles_non_serializable_validation_ctx(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GIS_AGENT_LLM_API_KEY", "test_key")
+    monkeypatch.setenv("GIS_AGENT_LLM_PARSER_ENABLED", "true")
+    monkeypatch.setenv("GIS_AGENT_LLM_PARSER_LEGACY_FALLBACK", "false")
+    monkeypatch.setenv("GIS_AGENT_LLM_PARSER_SCHEMA_RETRIES", "2")
+    get_settings.cache_clear()
+
+    prompts: list[str] = []
+    responses = [
+        _mock_llm_response(
+            {
+                "aoi_input": "bbox(116.1,39.8,116.5,40.1)",
+                "aoi_source_type": "bbox",
+                "time_range": {"start": "2024-06-01", "end": "2024-06-30"},
+                "analysis_type": "clip",
+                "preferred_output": "geotiff",
+                "user_priority": None,
+                "need_confirmation": False,
+                "missing_fields": [],
+                "clarification_message": None,
+                "operation_params": {},
+            }
+        ),
+        _mock_llm_response(
+            {
+                "aoi_input": "bbox(116.1,39.8,116.5,40.1)",
+                "aoi_source_type": "bbox",
+                "time_range": {"start": "2024-06-01", "end": "2024-06-30"},
+                "analysis_type": "NDVI",
+                "preferred_output": ["png_map"],
+                "user_priority": "balanced",
+                "need_confirmation": False,
+                "missing_fields": [],
+                "clarification_message": None,
+                "operation_params": {},
+            }
+        ),
+    ]
+
+    def _fake_chat_json(self, **kwargs):  # noqa: ANN001
+        del self
+        prompts.append(kwargs["user_prompt"])
+        return responses.pop(0)
+
+    monkeypatch.setattr("packages.domain.services.parser.LLMClient.chat_json", _fake_chat_json)
+    parsed = parse_task_message("请帮我分析 2024年6月 bbox(116.1,39.8,116.5,40.1) NDVI。", has_upload=False)
+
+    assert parsed.need_confirmation is False
+    assert len(prompts) == 2
+    assert "repair_invalid_json_output" in prompts[1]
+    assert "analysis_type must be one of" in prompts[1]
+    get_settings.cache_clear()
+
+
 def test_parse_task_message_writes_back_clarification_after_repair_exhausted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
