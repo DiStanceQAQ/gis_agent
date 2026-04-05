@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from packages.domain.config import get_settings
 from packages.domain.errors import ErrorCode
 from packages.domain.logging import get_logger
+from packages.domain.services.catalog import build_candidate_summaries
 from packages.domain.services.llm_client import LLMClient, LLMClientError
 from packages.schemas.agent import LLMRecommendation
 
@@ -106,8 +107,8 @@ def _build_risk_note(primary: Any, backup: Any | None) -> str | None:
         primary_score = float(getattr(primary, "suitability_score", 0.0) or 0.0)
         backup_score = float(getattr(backup, "suitability_score", 0.0) or 0.0)
         if abs(primary_score - backup_score) <= 0.05:
-            return "主备方案评分接近，后续进入真实 NDVI pipeline 后仍可能因为 QA 结果发生切换。"
-    return "当前推荐基于目录级候选摘要，实际像元级质量会在后续 NDVI pipeline 中继续校验。"
+            return "主备方案评分接近，后续进入真实处理链路后仍可能因为 QA 结果发生切换。"
+    return "当前推荐基于目录级候选摘要，实际像元级质量会在后续真实处理链路中继续校验。"
 
 
 def _build_forced_risk_note(primary: Any, backup: Any | None) -> str | None:
@@ -202,24 +203,6 @@ def _build_recommendation_failure(*, reason: str) -> dict[str, Any]:
     }
 
 
-def _candidate_to_summary(candidate: Any) -> dict[str, Any]:
-    return {
-        "dataset_name": getattr(candidate, "dataset_name", None),
-        "collection_id": getattr(candidate, "collection_id", None),
-        "scene_count": int(getattr(candidate, "scene_count", 0) or 0),
-        "coverage_ratio": float(getattr(candidate, "coverage_ratio", 0.0) or 0.0),
-        "effective_pixel_ratio_estimate": float(
-            getattr(candidate, "effective_pixel_ratio_estimate", 0.0) or 0.0
-        ),
-        "cloud_metric_summary": getattr(candidate, "cloud_metric_summary", None),
-        "spatial_resolution": int(getattr(candidate, "spatial_resolution", 0) or 0),
-        "temporal_density_note": getattr(candidate, "temporal_density_note", None),
-        "suitability_score": float(getattr(candidate, "suitability_score", 0.0) or 0.0),
-        "recommendation_rank": int(getattr(candidate, "recommendation_rank", 0) or 0),
-        "summary_json": getattr(candidate, "summary_json", None),
-    }
-
-
 @lru_cache
 def _load_recommendation_system_prompt() -> str:
     prompt_path = Path(__file__).resolve().parents[1] / "prompts" / "recommendation.md"
@@ -237,7 +220,7 @@ def _build_recommendation_user_prompt(
         "language": "zh-CN",
         "user_priority": user_priority,
         "requested_dataset": requested_dataset,
-        "candidate_summaries": [_candidate_to_summary(candidate) for candidate in candidates],
+        "candidate_summaries": build_candidate_summaries(candidates),
         "required_fields": [
             "primary_dataset",
             "backup_dataset",
