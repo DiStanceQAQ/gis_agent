@@ -212,8 +212,42 @@ def _normalize_llm_steps(steps: list[Any]) -> list[TaskPlanStep]:
     return normalized_steps
 
 
+def _sanitize_missing_fields(parsed: ParsedTaskSpec, missing_fields: list[str]) -> list[str]:
+    deduped = list(dict.fromkeys(str(field).strip() for field in missing_fields if str(field).strip()))
+    if parsed.analysis_type != "CLIP":
+        return deduped
+
+    operation_params = parsed.operation_params or {}
+    clip_upload_placeholders = {
+        "uploaded_aoi_id",
+        "source_raster_upload_id",
+        "clip_vector_upload_id",
+        "input_raster_file_id",
+        "input_vector_file_id",
+    }
+    source_path = str(operation_params.get("source_path") or "").strip()
+    clip_path = str(operation_params.get("clip_path") or "").strip()
+    output_path = str(operation_params.get("output_path") or "").strip()
+
+    cleaned: list[str] = []
+    for field in deduped:
+        if field in clip_upload_placeholders:
+            continue
+        if field in {"source_path", "operation_params.source_path"} and source_path:
+            continue
+        if field in {"clip_path", "operation_params.clip_path"} and clip_path:
+            continue
+        if field in {"output_path", "operation_params.output_path"} and output_path:
+            continue
+        cleaned.append(field)
+    return cleaned
+
+
 def _normalize_llm_task_plan(payload: LLMTaskPlan, parsed: ParsedTaskSpec) -> TaskPlan:
-    missing_fields = list(dict.fromkeys([*parsed.missing_fields, *payload.missing_fields]))
+    missing_fields = _sanitize_missing_fields(
+        parsed,
+        [*parsed.missing_fields, *payload.missing_fields],
+    )
     status = PLAN_STATUS_NEEDS_CLARIFICATION if parsed.need_confirmation or missing_fields else PLAN_STATUS_READY
     objective = payload.objective.strip() or _build_objective(parsed)
     reasoning_summary = payload.reasoning_summary.strip() or _build_reasoning_summary(parsed)

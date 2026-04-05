@@ -6,7 +6,7 @@ import pytest
 import rasterio
 from rasterio.transform import from_origin
 
-from packages.domain.services.processing_pipeline import run_processing_pipeline
+from packages.domain.services.processing_pipeline import _resolve_vector_source, run_processing_pipeline
 
 
 def _create_test_raster(path: Path, *, offset: float = 0.0, mask_first_pixel: bool = False) -> None:
@@ -71,6 +71,110 @@ def test_run_processing_pipeline_executes_clip_then_export(tmp_path) -> None:
 def test_run_processing_pipeline_empty_plan_fails_fast(tmp_path) -> None:
     with pytest.raises(ValueError, match="must not be empty"):
         run_processing_pipeline(task_id="task_empty", plan_nodes=[], working_dir=tmp_path)
+
+
+def test_run_processing_pipeline_supports_input_upload_nodes(tmp_path) -> None:
+    source_raster = tmp_path / "upload_source.tif"
+    clip_vector = tmp_path / "upload_clip.geojson"
+    _create_test_raster(source_raster)
+    _write_test_geojson(
+        clip_vector,
+        polygons=[
+            [[116.0, 39.96], [116.03, 39.96], [116.03, 40.0], [116.0, 40.0], [116.0, 39.96]],
+        ],
+    )
+
+    plan_nodes = [
+        {
+            "step_id": "upload_raster_1",
+            "op_name": "input.upload_raster",
+            "depends_on": [],
+            "inputs": {"upload_id": "source_raster_upload_id"},
+            "params": {"source_path": str(source_raster)},
+            "outputs": {"raster": "r_uploaded"},
+        },
+        {
+            "step_id": "upload_vector_1",
+            "op_name": "input.upload_vector",
+            "depends_on": [],
+            "inputs": {"upload_id": "clip_vector_upload_id"},
+            "params": {"source_path": str(clip_vector)},
+            "outputs": {"vector": "v_uploaded"},
+        },
+        {
+            "step_id": "clip_1",
+            "op_name": "raster.clip",
+            "depends_on": ["upload_raster_1", "upload_vector_1"],
+            "inputs": {"raster": "r_uploaded", "aoi": "v_uploaded"},
+            "params": {"crop": True},
+            "outputs": {"raster": "r_clipped"},
+        },
+        {
+            "step_id": "export_1",
+            "op_name": "artifact.export",
+            "depends_on": ["clip_1"],
+            "inputs": {"primary": "r_clipped"},
+            "params": {"formats": ["geotiff"]},
+            "outputs": {"artifact": "a_out"},
+        },
+    ]
+
+    outputs = run_processing_pipeline(task_id="task_upload_ops", plan_nodes=plan_nodes, working_dir=tmp_path)
+
+    geotiff_artifacts = [item for item in outputs["artifacts"] if item["artifact_type"] == "geotiff"]
+    assert geotiff_artifacts
+    assert Path(geotiff_artifacts[0]["path"]).exists()
+
+
+def test_artifact_export_geotiff_honors_output_path(tmp_path) -> None:
+    source_raster = tmp_path / "source_export.tif"
+    desired_output = tmp_path / "custom" / "xinjiang.tif"
+    _create_test_raster(source_raster)
+
+    plan_nodes = [
+        {
+            "step_id": "clip1",
+            "op_name": "raster.clip",
+            "depends_on": [],
+            "inputs": {},
+            "params": {"source_path": str(source_raster)},
+            "outputs": {"raster": "r_clip"},
+        },
+        {
+            "step_id": "export1",
+            "op_name": "artifact.export",
+            "depends_on": ["clip1"],
+            "inputs": {"primary": "r_clip"},
+            "params": {"formats": ["geotiff"], "output_path": str(desired_output)},
+            "outputs": {"artifact": "a_out"},
+        },
+    ]
+
+    outputs = run_processing_pipeline(task_id="task_export_path", plan_nodes=plan_nodes, working_dir=tmp_path)
+
+    geotiff_artifacts = [item for item in outputs["artifacts"] if item["artifact_type"] == "geotiff"]
+    assert geotiff_artifacts
+    assert geotiff_artifacts[0]["path"] == str(desired_output)
+    assert desired_output.exists()
+
+
+def test_resolve_vector_source_accepts_clip_path_param(tmp_path) -> None:
+    clip_vector = tmp_path / "clip_param.geojson"
+    _write_test_geojson(
+        clip_vector,
+        polygons=[
+            [[116.0, 39.96], [116.03, 39.96], [116.03, 40.0], [116.0, 40.0], [116.0, 39.96]],
+        ],
+    )
+    node = {
+        "step_id": "upload_vector_1",
+        "inputs": {"upload_id": "uploaded_file"},
+        "params": {"clip_path": str(clip_vector)},
+    }
+
+    resolved = _resolve_vector_source(node=node, references={}, working_dir=tmp_path)
+
+    assert resolved == clip_vector
 
 
 def test_run_processing_pipeline_supports_phase1_raster_ops(tmp_path) -> None:

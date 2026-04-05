@@ -292,6 +292,44 @@ def test_build_task_plan_accepts_llm_operation_plan_nodes(monkeypatch: pytest.Mo
     get_settings.cache_clear()
 
 
+def test_build_task_plan_filters_clip_upload_placeholder_missing_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GIS_AGENT_LLM_API_KEY", "test_key")
+    monkeypatch.setenv("GIS_AGENT_LLM_PLANNER_ENABLED", "true")
+    monkeypatch.setenv("GIS_AGENT_LLM_PLANNER_LEGACY_FALLBACK", "false")
+    get_settings.cache_clear()
+
+    payload = _valid_plan_payload()
+    payload["missing_fields"] = [
+        "uploaded_aoi_id",
+        "source_raster_upload_id",
+        "clip_vector_upload_id",
+    ]
+
+    def _fake_chat_json(self, **kwargs):  # noqa: ANN001
+        del self, kwargs
+        return _mock_llm_plan_response(payload)
+
+    monkeypatch.setattr("packages.domain.services.planner.LLMClient.chat_json", _fake_chat_json)
+    parsed = ParsedTaskSpec(
+        analysis_type="CLIP",
+        aoi_input="uploaded_aoi",
+        aoi_source_type="file_upload",
+        operation_params={
+            "source_path": "/tmp/source.tif",
+            "clip_path": "/tmp/clip.geojson",
+            "output_path": "/tmp/output.tif",
+        },
+    )
+
+    plan = build_task_plan(parsed)
+
+    assert plan.status == PLAN_STATUS_READY
+    assert plan.missing_fields == []
+    get_settings.cache_clear()
+
+
 def test_build_task_plan_returns_error_code_when_schema_validation_exhausted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

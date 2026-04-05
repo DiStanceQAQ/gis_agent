@@ -387,6 +387,9 @@ def _build_parse_state(message: str, *, has_upload: bool, include_default_output
         state.operation_params = _extract_clip_operation_params(normalized, has_upload=has_upload)
         if include_default_outputs and "geotiff" not in state.preferred_output:
             state.preferred_output.insert(0, "geotiff")
+        if has_upload:
+            state.aoi_input = "uploaded_aoi"
+            state.aoi_source_type = "file_upload"
         state.requested_dataset = None
         state.time_range = None
         return state
@@ -597,7 +600,7 @@ def _normalize_llm_parsed_spec(payload: LLMParsedSpec, *, has_upload: bool, mess
         inferred_operation_params = _extract_clip_operation_params(_normalize_message(message), has_upload=has_upload)
         operation_params = {**inferred_operation_params, **operation_params}
 
-    if has_upload and not aoi_input and analysis_type != "CLIP":
+    if has_upload and not aoi_input:
         aoi_input = "uploaded_aoi"
         aoi_source_type = "file_upload"
 

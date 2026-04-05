@@ -94,6 +94,42 @@ def _resolve_raster_source(
     return source_path
 
 
+def _resolve_vector_source(
+    *,
+    node: dict[str, Any],
+    references: dict[str, str],
+    working_dir: Path,
+) -> Path:
+    inputs = node.get("inputs") or {}
+    params = node.get("params") or {}
+    step_id = str(node.get("step_id") or "step")
+
+    upload_ref = str(inputs.get("upload_id") or "")
+    source_candidate: Path | None = None
+    if upload_ref and upload_ref in references:
+        source_candidate = Path(references[upload_ref])
+    else:
+        source_param = (
+            params.get("source_path")
+            or params.get("clip_path")
+            or params.get("aoi_path")
+            or params.get("vector_path")
+        )
+        if source_param:
+            source_candidate = Path(str(source_param))
+        else:
+            primary_ref = _pick_primary_vector_reference(references)
+            if primary_ref:
+                source_candidate = Path(primary_ref)
+
+    if source_candidate and source_candidate.exists():
+        return source_candidate
+
+    fallback = working_dir / f"{step_id}_source.geojson"
+    _write_geojson(fallback, [_default_geometry()], crs="EPSG:4326")
+    return fallback
+
+
 def _write_raster_copy(*, source_path: Path, output_path: Path) -> None:
     if not _is_supported_raster(source_path):
         _create_default_raster(source_path)
@@ -731,7 +767,15 @@ def run_processing_pipeline(*, task_id: str, plan_nodes: list[dict[str, Any]], w
             inputs = node.get("inputs") or {}
             params = node.get("params") or {}
 
-            if op_name == "raster.clip":
+            if op_name == "input.upload_raster":
+                output_ref = str(outputs.get("raster") or step_id or "uploaded_raster")
+                source_path = _resolve_raster_source(node=node, references=references, working_dir=working_dir)
+                references[output_ref] = str(source_path)
+            elif op_name == "input.upload_vector":
+                output_ref = str(outputs.get("vector") or step_id or "uploaded_vector")
+                source_path = _resolve_vector_source(node=node, references=references, working_dir=working_dir)
+                references[output_ref] = str(source_path)
+            elif op_name == "raster.clip":
                 output_ref = str(outputs.get("raster") or step_id or "raster_clip")
                 output_path = working_dir / f"{step_id or output_ref}.tif"
                 source_path = _resolve_raster_source(node=node, references=references, working_dir=working_dir)
@@ -1360,6 +1404,7 @@ def run_processing_pipeline(*, task_id: str, plan_nodes: list[dict[str, Any]], w
                     raise ValueError("artifact.export requires a resolvable primary input reference")
 
                 export_formats = params.get("formats") or ["geotiff"]
+                requested_output_path = params.get("output_path")
                 produced_artifact_path: str | None = None
                 for fmt in export_formats:
                     fmt_name = str(fmt).lower()
@@ -1371,6 +1416,12 @@ def run_processing_pipeline(*, task_id: str, plan_nodes: list[dict[str, Any]], w
                                 candidate = Path(raster_source)
                             else:
                                 raise ValueError("artifact.export geotiff requires a valid raster source")
+                        if requested_output_path:
+                            desired_path = Path(str(requested_output_path))
+                            desired_path.parent.mkdir(parents=True, exist_ok=True)
+                            if str(candidate) != str(desired_path):
+                                _write_raster_copy(source_path=candidate, output_path=desired_path)
+                            candidate = desired_path
                         source_path = str(candidate)
                         artifacts.append(
                             {"artifact_type": "geotiff", "path": str(source_path), "source_step": step_id}
