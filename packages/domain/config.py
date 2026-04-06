@@ -60,6 +60,7 @@ class Settings(BaseSettings):
     intent_task_confidence_threshold: float = 0.75
     intent_history_limit: int = 8
     intent_confirmation_keywords: str = "开始执行,按这个执行,确认执行,就按这个来"
+    local_files_only_mode: bool = False
 
     @property
     def allowed_origins_list(self) -> list[str]:

@@ -54,6 +54,14 @@ class TaskPlan(BaseModel):
 
 
 def _required_step_sequence(parsed: ParsedTaskSpec) -> list[str]:
+    settings = get_settings()
+    if settings.local_files_only_mode:
+        return [
+            "plan_task",
+            "normalize_aoi",
+            "run_processing_pipeline",
+            "generate_outputs",
+        ]
     if parsed.analysis_type == "CLIP":
         return [
             "plan_task",
@@ -73,6 +81,17 @@ def _format_time_range(time_range: dict[str, str] | None) -> str:
 
 
 def _build_objective(parsed: ParsedTaskSpec) -> str:
+    settings = get_settings()
+    if settings.local_files_only_mode:
+        if parsed.analysis_type == "CLIP":
+            source_path = str(parsed.operation_params.get("source_path") or "输入栅格")
+            clip_path = str(parsed.operation_params.get("clip_path") or "裁剪范围")
+            return f"将本地文件 {source_path} 按 {clip_path} 执行裁剪并发布可下载结果。"
+
+        aoi_text = parsed.aoi_input or "当前研究区"
+        time_text = _format_time_range(parsed.time_range)
+        return f"基于本地文件，在 {aoi_text} 范围内完成 {time_text} 的 {parsed.analysis_type} 处理并发布结果。"
+
     if parsed.analysis_type == "CLIP":
         source_path = str(parsed.operation_params.get("source_path") or "输入栅格")
         clip_path = str(parsed.operation_params.get("clip_path") or "裁剪范围")
@@ -85,6 +104,16 @@ def _build_objective(parsed: ParsedTaskSpec) -> str:
 
 
 def _build_reasoning_summary(parsed: ParsedTaskSpec) -> str:
+    settings = get_settings()
+    if settings.local_files_only_mode:
+        summary_parts = [
+            "本模式只处理本地文件，不执行远程目录候选搜索",
+            "先把需求收敛为操作计划，再直接执行处理与结果导出",
+        ]
+        if parsed.need_confirmation:
+            summary_parts.append("当前信息不完整，计划会先停在待澄清状态")
+        return "；".join(summary_parts) + "。"
+
     if parsed.analysis_type == "CLIP":
         summary_parts = [
             "先解析输入栅格与裁剪范围路径",
@@ -120,6 +149,10 @@ def _build_steps_legacy(parsed: ParsedTaskSpec) -> list[TaskPlanStep]:
         if step_name == "recommend_dataset":
             purpose = f"综合用户偏好和候选质量，对 {requested_dataset} 请求进行主备方案排序。"
 
+        depends_on = [dep for dep in definition.depends_on if dep in {step.step_name for step in steps}]
+        if not depends_on and steps:
+            depends_on = [steps[-1].step_name]
+
         steps.append(
             TaskPlanStep(
                 step_name=definition.step_name,
@@ -127,7 +160,7 @@ def _build_steps_legacy(parsed: ParsedTaskSpec) -> list[TaskPlanStep]:
                 title=definition.title,
                 purpose=purpose,
                 reasoning=definition.reasoning,
-                depends_on=definition.depends_on,
+                depends_on=depends_on,
             )
         )
     return steps
@@ -206,6 +239,8 @@ def _normalize_llm_steps(steps: list[Any], parsed: ParsedTaskSpec) -> list[TaskP
         ]
         if not depends_on:
             depends_on = [dep_step for dep_step in definition.depends_on if dep_step in required_step_names]
+        if not depends_on and normalized_steps:
+            depends_on = [normalized_steps[-1].step_name]
 
         normalized_steps.append(
             TaskPlanStep(

@@ -172,6 +172,8 @@ def _tool_run_processing_pipeline(
     context: PipelineExecutionContext,
 ) -> dict[str, object]:
     del db
+    if not task.selected_dataset:
+        task.selected_dataset = "local_file"
     operation_plan = ((task.plan_json or {}).get("operation_plan") or {})
     plan_nodes = list(operation_plan.get("nodes") or [])
 

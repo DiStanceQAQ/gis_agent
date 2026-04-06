@@ -52,6 +52,33 @@ def test_build_task_plan_for_ready_request(
     assert "landsat89" in plan.objective
 
 
+def test_build_task_plan_skips_catalog_steps_in_local_files_only_mode(
+    _legacy_planner_mode_for_tests: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GIS_AGENT_LOCAL_FILES_ONLY_MODE", "true")
+    get_settings.cache_clear()
+
+    parsed = ParsedTaskSpec(
+        aoi_input="bbox(116.1,39.8,116.5,40.1)",
+        aoi_source_type="bbox",
+        time_range={"start": "2024-06-01", "end": "2024-06-30"},
+        analysis_type="NDVI",
+        operation_params={"source_path": "/tmp/local_source.tif"},
+    )
+
+    plan = build_task_plan(parsed)
+
+    assert [step.step_name for step in plan.steps] == [
+        "plan_task",
+        "normalize_aoi",
+        "run_processing_pipeline",
+        "generate_outputs",
+    ]
+    assert "本地文件" in plan.objective
+    get_settings.cache_clear()
+
+
 def test_build_task_plan_for_clarification_request(
     _legacy_planner_mode_for_tests: None,
 ) -> None:

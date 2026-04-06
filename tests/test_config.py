@@ -28,3 +28,11 @@ def test_intent_router_defaults_are_enabled(monkeypatch: pytest.MonkeyPatch) -> 
     assert settings.intent_task_confidence_threshold == 0.75
     assert settings.intent_history_limit == 8
     assert settings.intent_confirmation_keywords == "开始执行,按这个执行,确认执行,就按这个来"
+
+
+def test_local_files_only_mode_defaults_to_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GIS_AGENT_LOCAL_FILES_ONLY_MODE", raising=False)
+
+    settings = Settings()
+
+    assert settings.local_files_only_mode is False
