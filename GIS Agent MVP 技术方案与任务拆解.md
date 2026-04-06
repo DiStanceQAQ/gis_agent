@@ -1,276 +1,240 @@
-# GIS Agent MVP 技术方案与任务拆解
+# GIS Agent MVP 技术方案与任务拆解（后端优先版）
 
 > 文档类型：技术方案 + 开发拆解  
 > 对应产品文档：`GIS Agent MVP PRD.md`  
-> 当前版本：v2.3（LangGraph 迁移 + 计划审批执行版）  
-> 更新时间：2026-04-03
+> 当前版本：v2.5（Manual Approval + Reject + ReAct FC）  
+> 更新时间：2026-04-04
 
 ---
 
 ## 1. 技术目标
 
-本版技术目标是把现有工程升级为“LLM 主导 Plan-and-Execute”的 GIS Agent，并将后端编排统一迁移到 LangGraph：
+本版只关注后端，目标是把系统收敛成“人工审批驱动、逐步 ReAct 执行、可审计可追责”的 GIS Agent Demo：
 
-1. 任务解析、规划、推荐由 LLM 生成结构化结果。  
-2. 执行由 LangGraph 状态图驱动，支持通用遥感/地理处理任务。  
-3. 全链路可观测：计划、步骤、事件、产物、错误、LLM 调用元数据。  
-4. 前端工作台完整呈现执行过程与结果，而非聊天气泡体验。
+1. 解析、规划、推荐由 LLM 输出结构化结果。  
+2. 执行前必须人工审批，支持修改后审批和拒绝执行。  
+3. 执行阶段每一步都采用 ReAct + Function Calling。  
+4. 运行时由 LangGraph 统一驱动，状态机与事件流一致。  
+5. LLM 调用日志与任务全链路绑定。
 
 ---
 
-## 2. 架构总览
-
-### 2.0 当前实现进展（2026-04-03）
-
-已落地：
-
-1. 主执行链路由 `run_ndvi_pipeline` 迁移为 `run_processing_pipeline`，并接入 `processing_pipeline` 调度器。  
-2. 任务执行前新增审批门禁：`awaiting_approval -> approved -> queued`，未审批禁止进入运行阶段。  
-3. 前端任务面板新增 operation plan JSON 编辑、保存草稿、确认执行入口。  
-4. 样例测试补齐“先审批再执行”回归，覆盖 `awaiting_approval -> success` 端到端路径。  
-
-兼容策略：
-
-1. 在无 `operation_plan.nodes` 时，运行层保留 legacy NDVI 执行兜底，保证历史样例和回归稳定。
-
-### 2.1 逻辑分层
+## 2. 架构总览（后端）
 
 ```text
-Web GIS Workspace (React + OpenLayers)
--> FastAPI (Session / Task / Artifact APIs)
--> Orchestrator (create task + enqueue)
--> Celery Worker
+API (FastAPI)
+-> Orchestrator (Create Task + Approval Gate + Queue)
+-> Worker (Celery)
 -> LangGraph Runner (single runtime kernel)
-   -> parse_request
+   -> parse_task
    -> plan_task
-   -> normalize_aoi
-   -> search_candidates
-   -> recommend_dataset
-   -> run_processing
-   -> publish_artifacts
+   -> await_approval
+   -> step_react_loop (per step)
+   -> generate_outputs
    -> finalize
--> PostgreSQL + PostGIS
--> MinIO/S3
+-> PostgreSQL/PostGIS (task/event/step/llm logs)
+-> Object Storage (MinIO/S3/Local)
 ```
 
-### 2.2 执行图（StateGraph）
-
-一次任务内主流程：
-
-1. `parse_request`：自然语言 -> `ParsedTaskSpec`。  
-2. `plan_task`：结构化任务 -> `TaskPlan`。  
-3. `normalize_aoi`：标准化研究区。  
-4. `search_candidates`：检索目录候选并做 QC 摘要。  
-5. `recommend_dataset`：输出主备推荐与理由。  
-6. `run_processing`：执行栅格/矢量处理。  
-7. `publish_artifacts`：发布 GeoTIFF、PNG、方法说明、摘要。  
-8. `finalize`：写入终态与任务收尾信息。
-
-终态统一为：`success / failed / waiting_clarification`。
+终态统一：`success` / `failed` / `waiting_clarification` / `cancelled`。
 
 ---
 
-## 3. 模块拆解
+## 3. 目标态与当前态差距
 
-| 模块 | 主要职责 | 关键文件 |
+### 3.1 目标态（本轮要达到）
+
+1. 所有任务默认 `awaiting_approval`。  
+2. 用户可批准、编辑后批准、拒绝执行。  
+3. 执行中每个步骤都有 ReAct 决策和 Function Calling 记录。  
+4. `OperationPlan` 非空且合法。  
+5. 日志可按 `task_id` 查询 parse/plan/recommend/react_step 全链路。
+
+### 3.2 当前主要差距（需补齐）
+
+1. 任务默认执行策略与“审批必选”口径不一致。  
+2. 缺少标准化拒绝执行接口与事件闭环。  
+3. 当前步骤执行仍偏确定性调度，未形成严格 step-level ReAct loop。  
+4. 空计划成功风险与白名单对齐仍需收口。  
+5. LLM 日志 task 关联在 parser/planner 阶段不完整。
+
+---
+
+## 4. 关键设计决策
+
+### 4.1 执行策略（强制审批）
+
+1. 默认执行策略固定为 `manual_approval`。  
+2. 创建任务后状态为 `awaiting_approval`。  
+3. 只有批准后可入队执行。  
+4. 拒绝后状态为 `cancelled`，流程结束。
+
+### 4.2 审批与拒绝动作
+
+新增审批决策动作：
+
+1. `approve`：按当前版本执行。  
+2. `edit_and_approve`：提交新版本后执行。  
+3. `reject`：拒绝执行并写入原因。
+
+事件要求：
+
+1. `task_plan_approved`  
+2. `task_plan_rejected`  
+3. `task_cancelled`
+
+### 4.3 步骤执行模型（ReAct + Function Calling）
+
+对每个计划步骤执行统一 loop：
+
+1. 读取步骤上下文（目标、依赖产物、历史 observation、预算）。  
+2. LLM 输出结构化决策：`continue/skip/fail` + `function_call`。  
+3. 后端执行 function call（仅白名单工具）。  
+4. 写 observation 并回填到该步骤上下文。  
+5. 达到终止条件后结束该步骤，进入下一步。
+
+边界保护：
+
+1. 单步最大 ReAct 回合数。  
+2. 单步超时。  
+3. 工具调用失败重试预算。  
+4. 非法 function call 直接失败并记录错误码。
+
+### 4.4 Operation Plan 真实性约束
+
+1. `nodes` 不能为空。  
+2. 依赖图可拓扑排序。  
+3. `op_name` 必须来自统一 operation registry。  
+4. 校验失败不可进入执行态。
+
+### 4.5 审计闭环
+
+1. 步骤事件：`tool_execution_started/completed/failed`。  
+2. ReAct 事件：`step_react_decision`、`step_react_observation`。  
+3. 决策事件：`task_plan_approved/rejected`。  
+4. 失败字段：`failed_step/error_code/error_message`。  
+5. LLM 日志：`parse/plan/recommend/react_step` 全量绑定 `task_id`。
+
+---
+
+## 5. 模块级实现方案
+
+| 模块 | 改造要点 | 关键文件 |
 | --- | --- | --- |
-| API Router | 会话、消息、任务、事件、产物接口 | `apps/api/routers/*.py` |
-| Orchestrator | 任务创建、上下文继承、入队 | `packages/domain/services/orchestrator.py` |
-| LLM Client | 统一模型调用、重试、超时、日志 | `packages/domain/services/llm_client.py` |
-| Parser | LLM 解析输入为 `ParsedTaskSpec` | `packages/domain/services/parser.py` |
-| Planner | LLM 生成 `TaskPlan` | `packages/domain/services/planner.py` |
-| Graph Runtime | LangGraph 构图、节点运行与状态推进 | `packages/domain/services/graph/*` |
-| Tool Registry | 工具白名单与契约 | `packages/domain/services/tool_registry.py` |
-| AOI Service | AOI 解析、标准化、校验 | `packages/domain/services/aoi.py` |
-| Catalog Service | STAC 检索与候选摘要 | `packages/domain/services/catalog.py` |
-| Recommendation | LLM 推荐主备方案与理由 | `packages/domain/services/recommendation.py` |
-| Geo Processing Engine | 通用地理处理（NDVI/NDWI/波段运算/滤波/坡度坡向/缓冲区） | `packages/domain/services/processing_pipeline.py`（可由现有 `ndvi_pipeline.py` 演进） |
-| Artifact Service | 产物存储、下载与元数据 | `packages/domain/services/storage.py` |
-| Task Event Service | 事件追加与查询 | `packages/domain/services/task_events.py` |
+| Orchestrator | 任务创建默认审批态；支持 approve/reject；拒绝后不可执行 | `packages/domain/services/orchestrator.py` |
+| Task APIs | 新增 reject/cancel 接口；审批契约收口 | `apps/api/routers/tasks.py` `packages/schemas/task.py` |
+| ReAct Step Agent | 新增每步 ReAct 决策与函数调用逻辑 | `packages/domain/services/graph/nodes.py` `packages/domain/services/graph/runtime_helpers.py` |
+| Tool Calling | 函数调用白名单校验与执行 | `packages/domain/services/tool_registry.py` |
+| Plan Guard | 非空节点、依赖合法、op_name 合法 | `packages/domain/services/plan_guard.py` |
+| Operation Schema | `AllowedOperationName` 与 operation registry 对齐 | `packages/schemas/operation_plan.py` `packages/domain/services/operation_registry.py` |
+| LLM Logs | parse/plan/recommend/react_step task 级关联 | `packages/domain/services/llm_client.py` `packages/domain/services/llm_call_logs.py` |
+| Error Model | 增补 reject/react/function-call 相关错误码 | `packages/domain/errors.py` |
 
 ---
 
-## 4. 接口设计（P0）
+## 6. API 与契约（后端）
 
-### 4.1 会话与任务
+### 6.1 任务创建
 
-1. `POST /api/v1/sessions`  
-用途：创建会话。
+`POST /api/v1/messages`：
 
-2. `GET /api/v1/sessions/{session_id}/tasks`  
-用途：列出会话下最近任务。
+1. 创建任务后返回 `awaiting_approval`。  
+2. 响应包含 `need_approval=true`。  
+3. 返回可编辑 `operation_plan`。
 
-3. `POST /api/v1/messages`  
-用途：提交需求，创建任务。  
-结果：返回 `task_id`。
+### 6.2 计划编辑、批准、拒绝
 
-4. `GET /api/v1/tasks/{task_id}`  
-用途：返回任务详情（`task_spec`、`task_plan`、`task_steps`、`recommendation`、`artifacts`）。
+1. `PATCH /api/v1/tasks/{task_id}/plan`：更新草稿计划。  
+2. `POST /api/v1/tasks/{task_id}/approve`：批准并入队。  
+3. `POST /api/v1/tasks/{task_id}/reject`：拒绝并取消任务。  
 
-5. `GET /api/v1/tasks/{task_id}/events`  
-用途：返回任务事件时间线。
+`reject` 请求体建议：
 
-6. `POST /api/v1/tasks/{task_id}/rerun`  
-用途：基于父任务上下文重跑。
+1. `reason: str`（可选但推荐）。  
+2. `operator: str`（可选，Demo 可空）。
 
-### 4.2 文件与产物
+### 6.3 任务详情与事件
 
-1. `POST /api/v1/files/upload`  
-用途：上传 AOI（`GeoJSON` / `shp` / `shp.zip`）。
-
-2. `GET /api/v1/artifacts/{artifact_id}/download`  
-用途：下载 GeoTIFF / PNG / Markdown。
-
-### 4.3 健康检查
-
-1. `GET /api/v1/health`  
-用途：服务存活检查。
+1. `GET /api/v1/tasks/{task_id}`：返回计划、步骤、状态、错误、拒绝信息。  
+2. `GET /api/v1/tasks/{task_id}/events`：返回审批、ReAct、工具执行、失败事件。
 
 ---
 
-## 5. 数据模型与表结构（核心）
+## 7. 数据模型调整建议
 
-> 以下为目标结构，字段名可与实现轻微差异，但语义需一致。
+### 7.1 `task_runs`
 
-### 5.1 `task_runs`
+新增或强化字段：
 
-新增或重点关注字段：
+1. `status` 增加 `cancelled`。  
+2. `rejected_reason`（可选）。  
+3. `rejected_at`（可选）。  
+4. `fallback_used`、`error_code`、`error_message`。
 
-1. `status`：`queued/running/success/failed/waiting_clarification`  
-2. `current_step`：当前节点或步骤名  
-3. `plan_json`：结构化任务计划  
-4. `error_code` / `error_message`：失败与澄清原因  
-5. `duration_seconds`：执行耗时
+### 7.2 `task_steps`
 
-### 5.2 `task_steps`
+1. `detail_json` 存储 ReAct 决策摘要与 observation。  
+2. 可选增加 `react_turn_count`。
 
-1. 记录每个节点执行状态：`pending/running/success/failed/skipped`。  
-2. `detail_json` 记录 observation 与执行细节。  
-3. 严格校验状态转换顺序。
+### 7.3 `llm_call_logs`
 
-### 5.3 `task_events`
-
-1. 记录任务和节点级事件：`task_started/tool_execution_started/tool_execution_completed/task_failed/...`。  
-2. 事件与 `task_steps` 需要能互相校验时序。
-
-### 5.4 `llm_call_logs`
-
-建议字段：
-
-1. `task_id`、`phase`、`model_name`、`request_id`  
-2. `prompt_hash`、`input_tokens`、`output_tokens`、`total_tokens`  
-3. `latency_ms`、`status`、`error_message`、`created_at`
+1. `phase` 扩展为 `parse/plan/recommend/react_step`。  
+2. 所有 phase 必须能关联 `task_id`。
 
 ---
 
-## 6. LLM 与 Guardrails 设计
+## 8. Guardrails 与错误语义
 
-### 6.1 调用阶段
+### 8.1 运行保护
 
-1. `parse`：输入消息 -> `ParsedTaskSpec`。  
-2. `plan`：输入 `ParsedTaskSpec` -> `TaskPlan`。  
-3. `recommend`：输入候选摘要 -> 推荐结果。
+1. 全局：`agent_max_steps`、`agent_max_tool_calls`、`agent_runtime_timeout_seconds`。  
+2. 单步：`max_react_turns_per_step`、`react_step_timeout_seconds`。
 
-### 6.2 结构化约束
+### 8.2 错误语义（关键）
 
-1. 所有阶段必须返回 JSON。  
-2. 后端使用 Pydantic 严格校验。  
-3. 校验失败触发 repair retry，超限即失败或进入澄清。  
-4. 工具调用仅允许白名单。
-
-### 6.3 运行保护
-
-1. `max_steps`  
-2. `max_tool_calls`  
-3. `runtime_timeout_seconds`  
-4. `retry_budget`  
-5. `unknown_tool_reject`
+1. 未审批执行：`plan_approval_required`。  
+2. 用户拒绝：`task_cancelled_by_user`（或等价错误语义）。  
+3. 空计划：`plan_schema_invalid`（或专用 `plan_nodes_empty`）。  
+4. 非法 function call：`task_runtime_unknown_tool`。  
+5. ReAct 超预算：`task_runtime_max_tool_calls_exceeded` / `task_runtime_timeout`。
 
 ---
 
-## 7. 迁移策略（LangGraph）
+## 9. 开发阶段拆解（后端）
 
-### 7.1 文件级迁移
+### Phase A：审批必选与拒绝路径（P0）
 
-新增：
+1. 创建任务默认 `awaiting_approval`。  
+2. 增加 reject/cancel 接口与状态流。  
+3. 审批/拒绝事件回写与详情展示字段打通。
 
-1. `packages/domain/services/graph/state.py`  
-2. `packages/domain/services/graph/builder.py`  
-3. `packages/domain/services/graph/runner.py`  
-4. `packages/domain/services/graph/nodes/*.py`
+### Phase B：Step ReAct + Function Calling（P0）
 
-改造：
+1. 新增 step-level ReAct loop。  
+2. 接入函数调用白名单执行。  
+3. 写入 ReAct 决策与 observation 事件。
 
-1. `apps/worker/tasks.py` 调用 graph runner。  
-2. `orchestrator.py` 保持创建任务与入队，不承载执行循环。  
-3. `llm_client.py` 接入统一调用日志写入。
+### Phase C：计划真实性收口（P0）
 
-下线：
+1. 非空 `operation_plan` 约束。  
+2. schema 白名单与 registry 对齐。  
+3. 去掉空计划成功路径。
 
-1. 自研 `agent_runtime.py` 主循环执行入口。  
-2. 生产路径仅保留 LangGraph。
+### Phase D：审计与回归（P0）
 
-### 7.2 状态与错误细则
-
-1. 三类终态：`success / failed / waiting_clarification`。  
-2. 信息不足进入 `waiting_clarification`，不是失败。  
-3. 节点异常统一映射错误码并写失败快照。  
-4. 每个节点遵循“started -> completed/failed”事件写入。
+1. parse/plan/recommend/react_step 日志 task 关联。  
+2. 增补审批拒绝与 ReAct 失败路径测试。  
+3. 核心回归全绿。
 
 ---
 
-## 8. 8 周排期（LangGraph 版）
+## 10. 验收清单（技术）
 
-### 第 1 周：依赖与可观测
+1. 新任务默认进入 `awaiting_approval`。  
+2. 批准前不执行；批准后执行。  
+3. 拒绝后状态 `cancelled` 且不可执行。  
+4. 每一步都有 ReAct 决策与 Function Calling 记录。  
+5. 空 `operation_plan` 无法成功。  
+6. LLM 日志可按 task_id 拉取 parse/plan/recommend/react_step 全链路。  
+7. 后端 CI（ruff + pytest + compile）通过。
 
-1. LangGraph 依赖定版。  
-2. `llm_call_logs` 迁移落地。  
-3. 环境变量与 CI 安装稳定。
-
-### 第 2 周：Schema 与 Prompt
-
-1. 对齐 parser/planner/recommendation schema。  
-2. Prompt 版本化规范补齐。
-
-### 第 3 周：严格模式收口
-
-1. Parser 严格模式收口。  
-2. Planner 严格模式收口。
-
-### 第 4 周：Graph 骨架
-
-1. 建立 state/builder/runner。  
-2. 打通最小图执行链路。
-
-### 第 5 周：节点迁移
-
-1. 迁移 AOI/catalog/recommend/process/publish 节点。  
-2. 事件与步骤写入对齐。
-
-### 第 6 周：下线旧循环与工具契约
-
-1. 下线旧 runtime 主循环。  
-2. 完成 AOI/Catalog 契约化与产物统一。
-
-### 第 7 周：前端联调
-
-1. 任务时间线与观察详情对齐。  
-2. 工作台交互与追问重跑体验完善。
-
-### 第 8 周：测试与验收
-
-1. 样例任务全回归（成功/失败/澄清/fallback/rerun）。  
-2. 性能与成本基线更新。  
-3. 发布验收。
-
----
-
-## 9. 验收清单（技术）
-
-1. Worker 在默认链路下通过 LangGraph 跑通完整任务。  
-2. 任务详情稳定返回 `task_spec/task_plan/task_steps/recommendation/artifacts`。  
-3. 事件流可稳定展示 started/completed/failed。  
-4. LLM 调用日志可追踪并可关联到任务。  
-5. 回归测试、ruff、build、compileall 全通过。
-
----
