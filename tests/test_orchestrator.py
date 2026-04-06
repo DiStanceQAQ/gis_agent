@@ -1,6 +1,6 @@
 from geoalchemy2.elements import WKTElement
 
-from packages.domain.models import AOIRecord, TaskRunRecord, TaskSpecRecord
+from packages.domain.models import AOIRecord, TaskRunRecord, TaskSpecRecord, UploadedFileRecord
 from packages.domain.services.input_slots import classify_uploaded_inputs
 from packages.domain.services.orchestrator import (
     _build_initial_operation_plan,
@@ -157,3 +157,82 @@ def test_build_initial_operation_plan_prefers_planner_operation_nodes() -> None:
 
     operation_plan = _build_initial_operation_plan(task_plan, parsed)
     assert [node.op_name for node in operation_plan.nodes] == ["raster.reproject", "artifact.export"]
+
+
+def test_build_initial_operation_plan_injects_uploaded_source_paths() -> None:
+    task_plan = TaskPlanResponse(
+        version="agent-v2",
+        mode="llm_plan_execute_gis_workspace",
+        status="ready",
+        objective="clip",
+        reasoning_summary="clip",
+        missing_fields=[],
+        steps=[],
+        operation_plan_nodes=[
+            {
+                "step_id": "step_1_upload_raster",
+                "op_name": "input.upload_raster",
+                "depends_on": [],
+                "inputs": {"upload_id": "file_raster"},
+                "params": {},
+                "outputs": {"raster": "r_src"},
+                "retry_policy": {"max_retries": 0},
+            },
+            {
+                "step_id": "step_2_upload_vector",
+                "op_name": "input.upload_vector",
+                "depends_on": [],
+                "inputs": {"upload_id": "file_vector"},
+                "params": {},
+                "outputs": {"vector": "v_clip"},
+                "retry_policy": {"max_retries": 0},
+            },
+            {
+                "step_id": "step_3_clip",
+                "op_name": "raster.clip",
+                "depends_on": ["step_1_upload_raster", "step_2_upload_vector"],
+                "inputs": {"raster": "r_src"},
+                "params": {"crop": True},
+                "outputs": {"raster": "r_out"},
+                "retry_policy": {"max_retries": 0},
+            },
+        ],
+    )
+    parsed = ParsedTaskSpec(
+        analysis_type="CLIP",
+        aoi_input="uploaded_aoi",
+        aoi_source_type="file_upload",
+        operation_params={"source_path": "/tmp/source.tif"},
+    )
+    uploaded_files = [
+        UploadedFileRecord(
+            id="file_raster",
+            session_id="ses_1",
+            original_name="source.tif",
+            file_type="raster_tiff",
+            storage_key="/tmp/source.tif",
+            size_bytes=1,
+            checksum="checksum_raster",
+        ),
+        UploadedFileRecord(
+            id="file_vector",
+            session_id="ses_1",
+            original_name="clip.geojson",
+            file_type="geojson",
+            storage_key="/tmp/clip.geojson",
+            size_bytes=1,
+            checksum="checksum_vector",
+        ),
+    ]
+
+    operation_plan = _build_initial_operation_plan(
+        task_plan,
+        parsed,
+        uploaded_files=uploaded_files,
+        upload_slots={"input_raster_file_id": "file_raster", "input_vector_file_id": "file_vector"},
+    )
+    nodes = operation_plan.model_dump()["nodes"]
+
+    assert nodes[0]["params"]["source_path"] == "/tmp/source.tif"
+    assert nodes[1]["params"]["source_path"] == "/tmp/clip.geojson"
+    assert nodes[2]["params"]["aoi_path"] == "/tmp/clip.geojson"

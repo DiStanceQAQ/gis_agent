@@ -273,7 +273,13 @@ def _normalize_llm_task_plan(payload: LLMTaskPlan, parsed: ParsedTaskSpec) -> Ta
             validated = validate_operation_plan(candidate)
             normalized_operation_plan_nodes = [node.model_dump() for node in validated.nodes]
         except AppError as exc:
-            raise ValueError(f"invalid_operation_plan_nodes:{exc.error_code}") from exc
+            error_payload = {
+                "type": "operation_plan_validation",
+                "error_code": exc.error_code,
+                "message": exc.message,
+                "detail": exc.detail,
+            }
+            raise ValueError(f"invalid_operation_plan_nodes::{json.dumps(error_payload, ensure_ascii=False)}") from exc
 
     return TaskPlan(
         version=payload.version or "agent-v2",
@@ -311,6 +317,8 @@ def _build_planner_user_prompt(parsed: ParsedTaskSpec) -> str:
             "input_types": spec.input_types,
             "output_types": spec.output_types,
             "default_params": spec.default_params,
+            "required_params": list(spec.required_params),
+            "required_param_any": [list(group) for group in spec.required_param_any],
         }
         for spec in list_operation_specs()
     ]
@@ -350,6 +358,23 @@ def _build_planner_repair_user_prompt(
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
+def _extract_planner_validation_errors(exc: ValidationError | ValueError) -> list[dict[str, Any]]:
+    if isinstance(exc, ValidationError):
+        return exc.errors()
+
+    message = str(exc)
+    marker = "invalid_operation_plan_nodes::"
+    if message.startswith(marker):
+        raw_payload = message[len(marker) :].strip()
+        try:
+            payload = json.loads(raw_payload)
+            if isinstance(payload, dict):
+                return [payload]
+        except json.JSONDecodeError:
+            pass
+    return [{"msg": message}]
+
+
 def _build_task_plan_with_llm(
     parsed: ParsedTaskSpec,
     *,
@@ -383,7 +408,7 @@ def _build_task_plan_with_llm(
             if attempt >= planner_retries:
                 break
             attempt += 1
-            validation_errors = exc.errors() if isinstance(exc, ValidationError) else [{"msg": str(exc)}]
+            validation_errors = _extract_planner_validation_errors(exc)
             user_prompt = _build_planner_repair_user_prompt(
                 base_prompt=base_user_prompt,
                 previous_json=response.content_json,

@@ -7,6 +7,7 @@ import rasterio
 from rasterio.transform import from_origin
 
 from packages.domain.services.processing_pipeline import (
+    preflight_processing_pipeline_inputs,
     _resolve_raster_source,
     _resolve_vector_source,
     run_processing_pipeline,
@@ -211,6 +212,48 @@ def test_resolve_vector_source_raises_when_no_usable_input(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="cannot resolve vector source"):
         _resolve_vector_source(node=node, references={}, working_dir=tmp_path)
+
+
+def test_preflight_processing_pipeline_inputs_rejects_missing_upload_source(tmp_path) -> None:
+    plan_nodes = [
+        {
+            "step_id": "upload_vector_1",
+            "op_name": "input.upload_vector",
+            "depends_on": [],
+            "inputs": {"upload_id": "missing_upload"},
+            "params": {"source_path": str(tmp_path / "missing.geojson")},
+            "outputs": {"vector": "v_uploaded"},
+        },
+    ]
+
+    with pytest.raises(ValueError, match="cannot resolve vector source"):
+        preflight_processing_pipeline_inputs(
+            task_id="task_preflight_missing_vector",
+            plan_nodes=plan_nodes,
+            working_dir=tmp_path,
+        )
+
+
+def test_run_processing_pipeline_clip_with_invalid_explicit_path_fails(tmp_path) -> None:
+    source_raster = tmp_path / "source_for_invalid_clip.tif"
+    _create_test_raster(source_raster)
+
+    plan_nodes = [
+        {
+            "step_id": "clip1",
+            "op_name": "raster.clip",
+            "depends_on": [],
+            "inputs": {},
+            "params": {
+                "source_path": str(source_raster),
+                "clip_path": str(tmp_path / "missing_clip.geojson"),
+            },
+            "outputs": {"raster": "r_clip"},
+        }
+    ]
+
+    with pytest.raises(ValueError, match="cannot resolve clip geometry"):
+        run_processing_pipeline(task_id="task_invalid_clip_path", plan_nodes=plan_nodes, working_dir=tmp_path)
 
 
 def test_run_processing_pipeline_supports_phase1_raster_ops(tmp_path) -> None:

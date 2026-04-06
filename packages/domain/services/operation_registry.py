@@ -12,6 +12,8 @@ class OperationSpec:
     default_params: dict[str, Any]
     executor_name: str
     retryable_errors: tuple[str, ...] = ()
+    required_params: tuple[str, ...] = ()
+    required_param_any: tuple[tuple[str, ...], ...] = ()
 
 
 OPERATION_SPECS: dict[str, OperationSpec] = {
@@ -21,6 +23,7 @@ OPERATION_SPECS: dict[str, OperationSpec] = {
         output_types={"raster": "raster"},
         default_params={},
         executor_name="_op_input_upload_raster",
+        required_params=("source_path",),
     ),
     "input.upload_vector": OperationSpec(
         op_name="input.upload_vector",
@@ -28,6 +31,7 @@ OPERATION_SPECS: dict[str, OperationSpec] = {
         output_types={"vector": "vector"},
         default_params={},
         executor_name="_op_input_upload_vector",
+        required_params=("source_path",),
     ),
     "raster.clip": OperationSpec(
         op_name="raster.clip",

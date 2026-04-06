@@ -28,6 +28,7 @@ from packages.schemas.task import ParsedTaskSpec
 @pytest.fixture(autouse=True)
 def _patched_plan_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(orchestrator, "_queue_or_run", lambda task_id: None)
+    monkeypatch.setattr(orchestrator, "preflight_processing_pipeline_inputs", lambda **kwargs: None)
     monkeypatch.setattr(orchestrator, "generate_chat_reply", lambda **kwargs: "请确认是否开始执行任务。")
 
     def _classify_intent(message: str, **kwargs) -> IntentResult:  # noqa: ANN003
@@ -192,7 +193,7 @@ def test_patch_task_plan_updates_version_and_content(client: TestClient) -> None
                     op_name="input.upload_raster",
                     depends_on=[],
                     inputs={"upload_id": "file-1"},
-                    params={},
+                    params={"source_path": "/tmp/source.tif"},
                     outputs={"raster": "raster-1"},
                     retry_policy={"max_retries": 1},
                 ),
@@ -245,7 +246,7 @@ def test_approve_task_plan_queues_execution(client: TestClient) -> None:
                                 "op_name": "input.upload_raster",
                                 "depends_on": [],
                                 "inputs": {"upload_id": "file-1"},
-                                "params": {},
+                                "params": {"source_path": "/tmp/source.tif"},
                                 "outputs": {"raster": "raster-1"},
                                 "retry_policy": {"max_retries": 1},
                             }
@@ -308,6 +309,33 @@ def test_approve_task_plan_rejects_version_mismatch_with_plan_edit_invalid(clien
         assert response.status_code == 400
         body = response.json()
         assert body["error"]["code"] == "plan_edit_invalid"
+    finally:
+        _cleanup_session(session_id)
+
+
+def test_approve_task_plan_rejects_preflight_failure(client: TestClient) -> None:
+    session_id = _create_session()
+    try:
+        payload = _create_message(client, session_id)
+        detail = client.get(f"/api/v1/tasks/{payload['task_id']}").json()
+        operation_plan = detail["operation_plan"]
+        assert operation_plan is not None
+
+        def _raise_preflight(**kwargs):  # noqa: ANN003
+            del kwargs
+            raise ValueError("missing source path")
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(orchestrator, "preflight_processing_pipeline_inputs", _raise_preflight)
+            response = client.post(
+                f"/api/v1/tasks/{payload['task_id']}/approve",
+                json={"approved_version": operation_plan["version"]},
+            )
+
+        assert response.status_code == 400
+        body = response.json()
+        assert body["error"]["code"] == "plan_edit_invalid"
+        assert "preflight" in body["error"]["message"].lower()
     finally:
         _cleanup_session(session_id)
 

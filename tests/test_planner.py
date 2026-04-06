@@ -232,6 +232,52 @@ def test_build_task_plan_retries_on_schema_validation_error(monkeypatch: pytest.
     get_settings.cache_clear()
 
 
+def test_build_task_plan_retries_on_operation_plan_validation_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GIS_AGENT_LLM_API_KEY", "test_key")
+    monkeypatch.setenv("GIS_AGENT_LLM_PLANNER_ENABLED", "true")
+    monkeypatch.setenv("GIS_AGENT_LLM_PLANNER_LEGACY_FALLBACK", "false")
+    monkeypatch.setenv("GIS_AGENT_LLM_PLANNER_SCHEMA_RETRIES", "1")
+    get_settings.cache_clear()
+
+    prompts: list[str] = []
+    invalid_payload = _valid_plan_payload()
+    invalid_payload["operation_plan_nodes"] = [
+        {
+            "step_id": "step_1_upload",
+            "op_name": "input.upload_raster",
+            "depends_on": [],
+            "inputs": {"upload_id": "file_1"},
+            "params": {},
+            "outputs": {"raster": "r_src"},
+            "retry_policy": {"max_retries": 0},
+        }
+    ]
+    responses = [
+        _mock_llm_plan_response(invalid_payload),
+        _mock_llm_plan_response(_valid_plan_payload()),
+    ]
+
+    def _fake_chat_json(self, **kwargs):  # noqa: ANN001
+        del self
+        prompts.append(kwargs["user_prompt"])
+        return responses.pop(0)
+
+    monkeypatch.setattr("packages.domain.services.planner.LLMClient.chat_json", _fake_chat_json)
+    parsed = ParsedTaskSpec(
+        aoi_input="bbox(116.1,39.8,116.5,40.1)",
+        aoi_source_type="bbox",
+        time_range={"start": "2024-06-01", "end": "2024-06-30"},
+    )
+    plan = build_task_plan(parsed)
+
+    assert plan.status == PLAN_STATUS_READY
+    assert len(prompts) == 2
+    assert "operation_plan_validation" in prompts[1]
+    get_settings.cache_clear()
+
+
 def test_build_task_plan_falls_back_to_legacy_when_llm_unavailable(
     _legacy_planner_mode_for_tests: None,
 ) -> None:

@@ -2,6 +2,8 @@ from packages.domain.services.operation_registry import require_operation_spec
 
 
 def test_registry_contains_clip_and_export_specs() -> None:
+    upload_raster = require_operation_spec("input.upload_raster")
+    upload_vector = require_operation_spec("input.upload_vector")
     clip = require_operation_spec("raster.clip")
     export = require_operation_spec("artifact.export")
     slope = require_operation_spec("raster.terrain_slope")
@@ -22,6 +24,8 @@ def test_registry_contains_clip_and_export_specs() -> None:
 
     assert clip.op_name == "raster.clip"
     assert "raster" in clip.input_types
+    assert upload_raster.required_params == ("source_path",)
+    assert upload_vector.required_params == ("source_path",)
     assert slope.op_name == "raster.terrain_slope"
     assert hillshade.default_params["azimuth"] == 315.0
     assert "rasters" in mosaic.input_types

@@ -88,3 +88,48 @@ def test_validate_operation_plan_rejects_unresolved_input_reference() -> None:
     assert exc.value.error_code == ErrorCode.PLAN_SCHEMA_INVALID
     assert exc.value.detail is not None
     assert exc.value.detail.get("reason") == "input_ref_unresolved"
+
+
+def test_validate_operation_plan_rejects_missing_required_upload_param() -> None:
+    plan = OperationPlan(
+        version=1,
+        status="draft",
+        nodes=[
+            OperationNode(
+                step_id="upload_1",
+                op_name="input.upload_raster",
+                depends_on=[],
+                inputs={"upload_id": "file_1"},
+                params={},
+                outputs={"raster": "r_src"},
+            ),
+        ],
+    )
+    with pytest.raises(AppError) as exc:
+        validate_operation_plan(plan)
+    assert exc.value.error_code == ErrorCode.PLAN_SCHEMA_INVALID
+    assert exc.value.detail is not None
+    assert exc.value.detail.get("reason") == "param_missing"
+
+
+def test_validate_operation_plan_rejects_clip_without_aoi_input() -> None:
+    plan = OperationPlan(
+        version=1,
+        status="draft",
+        nodes=[
+            OperationNode(
+                step_id="clip_1",
+                op_name="raster.clip",
+                depends_on=[],
+                inputs={},
+                params={"source_path": "/tmp/source.tif"},
+                outputs={"raster": "r_clip"},
+            ),
+        ],
+    )
+    with pytest.raises(AppError) as exc:
+        validate_operation_plan(plan)
+    assert exc.value.error_code == ErrorCode.PLAN_SCHEMA_INVALID
+    assert exc.value.detail is not None
+    assert exc.value.detail.get("reason") == "input_missing"
+    assert exc.value.detail.get("input_key") == "aoi"

@@ -8,6 +8,7 @@
 2. 生成 `steps`，每步包含：`step_name`、`tool_name`、`title`、`purpose`、`depends_on`。  
 3. 同时生成 `operation_plan_nodes`（操作级 DAG），每个节点包含：`step_id`、`op_name`、`depends_on`、`inputs`、`params`、`outputs`、`retry_policy`。  
 4. `operation_plan_nodes` 的 `op_name` 只能来自 `operation_registry` 白名单，禁止发明不存在的操作。  
+4.1 严格满足 `operation_whitelist` 里每个操作的 `required_params` / `required_param_any` 约束。  
 5. 计划应由“工具能力”驱动，而不是固定某个分析模板；例如裁剪类任务可以直接聚焦输入校验、处理执行、结果发布。  
 6. 当输入不足时保留 `missing_fields`，并让计划可进入待澄清状态。
 
@@ -18,3 +19,7 @@
 3. `step_name` 必须唯一，依赖关系不能形成环。  
 4. `operation_plan_nodes.step_id` 必须唯一，`depends_on` 不能形成环。  
 5. 不要生成不存在的工具或操作。
+6. 对所有路径参数（如 `source_path`、`clip_path`、`aoi_path`）：
+   - 不能为空字符串；
+   - 不能是 `null`；
+   - 若缺失则必须写入 `missing_fields`，而不是输出空值占位。

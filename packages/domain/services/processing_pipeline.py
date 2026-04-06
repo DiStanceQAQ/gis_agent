@@ -69,6 +69,7 @@ def _resolve_raster_source(
     node: dict[str, Any],
     references: dict[str, str],
     working_dir: Path,
+    allow_fallback: bool = True,
 ) -> Path:
     inputs = node.get("inputs") or {}
     params = node.get("params") or {}
@@ -91,7 +92,7 @@ def _resolve_raster_source(
             if primary_ref:
                 source_path = Path(primary_ref)
             else:
-                if strict_source_required:
+                if strict_source_required or not allow_fallback:
                     raise ValueError(
                         f"{step_id} cannot resolve raster source: missing input ref and source_path."
                     )
@@ -99,7 +100,7 @@ def _resolve_raster_source(
                 _create_default_raster(source_path)
 
     if not _is_supported_raster(source_path):
-        if strict_source_required or source_from_explicit_ref:
+        if strict_source_required or source_from_explicit_ref or not allow_fallback:
             raise ValueError(
                 f"{step_id} cannot resolve raster source: invalid raster at {source_path}."
             )
@@ -112,6 +113,7 @@ def _resolve_vector_source(
     node: dict[str, Any],
     references: dict[str, str],
     working_dir: Path,
+    allow_fallback: bool = True,
 ) -> Path:
     inputs = node.get("inputs") or {}
     params = node.get("params") or {}
@@ -143,7 +145,7 @@ def _resolve_vector_source(
     if source_candidate and source_candidate.exists():
         return source_candidate
 
-    if strict_source_required or source_from_explicit_ref:
+    if strict_source_required or source_from_explicit_ref or not allow_fallback:
         raise ValueError(
             f"{step_id} cannot resolve vector source: missing upload ref/path or file does not exist."
         )
@@ -438,7 +440,7 @@ def _resolve_explicit_geometries(
     bbox_param_keys: tuple[str, ...],
     crs_param_keys: tuple[str, ...],
     fallback_crs: str = "EPSG:4326",
-) -> tuple[list[dict[str, Any]], str]:
+) -> tuple[list[dict[str, Any]], str, bool]:
     inputs = node.get("inputs") or {}
     params = node.get("params") or {}
     geometries: list[dict[str, Any]] = []
@@ -482,7 +484,7 @@ def _resolve_explicit_geometries(
             geometries.append(box(minx, miny, maxx, maxy).__geo_interface__)
 
     if not has_explicit_input:
-        return [], fallback_crs
+        return [], fallback_crs, False
     crs_name = next(
         (
             str(params.get(key))
@@ -491,7 +493,7 @@ def _resolve_explicit_geometries(
         ),
         None,
     )
-    return geometries, crs_name or detected_crs or fallback_crs
+    return geometries, crs_name or detected_crs or fallback_crs, True
 
 
 def _geometry_dicts_to_shapes(geometries: list[dict[str, Any]]) -> list[Any]:
@@ -764,6 +766,60 @@ def _compute_raster_metrics(tif_path: str) -> dict[str, object]:
         }
 
 
+def preflight_processing_pipeline_inputs(
+    *,
+    task_id: str,
+    plan_nodes: list[dict[str, Any]],
+    working_dir: Path,
+) -> None:
+    del task_id
+    if not plan_nodes:
+        raise ValueError("Operation plan nodes must not be empty.")
+    working_dir.mkdir(parents=True, exist_ok=True)
+
+    pending_nodes = [dict(node) for node in plan_nodes]
+    completed_steps: set[str] = set()
+    references: dict[str, str] = {}
+
+    while pending_nodes:
+        progressed = False
+        for node in list(pending_nodes):
+            step_id = str(node.get("step_id") or "")
+            depends_on = [str(dep) for dep in node.get("depends_on") or []]
+            if any(dep not in completed_steps for dep in depends_on):
+                continue
+
+            op_name = str(node.get("op_name") or "")
+            outputs = node.get("outputs") or {}
+
+            if op_name == "input.upload_raster":
+                output_ref = str(outputs.get("raster") or step_id or "uploaded_raster")
+                source_path = _resolve_raster_source(
+                    node=node,
+                    references=references,
+                    working_dir=working_dir,
+                    allow_fallback=False,
+                )
+                references[output_ref] = str(source_path)
+            elif op_name == "input.upload_vector":
+                output_ref = str(outputs.get("vector") or step_id or "uploaded_vector")
+                source_path = _resolve_vector_source(
+                    node=node,
+                    references=references,
+                    working_dir=working_dir,
+                    allow_fallback=False,
+                )
+                references[output_ref] = str(source_path)
+
+            completed_steps.add(step_id)
+            pending_nodes.remove(node)
+            progressed = True
+
+        if not progressed:
+            unresolved_ids = [str(node.get("step_id") or "") for node in pending_nodes]
+            raise ValueError(f"Operation plan contains unresolved dependencies: {unresolved_ids}")
+
+
 def run_processing_pipeline(*, task_id: str, plan_nodes: list[dict[str, Any]], working_dir: Path) -> dict[str, Any]:
     del task_id
     if not plan_nodes:
@@ -802,7 +858,7 @@ def run_processing_pipeline(*, task_id: str, plan_nodes: list[dict[str, Any]], w
                 output_ref = str(outputs.get("raster") or step_id or "raster_clip")
                 output_path = working_dir / f"{step_id or output_ref}.tif"
                 source_path = _resolve_raster_source(node=node, references=references, working_dir=working_dir)
-                clip_geometries, clip_crs = _resolve_explicit_geometries(
+                clip_geometries, clip_crs, has_explicit_clip_input = _resolve_explicit_geometries(
                     node=node,
                     references=references,
                     input_keys=("aoi", "clip_vector", "vector"),
@@ -812,6 +868,8 @@ def run_processing_pipeline(*, task_id: str, plan_nodes: list[dict[str, Any]], w
                     bbox_param_keys=("bbox", "clip_bbox"),
                     crs_param_keys=("aoi_crs", "clip_crs", "source_crs"),
                 )
+                if has_explicit_clip_input and not clip_geometries:
+                    raise ValueError(f"{step_id or output_ref} cannot resolve clip geometry from explicit inputs.")
                 if clip_geometries:
                     with rasterio.open(source_path) as src:
                         clip_shapes = clip_geometries
@@ -927,7 +985,7 @@ def run_processing_pipeline(*, task_id: str, plan_nodes: list[dict[str, Any]], w
                 output_path = working_dir / f"{step_id or table_ref}.csv"
                 source_path = _resolve_raster_source(node=node, references=references, working_dir=working_dir)
                 stats = [str(item).lower() for item in (params.get("stats") or ["mean", "min", "max"])]
-                zone_geometries, zone_crs = _resolve_explicit_geometries(
+                zone_geometries, zone_crs, has_explicit_zone_input = _resolve_explicit_geometries(
                     node=node,
                     references=references,
                     input_keys=("zones", "vector", "aoi"),
@@ -937,6 +995,8 @@ def run_processing_pipeline(*, task_id: str, plan_nodes: list[dict[str, Any]], w
                     bbox_param_keys=("zones_bbox",),
                     crs_param_keys=("zones_crs", "zone_crs", "source_crs"),
                 )
+                if has_explicit_zone_input and not zone_geometries:
+                    raise ValueError(f"{step_id or table_ref} cannot resolve zone geometries from explicit inputs.")
                 with rasterio.open(source_path) as src:
                     data = src.read(1).astype("float32")
                     nodata = src.nodata

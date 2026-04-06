@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timezone
+from pathlib import Path
 import re
 
 from fastapi import UploadFile
@@ -30,6 +31,7 @@ from packages.domain.services.chat import generate_chat_reply
 from packages.domain.services.input_slots import classify_uploaded_inputs
 from packages.domain.services.intent import classify_message_intent, is_task_confirmation_message
 from packages.domain.services.operation_plan_builder import build_operation_plan_from_registry
+from packages.domain.services.processing_pipeline import preflight_processing_pipeline_inputs
 from packages.domain.services.planner import PLAN_STATUS_NEEDS_CLARIFICATION, build_task_plan
 from packages.domain.services.parser import (
     extract_parser_failure_error,
@@ -38,7 +40,7 @@ from packages.domain.services.parser import (
     parse_task_message,
 )
 from packages.domain.services.plan_guard import validate_operation_plan
-from packages.domain.services.storage import detect_file_type, write_upload_file
+from packages.domain.services.storage import build_artifact_path, detect_file_type, write_upload_file
 from packages.domain.services.task_events import append_task_event, list_task_events
 from packages.domain.services.task_state import (
     TASK_STATUS_APPROVED,
@@ -402,7 +404,118 @@ def _create_chat_mode_response(
     )
 
 
-def _build_initial_operation_plan(task_plan: TaskPlanResponse, parsed: ParsedTaskSpec) -> OperationPlan:
+def _resolve_uploaded_storage_path(storage_key: str) -> str:
+    candidate = Path(storage_key)
+    if candidate.is_absolute():
+        return str(candidate)
+    if candidate.exists():
+        return str(candidate.resolve())
+    settings = get_settings()
+    rooted = Path(settings.storage_root) / candidate
+    if rooted.exists():
+        return str(rooted.resolve())
+    return str(candidate)
+
+
+def _select_uploaded_file(
+    *,
+    uploaded_files: list[UploadedFileRecord],
+    preferred_file_id: str | None,
+    allowed_types: set[str],
+) -> UploadedFileRecord | None:
+    if preferred_file_id:
+        preferred = next((item for item in uploaded_files if item.id == preferred_file_id), None)
+        if preferred is not None and preferred.file_type in allowed_types:
+            return preferred
+    return next((item for item in uploaded_files if item.file_type in allowed_types), None)
+
+
+def _inject_upload_context_into_operation_plan(
+    plan: OperationPlan,
+    *,
+    parsed: ParsedTaskSpec,
+    uploaded_files: list[UploadedFileRecord] | None,
+    upload_slots: dict[str, str] | None,
+) -> OperationPlan:
+    uploaded_files = uploaded_files or []
+    if not uploaded_files:
+        return plan
+
+    upload_slots = upload_slots or {}
+    files_by_storage_key = {item.storage_key: item for item in uploaded_files}
+    raster_file = _select_uploaded_file(
+        uploaded_files=uploaded_files,
+        preferred_file_id=upload_slots.get("input_raster_file_id"),
+        allowed_types={"raster_tiff"},
+    )
+    vector_file = _select_uploaded_file(
+        uploaded_files=uploaded_files,
+        preferred_file_id=upload_slots.get("input_vector_file_id"),
+        allowed_types={"geojson", "shp", "shp_zip", "vector_gpkg"},
+    )
+
+    source_path = str((parsed.operation_params or {}).get("source_path") or "").strip()
+    clip_path = str((parsed.operation_params or {}).get("clip_path") or "").strip()
+    if source_path in files_by_storage_key:
+        source_path = _resolve_uploaded_storage_path(source_path)
+    if clip_path in files_by_storage_key:
+        clip_path = _resolve_uploaded_storage_path(clip_path)
+
+    normalized_nodes: list[OperationNode] = []
+    for node in plan.nodes:
+        payload = node.model_dump()
+        inputs = dict(payload.get("inputs") or {})
+        params = dict(payload.get("params") or {})
+        op_name = str(payload.get("op_name") or "")
+
+        if op_name == "input.upload_raster":
+            if not str(inputs.get("upload_id") or "").strip() and raster_file is not None:
+                inputs["upload_id"] = raster_file.id
+            if not str(params.get("source_path") or "").strip():
+                if source_path:
+                    params["source_path"] = source_path
+                elif raster_file is not None:
+                    params["source_path"] = _resolve_uploaded_storage_path(raster_file.storage_key)
+
+        if op_name == "input.upload_vector":
+            if not str(inputs.get("upload_id") or "").strip() and vector_file is not None:
+                inputs["upload_id"] = vector_file.id
+            if not str(params.get("source_path") or "").strip():
+                if clip_path:
+                    params["source_path"] = clip_path
+                elif vector_file is not None:
+                    params["source_path"] = _resolve_uploaded_storage_path(vector_file.storage_key)
+
+        if op_name == "raster.clip":
+            has_clip_source = any(str(params.get(key) or "").strip() for key in ("aoi_path", "clip_path", "vector_path"))
+            if not has_clip_source:
+                if clip_path:
+                    params["aoi_path"] = clip_path
+                elif vector_file is not None:
+                    params["aoi_path"] = _resolve_uploaded_storage_path(vector_file.storage_key)
+
+        for key in ("source_path", "aoi_path", "clip_path", "vector_path"):
+            value = str(params.get(key) or "").strip()
+            if not value:
+                continue
+            uploaded = files_by_storage_key.get(value)
+            if uploaded is not None:
+                params[key] = _resolve_uploaded_storage_path(uploaded.storage_key)
+
+        payload["inputs"] = inputs
+        payload["params"] = params
+        normalized_nodes.append(OperationNode.model_validate(payload))
+
+    return plan.model_copy(update={"nodes": normalized_nodes})
+
+
+def _build_initial_operation_plan(
+    task_plan: TaskPlanResponse,
+    parsed: ParsedTaskSpec,
+    *,
+    uploaded_files: list[UploadedFileRecord] | None = None,
+    upload_slots: dict[str, str] | None = None,
+) -> OperationPlan:
     if task_plan.operation_plan_nodes:
         try:
             candidate = OperationPlan(
@@ -411,17 +524,29 @@ def _build_initial_operation_plan(task_plan: TaskPlanResponse, parsed: ParsedTas
                 missing_fields=list(task_plan.missing_fields),
                 nodes=[OperationNode.model_validate(node) for node in task_plan.operation_plan_nodes],
             )
-            validated = validate_operation_plan(candidate)
-            return validated.model_copy(update={"status": "draft"})
+            injected = _inject_upload_context_into_operation_plan(
+                candidate,
+                parsed=parsed,
+                uploaded_files=uploaded_files,
+                upload_slots=upload_slots,
+            )
+            return validate_operation_plan(injected).model_copy(update={"status": "draft"})
         except Exception as exc:  # pragma: no cover - fallback guard
             logger.warning("task.operation_plan_from_planner_invalid detail=%s", repr(exc))
 
-    return build_operation_plan_from_registry(
+    plan = build_operation_plan_from_registry(
         parsed,
         version=1,
         status="draft",
         missing_fields=list(task_plan.missing_fields),
     )
+    injected = _inject_upload_context_into_operation_plan(
+        plan,
+        parsed=parsed,
+        uploaded_files=uploaded_files,
+        upload_slots=upload_slots,
+    )
+    return validate_operation_plan(injected).model_copy(update={"status": "draft"})
 
 
 def _load_latest_session_task(db: Session, session_id: str) -> TaskRunRecord | None:
@@ -580,6 +705,8 @@ def _build_task(
         initial_operation_plan = _build_initial_operation_plan(
             TaskPlanResponse(**task.plan_json),
             safe_parsed,
+            uploaded_files=uploaded_files,
+            upload_slots=upload_slots,
         )
         task.plan_json = {
             **(task.plan_json or {}),
@@ -1043,6 +1170,23 @@ def approve_task_plan(db: Session, task_id: str, approved_version: int) -> TaskD
         )
 
     approved_plan = validated_plan.model_copy(update={"status": "approved"})
+    try:
+        preflight_processing_pipeline_inputs(
+            task_id=task.id,
+            plan_nodes=[node.model_dump() for node in approved_plan.nodes],
+            working_dir=Path(build_artifact_path(task.id, "pipeline_preflight.tmp")).parent,
+        )
+    except Exception as exc:
+        raise AppError.bad_request(
+            error_code=ErrorCode.PLAN_EDIT_INVALID,
+            message="Task plan failed preflight input validation.",
+            detail={
+                "task_id": task.id,
+                "cause_error_code": ErrorCode.PLAN_SCHEMA_INVALID,
+                "cause_message": str(exc),
+            },
+        ) from exc
+
     execution_mode = get_settings().execution_mode
     task.plan_json = {
         **task.plan_json,

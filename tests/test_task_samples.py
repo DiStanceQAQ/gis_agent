@@ -134,6 +134,7 @@ def _patch_sample_environment(
     scenario: str,
 ) -> None:
     monkeypatch.setattr(orchestrator, "_queue_or_run", lambda task_id: None)
+    monkeypatch.setattr(orchestrator, "preflight_processing_pipeline_inputs", lambda **kwargs: None)
     for module in (agent_runtime, runtime_helpers):
         monkeypatch.setattr(
             module,
