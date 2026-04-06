@@ -7,6 +7,22 @@ on:
 jobs:
   backend:
     runs-on: ubuntu-latest
+    env:
+      GIS_AGENT_DATABASE_URL: postgresql+psycopg://gis_agent:gis_agent@localhost:5432/gis_agent
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: gis_agent
+          POSTGRES_PASSWORD: gis_agent
+          POSTGRES_DB: gis_agent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gis_agent -d gis_agent"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
 
     steps:
       - name: Checkout
@@ -22,6 +38,25 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
+
+      - name: Wait for Postgres
+        run: |
+          python - <<'PY'
+          import os, time
+          import psycopg
+
+          dsn = os.environ["GIS_AGENT_DATABASE_URL"].replace("postgresql+psycopg://", "postgresql://", 1)
+          for i in range(30):
+              try:
+                  with psycopg.connect(dsn, connect_timeout=3):
+                      print("postgres is ready")
+                      break
+              except Exception as exc:  # noqa: BLE001
+                  print(f"waiting postgres ({i + 1}/30): {exc}")
+                  time.sleep(2)
+          else:
+              raise SystemExit("postgres is not ready in time")
+          PY
 
       - name: Compile Python sources
         run: python -m compileall apps packages tests
