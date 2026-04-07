@@ -4,14 +4,22 @@ import type {
   SessionResponse,
   SessionTasksResponse,
   TaskDetail,
+  TaskEvent,
   TaskEventsResponse,
   UploadResponse,
 } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "/api/v1";
 
+function resolveApiUrl(path: string): string {
+  if (API_BASE.startsWith("http://") || API_BASE.startsWith("https://")) {
+    return `${API_BASE}${path}`;
+  }
+  return new URL(`${API_BASE}${path}`, window.location.origin).toString();
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
+  const response = await fetch(resolveApiUrl(path), {
     headers: {
       "Content-Type": "application/json",
       ...(init?.headers ?? {}),
@@ -94,7 +102,7 @@ export async function uploadFile(sessionId: string, file: File): Promise<UploadR
   const formData = new FormData();
   formData.append("session_id", sessionId);
   formData.append("file", file);
-  const response = await fetch(`${API_BASE}/files`, {
+  const response = await fetch(resolveApiUrl("/files"), {
     method: "POST",
     body: formData,
   });
@@ -111,4 +119,42 @@ export async function uploadFile(sessionId: string, file: File): Promise<UploadR
     throw new Error(text || `Upload failed with ${response.status}`);
   }
   return response.json() as Promise<UploadResponse>;
+}
+
+export type TaskEventStreamHandlers = {
+  onEvent: (event: TaskEvent) => void;
+  onError?: (error: Event | Error) => void;
+};
+
+export function openTaskEventsStream(taskId: string, sinceId: number, handlers: TaskEventStreamHandlers): () => void {
+  if (typeof window === "undefined" || typeof EventSource === "undefined") {
+    handlers.onError?.(new Error("EventSource is not available in current runtime."));
+    return () => {};
+  }
+
+  const url = new URL(resolveApiUrl(`/tasks/${taskId}/events/stream`));
+  url.searchParams.set("since_id", String(Math.max(0, sinceId)));
+
+  const stream = new EventSource(url.toString());
+
+  const handleEvent = (event: MessageEvent<string>) => {
+    try {
+      const payload = JSON.parse(event.data) as TaskEvent;
+      handlers.onEvent(payload);
+    } catch {
+      // Ignore malformed stream payloads and keep stream alive.
+    }
+  };
+
+  stream.addEventListener("task_event", handleEvent as EventListener);
+  stream.onmessage = handleEvent;
+  stream.onerror = (error) => {
+    handlers.onError?.(error);
+    stream.close();
+  };
+
+  return () => {
+    stream.removeEventListener("task_event", handleEvent as EventListener);
+    stream.close();
+  };
 }
