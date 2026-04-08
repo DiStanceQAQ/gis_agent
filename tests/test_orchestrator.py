@@ -4,6 +4,7 @@ from packages.domain.models import AOIRecord, TaskRunRecord, TaskSpecRecord, Upl
 from packages.domain.services.input_slots import classify_uploaded_inputs
 from packages.domain.services.orchestrator import (
     _build_initial_operation_plan,
+    _build_initial_revision_understanding,
     _merge_task_spec,
     should_inherit_original_aoi,
 )
@@ -107,6 +108,19 @@ def test_merge_task_spec_applies_followup_time_override() -> None:
     )
 
     assert merged.time_range == {"start": "2023-06-01", "end": "2023-06-30"}
+
+
+def test_build_initial_revision_understanding_uses_canonical_followup_intent() -> None:
+    understanding = _build_initial_revision_understanding(
+        task_spec_raw={
+            "aoi_input": "bbox(116.1,39.8,116.5,40.1)",
+            "aoi_source_type": "bbox",
+            "upload_slots": {"input_vector_file_id": "file_123"},
+        },
+        parent_task_id="task_parent",
+    )
+
+    assert understanding.intent == "task_followup"
 
 
 def test_classify_uploaded_inputs_prefers_raster_and_vector_slots() -> None:

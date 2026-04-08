@@ -119,6 +119,18 @@ class _ParsedTaskUnderstanding:
         return dict(self._field_confidences)
 
 
+def _build_initial_revision_understanding(
+    *,
+    task_spec_raw: dict[str, object],
+    parent_task_id: str | None,
+) -> _ParsedTaskUnderstanding:
+    return _ParsedTaskUnderstanding(
+        intent="new_task" if parent_task_id is None else "task_followup",
+        understanding_summary=None,
+        parsed_spec=ParsedTaskSpec(**task_spec_raw),
+    )
+
+
 def _require_named_aoi_clarification(parsed: ParsedTaskSpec) -> ParsedTaskSpec:
     missing_fields = list(parsed.missing_fields)
     if "aoi_boundary" not in missing_fields:
@@ -960,16 +972,17 @@ def _build_task(
         task.status = TASK_STATUS_AWAITING_APPROVAL
         task.current_step = "awaiting_approval"
 
-    understanding = _ParsedTaskUnderstanding(
-        intent="new_task" if parent_task_id is None else "revise_task",
-        understanding_summary=None,
-        parsed_spec=ParsedTaskSpec(**dict(task_spec.raw_spec_json or {})),
+    task_spec_raw = dict(task_spec.raw_spec_json or {})
+    understanding = _build_initial_revision_understanding(
+        task_spec_raw=task_spec_raw,
+        parent_task_id=parent_task_id,
     )
     revision = create_initial_revision(
         db,
         task=task,
         understanding=understanding,
         source_message_id=user_message_id,
+        raw_spec_json=task_spec_raw,
     )
     revision.response_mode = (
         "ask_missing_fields"

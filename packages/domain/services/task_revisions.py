@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Protocol
 
 from sqlalchemy.exc import IntegrityError
@@ -47,6 +48,7 @@ def create_initial_revision(
     task: TaskRunRecord,
     understanding: UnderstandingLike,
     source_message_id: str,
+    raw_spec_json: dict[str, object] | None = None,
 ) -> TaskSpecRevisionRecord:
     revision = TaskSpecRevisionRecord(
         id=make_id("rev"),
@@ -58,7 +60,10 @@ def create_initial_revision(
         is_active=False,
         understanding_intent=understanding.intent,
         understanding_summary=understanding.understanding_summary,
-        raw_spec_json=understanding.parsed_spec.model_dump() if understanding.parsed_spec else {},
+        raw_spec_json=_resolve_revision_raw_spec_json(
+            understanding=understanding,
+            raw_spec_json=raw_spec_json,
+        ),
         field_confidences_json=understanding.field_confidences_dump(),
         ranked_candidates_json=understanding.ranked_candidates,
         understanding_trace_json=understanding.trace,
@@ -78,11 +83,22 @@ def activate_revision(
     locked_task = (
         db.query(TaskRunRecord).filter(TaskRunRecord.id == task.id).with_for_update().one()
     )
+    previous_active = (
+        db.query(TaskSpecRevisionRecord)
+        .filter(
+            TaskSpecRevisionRecord.task_id == locked_task.id,
+            TaskSpecRevisionRecord.is_active.is_(True),
+        )
+        .one_or_none()
+    )
     db.query(TaskSpecRevisionRecord).filter(
         TaskSpecRevisionRecord.task_id == locked_task.id,
         TaskSpecRevisionRecord.is_active.is_(True),
     ).update({TaskSpecRevisionRecord.is_active: False}, synchronize_session=False)
     revision.is_active = True
+    if _is_user_correction_revision(revision):
+        revision.user_revision_count = (previous_active.user_revision_count if previous_active else 0) + 1
+        revision.user_last_revision_at = datetime.now(timezone.utc)
     locked_task.last_understanding_message_id = revision.source_message_id
     locked_task.last_response_mode = revision.response_mode
     if mirror_legacy_task_spec:
@@ -103,11 +119,11 @@ def ensure_initial_revision_for_task(db: Session, task: TaskRunRecord) -> TaskSp
         return existing
 
     try:
-        revision = _materialize_initial_revision_from_legacy_task_spec(db, task)
-        activate_revision(db, task=task, revision=revision)
+        with db.begin_nested():
+            revision = _materialize_initial_revision_from_legacy_task_spec(db, task)
+            activate_revision(db, task=task, revision=revision)
         return revision
     except IntegrityError:
-        db.rollback()
         reloaded = get_active_revision(db, task.id)
         if reloaded is None:
             raise
@@ -172,3 +188,19 @@ def _mirror_revision_to_task_spec(
     task_spec.need_confirmation = parsed.need_confirmation
     task_spec.raw_spec_json = raw_spec
     return task_spec
+
+
+def _resolve_revision_raw_spec_json(
+    *,
+    understanding: UnderstandingLike,
+    raw_spec_json: dict[str, object] | None,
+) -> dict[str, object]:
+    if raw_spec_json is not None:
+        return dict(raw_spec_json)
+    if understanding.parsed_spec is None:
+        return {}
+    return understanding.parsed_spec.model_dump()
+
+
+def _is_user_correction_revision(revision: TaskSpecRevisionRecord) -> bool:
+    return revision.change_type == "correction"
