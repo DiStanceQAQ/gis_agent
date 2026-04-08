@@ -13,13 +13,16 @@ from typing import Any
 from geoalchemy2.elements import WKTElement
 from rasterio.crs import CRS
 from rasterio.warp import transform_geom
+from sqlalchemy.orm import Session
 from shapely.geometry import MultiPolygon, box, shape as shapely_shape
 from shapely.ops import unary_union
 from shapely.validation import make_valid
 
 from packages.domain.config import get_settings
 from packages.domain.errors import AppError, ErrorCode
-from packages.domain.models import AOIRecord, TaskRunRecord, UploadedFileRecord
+from packages.domain.models import AOIRecord, TaskRunRecord, TaskSpecRevisionRecord, UploadedFileRecord
+from packages.domain.services.task_events import append_task_event
+from packages.domain.services.task_state import TASK_STATUS_QUEUED, TASK_STATUS_WAITING_CLARIFICATION
 from packages.domain.utils import make_id
 
 
@@ -45,6 +48,13 @@ class NamedAOIResolution:
     status: str
     normalized_aoi: NormalizedAOI | None = None
     matched_names: list[str] | None = None
+
+
+@dataclass
+class AOIRefreshResult:
+    execution_blocked: bool
+    blocked_reason: str | None
+    aoi_record: AOIRecord | None
 
 
 def _deg2_to_km2(area_deg2: float, latitude: float) -> float:
@@ -593,6 +603,83 @@ def normalize_task_aoi(
             return resolution.normalized_aoi
 
     return None
+
+
+def normalize_active_revision_aoi(
+    db: Session,
+    *,
+    task: TaskRunRecord,
+    revision: TaskSpecRevisionRecord,
+    uploaded_files: list[UploadedFileRecord] | None = None,
+) -> AOIRefreshResult:
+    try:
+        normalized = normalize_task_aoi(task=task, uploaded_files=uploaded_files)
+        if normalized is None and _task_has_aoi_request(task):
+            raise AppError.bad_request(
+                error_code=ErrorCode.AOI_PARSE_FAILED,
+                message="No usable AOI geometry could be resolved for the active revision.",
+                detail={"task_id": task.id, "revision_id": revision.id},
+            )
+    except AppError as exc:
+        blocked_reason = f"AOI normalization failed: {exc.message}"
+        revision.execution_blocked = True
+        revision.execution_blocked_reason = blocked_reason
+        task.interaction_state = "execution_blocked"
+        task.status = TASK_STATUS_WAITING_CLARIFICATION
+        task.current_step = "normalize_aoi"
+        if task.aoi is not None:
+            task.aoi.is_valid = False
+            task.aoi.validation_message = blocked_reason
+        append_task_event(
+            db,
+            task_id=task.id,
+            event_type="task_aoi_normalization_failed",
+            step_name="normalize_aoi",
+            status=task.status,
+            detail={
+                "revision_id": revision.id,
+                "revision_number": revision.revision_number,
+                "reason": blocked_reason,
+                "error_code": exc.error_code,
+                "error_detail": exc.detail,
+            },
+        )
+        db.flush()
+        return AOIRefreshResult(
+            execution_blocked=True,
+            blocked_reason=blocked_reason,
+            aoi_record=None,
+        )
+
+    revision.execution_blocked = False
+    revision.execution_blocked_reason = None
+    if task.interaction_state == "execution_blocked":
+        task.interaction_state = "understanding"
+    if (
+        task.status == TASK_STATUS_WAITING_CLARIFICATION
+        and task.task_spec is not None
+        and not task.task_spec.need_confirmation
+    ):
+        task.status = TASK_STATUS_QUEUED
+
+    aoi_record: AOIRecord | None = None
+    if normalized is not None:
+        aoi_record = upsert_task_aoi(task=task, normalized_aoi=normalized)
+
+    db.flush()
+    return AOIRefreshResult(
+        execution_blocked=False,
+        blocked_reason=None,
+        aoi_record=aoi_record,
+    )
+
+
+def _task_has_aoi_request(task: TaskRunRecord) -> bool:
+    if task.task_spec is None:
+        return False
+    if task.task_spec.aoi_source_type == "file_upload":
+        return True
+    return bool(task.task_spec.aoi_input)
 
 
 def upsert_task_aoi(

@@ -146,6 +146,19 @@ def _prepare_runtime_start(
         parsed = ParsedTaskSpec(**task.task_spec.raw_spec_json)
         context = runtime_helpers.PipelineExecutionContext(parsed_spec=parsed)
 
+    if runtime_helpers.maybe_skip_runtime_for_execution_block(
+        db,
+        task,
+        step_name="normalize_aoi",
+    ):
+        return {
+            "need_clarification": True,
+            "plan_status": PLAN_STATUS_NEEDS_CLARIFICATION,
+            "runtime_context": context,
+            "runtime_started_at": start,
+            "tool_calls": int(state.get("tool_calls", 0)),
+        }
+
     if runtime_helpers.maybe_skip_runtime_for_clarification(db, task, context.parsed_spec):
         return {
             "need_clarification": True,

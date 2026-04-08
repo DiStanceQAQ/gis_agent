@@ -29,7 +29,9 @@ from packages.domain.services.explanation import (
 from packages.domain.services.llm_call_logs import write_llm_call_log
 from packages.domain.services.processing_pipeline import run_processing_pipeline
 from packages.domain.services.planner import (
+    PLAN_STATUS_NEEDS_CLARIFICATION,
     ensure_task_plan,
+    set_task_plan_status,
     set_task_plan_step_status,
 )
 from packages.domain.services.qc import evaluate_candidate_qc
@@ -41,6 +43,7 @@ from packages.domain.services.storage import (
     persist_artifact_file,
 )
 from packages.domain.services.task_events import append_task_event
+from packages.domain.services.task_revisions import get_active_revision
 from packages.domain.services.task_state import (
     STEP_STATUS_FAILED,
     STEP_STATUS_PENDING,
@@ -515,6 +518,52 @@ def maybe_skip_runtime_for_clarification(
     )
     db.commit()
     logger.info("graph.runtime.skipped_for_clarification task_id=%s", task.id)
+    return True
+
+
+def maybe_skip_runtime_for_execution_block(
+    db: Session,
+    task: TaskRunRecord,
+    *,
+    step_name: str,
+) -> bool:
+    active_revision = get_active_revision(db, task.id)
+    if active_revision is None or not active_revision.execution_blocked:
+        return False
+
+    detail = {
+        "reason": "active_revision_execution_blocked",
+        "blocked_reason": active_revision.execution_blocked_reason,
+        "revision_id": active_revision.id,
+        "revision_number": active_revision.revision_number,
+    }
+    task.interaction_state = "execution_blocked"
+    task.plan_json = set_task_plan_status(task.plan_json, PLAN_STATUS_NEEDS_CLARIFICATION)
+
+    if task.status != TASK_STATUS_WAITING_CLARIFICATION:
+        set_task_status(
+            db,
+            task,
+            TASK_STATUS_WAITING_CLARIFICATION,
+            current_step=step_name,
+            event_type="task_waiting_clarification",
+            detail=detail,
+            force=True,
+        )
+    else:
+        task.current_step = step_name
+        db.flush()
+
+    append_task_event(
+        db,
+        task_id=task.id,
+        event_type="task_runtime_skipped",
+        step_name=step_name,
+        status=task.status,
+        detail=detail,
+    )
+    db.commit()
+    logger.info("graph.runtime.skipped_for_execution_block task_id=%s", task.id)
     return True
 
 

@@ -9,7 +9,7 @@ from packages.domain.services.graph import nodes as graph_nodes
 from packages.domain.services.graph import runtime_helpers
 from packages.domain.errors import ErrorCode
 from packages.domain.config import get_settings
-from packages.domain.models import TaskRunRecord, TaskSpecRecord
+from packages.domain.models import TaskRunRecord, TaskSpecRecord, TaskSpecRevisionRecord
 from packages.domain.services.llm_client import LLMResponse, LLMUsage
 from packages.domain.services.graph import builder as graph_builder
 from packages.domain.services.graph.builder import build_task_graph
@@ -345,6 +345,110 @@ def test_runtime_step_skips_unplanned_step_without_tool_call(monkeypatch) -> Non
 
     assert result["plan_status"] == "running"
     assert result["tool_calls"] == 0
+
+
+def test_runtime_refuses_to_continue_when_active_revision_is_execution_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = TaskRunRecord(
+        id="task_blocked_runtime",
+        session_id="ses_blocked_runtime",
+        user_message_id="msg_blocked_runtime",
+        status="queued",
+        interaction_state="understanding",
+    )
+    task.task_spec = TaskSpecRecord(
+        task_id=task.id,
+        aoi_input="uploaded_aoi",
+        aoi_source_type="file_upload",
+        preferred_output=["png_map"],
+        user_priority="balanced",
+        need_confirmation=False,
+        raw_spec_json={},
+    )
+    task.plan_json = {
+        "status": "ready",
+        "steps": [
+            {"step_name": "normalize_aoi"},
+            {"step_name": "search_candidates"},
+        ],
+    }
+    blocked_revision = TaskSpecRevisionRecord(
+        id="rev_blocked_runtime",
+        task_id=task.id,
+        revision_number=2,
+        base_revision_id="rev_1",
+        source_message_id=task.user_message_id,
+        change_type="correction",
+        is_active=True,
+        understanding_intent="task_correction",
+        understanding_summary="上传新的 AOI，但当前版本被阻止执行。",
+        raw_spec_json={},
+        field_confidences_json={},
+        ranked_candidates_json={},
+        execution_blocked=True,
+        execution_blocked_reason="AOI normalization failed: uploaded boundary is invalid.",
+        understanding_trace_json={},
+    )
+    events: list[dict[str, object]] = []
+
+    class _FakeSession:
+        def __enter__(self):  # noqa: ANN204
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            del exc_type, exc, tb
+
+        def get(self, model, task_id):  # noqa: ANN001
+            del model, task_id
+            return task
+
+        def commit(self) -> None:
+            return None
+
+        def flush(self) -> None:
+            return None
+
+        def add(self, record) -> None:  # noqa: ANN001
+            del record
+            return None
+
+    monkeypatch.setattr("packages.domain.services.graph.nodes.SessionLocal", lambda: _FakeSession())
+    monkeypatch.setattr(runtime_helpers, "get_active_revision", lambda db, task_id: blocked_revision)
+    monkeypatch.setattr(
+        runtime_helpers,
+        "append_task_event",
+        lambda *args, **kwargs: events.append(
+            {
+                "event_type": kwargs["event_type"],
+                "detail": kwargs.get("detail") or {},
+                "status": kwargs.get("status"),
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        "packages.domain.services.graph.nodes.runtime_helpers.execute_tool_step",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected tool execution")),  # noqa: ARG005
+    )
+
+    state = {
+        "task_id": task.id,
+        "runtime_started_at": runtime_helpers.perf_counter(),
+        "tool_calls": 0,
+        "runtime_context": runtime_helpers.PipelineExecutionContext(parsed_spec=ParsedTaskSpec()),
+    }
+
+    result = graph_nodes._run_runtime_step(state, step_name="normalize_aoi")
+
+    assert result["need_clarification"] is True
+    assert result["plan_status"] == "needs_clarification"
+    assert task.status == "waiting_clarification"
+    assert task.interaction_state == "execution_blocked"
+    assert any(
+        event["event_type"] == "task_runtime_skipped"
+        and event["detail"].get("reason") == "active_revision_execution_blocked"
+        for event in events
+    )
 
 
 def test_step_react_decision_uses_llm_when_enabled(monkeypatch) -> None:  # noqa: ANN001

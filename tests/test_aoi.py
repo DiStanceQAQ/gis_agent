@@ -8,11 +8,22 @@ import pytest
 from rasterio.crs import CRS
 from rasterio.warp import transform
 import shapefile
+from sqlalchemy.orm import Session
 from shapely.wkt import loads as load_wkt
 
 from packages.domain.config import get_settings
-from packages.domain.models import TaskRunRecord, TaskSpecRecord, UploadedFileRecord
+from packages.domain.database import SessionLocal
+from packages.domain.models import (
+    MessageRecord,
+    SessionRecord,
+    TaskEventRecord,
+    TaskRunRecord,
+    TaskSpecRecord,
+    TaskSpecRevisionRecord,
+    UploadedFileRecord,
+)
 from packages.domain.services.aoi import (
+    normalize_active_revision_aoi,
     normalize_bbox_text,
     normalize_geojson_file,
     normalize_task_aoi,
@@ -20,6 +31,8 @@ from packages.domain.services.aoi import (
     resolve_named_aoi,
 )
 from packages.domain.services.storage import _get_storage_backend_cached
+from packages.domain.services.task_state import TASK_STATUS_WAITING_CLARIFICATION
+from packages.domain.utils import make_id
 
 
 @pytest.fixture(autouse=True)
@@ -30,6 +43,51 @@ def _force_local_storage_backend(monkeypatch: pytest.MonkeyPatch) -> None:
     yield
     get_settings.cache_clear()
     _get_storage_backend_cached.cache_clear()
+
+
+@pytest.fixture
+def db_session() -> Session:
+    with SessionLocal() as db:
+        yield db
+
+
+def _seed_file_upload_revision(db_session: Session) -> tuple[TaskRunRecord, TaskSpecRevisionRecord]:
+    session = SessionRecord(id=make_id("ses"), title="aoi-blocked", status="active")
+    message = MessageRecord(id=make_id("msg"), session_id=session.id, role="user", content="上传边界")
+    task = TaskRunRecord(
+        id=make_id("task"),
+        session_id=session.id,
+        user_message_id=message.id,
+        status="queued",
+        interaction_state="understanding",
+    )
+    task.task_spec = TaskSpecRecord(
+        task_id=task.id,
+        aoi_input="uploaded_aoi",
+        aoi_source_type="file_upload",
+        preferred_output=["png_map"],
+        user_priority="balanced",
+        need_confirmation=False,
+        raw_spec_json={"upload_slots": {"input_vector_file_id": "file_vector"}},
+    )
+    revision = TaskSpecRevisionRecord(
+        id=make_id("rev"),
+        task_id=task.id,
+        revision_number=1,
+        base_revision_id=None,
+        source_message_id=message.id,
+        change_type="initial_parse",
+        is_active=True,
+        understanding_intent="new_task",
+        understanding_summary="使用上传边界作为 AOI。",
+        raw_spec_json=dict(task.task_spec.raw_spec_json or {}),
+        field_confidences_json={},
+        ranked_candidates_json={},
+        understanding_trace_json={},
+    )
+    db_session.add_all([session, message, task, revision])
+    db_session.flush()
+    return task, revision
 
 
 def test_parse_bbox_text_from_literal() -> None:
@@ -414,3 +472,93 @@ def test_normalize_task_aoi_prefers_vector_upload_slot_over_first_uploaded_file(
     assert normalized is not None
     assert normalized.source_file_id == "file_vector"
     assert normalized.name == "slot-aoi"
+
+
+def test_normalize_active_revision_marks_execution_blocked_when_uploaded_shape_is_invalid(
+    db_session: Session,
+) -> None:
+    task, revision = _seed_file_upload_revision(db_session)
+    uploaded_files = [
+        UploadedFileRecord(
+            id="file_vector",
+            session_id=task.session_id,
+            original_name="broken.txt",
+            file_type="txt",
+            storage_key="/tmp/broken.txt",
+            size_bytes=7,
+            checksum="checksum-bad",
+        )
+    ]
+
+    result = normalize_active_revision_aoi(
+        db_session,
+        task=task,
+        revision=revision,
+        uploaded_files=uploaded_files,
+    )
+
+    db_session.flush()
+    assert result.execution_blocked is True
+    assert result.blocked_reason
+    assert revision.execution_blocked is True
+    assert "AOI" in (revision.execution_blocked_reason or "")
+    assert task.interaction_state == "execution_blocked"
+    assert task.status == TASK_STATUS_WAITING_CLARIFICATION
+    event = (
+        db_session.query(TaskEventRecord)
+        .filter(TaskEventRecord.task_id == task.id, TaskEventRecord.event_type == "task_aoi_normalization_failed")
+        .one_or_none()
+    )
+    assert event is not None
+
+
+def test_normalize_active_revision_clears_blocked_flags_after_success(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task, revision = _seed_file_upload_revision(db_session)
+    revision.execution_blocked = True
+    revision.execution_blocked_reason = "old error"
+    task.interaction_state = "execution_blocked"
+
+    geojson_payload = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {"name": "recovered-aoi"},
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[[116.1, 39.8], [116.5, 39.8], [116.5, 40.1], [116.1, 40.1], [116.1, 39.8]]],
+                },
+            }
+        ],
+    }
+    geojson_path = tmp_path / "recover.geojson"
+    geojson_path.write_text(json.dumps(geojson_payload), encoding="utf-8")
+    uploaded_files = [
+        UploadedFileRecord(
+            id="file_vector",
+            session_id=task.session_id,
+            original_name="recover.geojson",
+            file_type="geojson",
+            storage_key=str(geojson_path),
+            size_bytes=geojson_path.stat().st_size,
+            checksum="checksum-good",
+        )
+    ]
+
+    result = normalize_active_revision_aoi(
+        db_session,
+        task=task,
+        revision=revision,
+        uploaded_files=uploaded_files,
+    )
+
+    assert result.execution_blocked is False
+    assert result.aoi_record is not None
+    assert revision.execution_blocked is False
+    assert revision.execution_blocked_reason is None
+    assert task.interaction_state == "understanding"
+    assert task.aoi is not None
+    assert task.aoi.source_file_id == "file_vector"
