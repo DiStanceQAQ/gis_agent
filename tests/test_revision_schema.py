@@ -15,3 +15,6 @@ def test_revision_tables_are_registered() -> None:
     assert "execution_blocked" in revisions.c
     assert "execution_blocked_reason" in revisions.c
     assert "field_confidences_json" in revisions.c
+
+    revision_index_names = {index.name for index in revisions.indexes}
+    assert "ux_task_spec_revisions_active" in revision_index_names

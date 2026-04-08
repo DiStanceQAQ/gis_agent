@@ -40,6 +40,7 @@ def upgrade() -> None:
         sa.Column("user_last_revision_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     )
+    op.create_index("ix_task_spec_revisions_source_message_id", "task_spec_revisions", ["source_message_id"])
     op.create_index("ix_task_spec_revisions_task_active", "task_spec_revisions", ["task_id", "is_active"])
     op.create_index("ix_task_spec_revisions_task_created", "task_spec_revisions", ["task_id", "created_at"])
     op.create_index("ux_task_spec_revisions_task_revision", "task_spec_revisions", ["task_id", "revision_number"], unique=True)
@@ -86,6 +87,7 @@ def downgrade() -> None:
     op.execute("DROP INDEX IF EXISTS ux_task_spec_revisions_active")
     op.drop_index("ix_task_spec_revisions_task_created", table_name="task_spec_revisions")
     op.drop_index("ix_task_spec_revisions_task_active", table_name="task_spec_revisions")
+    op.drop_index("ix_task_spec_revisions_source_message_id", table_name="task_spec_revisions")
     op.drop_index("ux_task_spec_revisions_task_revision", table_name="task_spec_revisions")
     op.drop_table("task_spec_revisions")
 

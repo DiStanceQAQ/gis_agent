@@ -4,7 +4,7 @@ from datetime import datetime
 
 from geoalchemy2 import Geometry
 from geoalchemy2.elements import WKBElement
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, func, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from packages.domain.database import Base
@@ -142,6 +142,12 @@ class TaskSpecRevisionRecord(Base):
         Index("ix_task_spec_revisions_task_active", "task_id", "is_active"),
         Index("ix_task_spec_revisions_task_created", "task_id", "created_at"),
         Index("ux_task_spec_revisions_task_revision", "task_id", "revision_number", unique=True),
+        Index(
+            "ux_task_spec_revisions_active",
+            "task_id",
+            unique=True,
+            postgresql_where=text("is_active = true"),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)

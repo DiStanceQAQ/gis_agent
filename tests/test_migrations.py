@@ -50,4 +50,5 @@ def test_revision_migration_creates_expected_indexes() -> None:
 
     assert "ix_task_spec_revisions_task_active" in migration
     assert "ix_task_spec_revisions_task_created" in migration
+    assert "ix_task_spec_revisions_source_message_id" in migration
     assert "ix_message_understandings_derived_revision_id" in migration
