@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 from geoalchemy2.elements import WKTElement
 import pytest
 from sqlalchemy.orm import Session
@@ -14,13 +17,18 @@ from packages.domain.models import (
 )
 from packages.domain.services.input_slots import classify_uploaded_inputs
 from packages.domain.services.orchestrator import (
+    _build_task,
     _build_initial_operation_plan,
     _build_initial_revision_understanding,
     _merge_task_spec,
+    create_message_and_task,
     get_task_detail,
     should_inherit_original_aoi,
 )
+from packages.domain.services.planner import TaskPlan, TaskPlanStep
+from packages.domain.services.task_revisions import get_active_revision
 from packages.domain.utils import make_id
+from packages.schemas.message import MessageCreateRequest
 from packages.schemas.task import ParsedTaskSpec, TaskPlanResponse
 
 
@@ -478,3 +486,170 @@ def test_get_task_detail_includes_lazy_materialized_initial_revision(
     assert detail.active_revision.revision_number == 1
     assert detail.active_revision.change_type == "legacy_backfill"
     assert [revision.revision_number for revision in detail.revisions] == [1]
+
+
+def test_build_task_marks_invalid_uploaded_aoi_as_execution_blocked(
+    db_session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = SessionRecord(id=make_id("ses"), title="invalid-upload", status="active")
+    message = MessageRecord(id=make_id("msg"), session_id=session.id, role="user", content="上传边界")
+    invalid_geojson = tmp_path / "invalid.geojson"
+    invalid_geojson.write_text(
+        json.dumps(
+            {
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "properties": {"name": "bad-aoi"},
+                        "geometry": {"type": "Point", "coordinates": [116.4, 39.9]},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    uploaded = UploadedFileRecord(
+        id=make_id("file"),
+        session_id=session.id,
+        original_name="invalid.geojson",
+        file_type="geojson",
+        storage_key=str(invalid_geojson),
+        size_bytes=invalid_geojson.stat().st_size,
+        checksum="checksum",
+    )
+    db_session.add_all([session, message, uploaded])
+    db_session.flush()
+
+    monkeypatch.setattr(
+        "packages.domain.services.orchestrator.build_task_plan",
+        lambda parsed, task_id=None, db_session=None: TaskPlan(  # noqa: ARG005
+            version="agent-v2",
+            mode="llm_plan_execute_gis_workspace",
+            status="ready",
+            objective="clip",
+            reasoning_summary="clip",
+            missing_fields=[],
+            steps=[
+                TaskPlanStep(
+                    step_name="plan_task",
+                    tool_name="planner.build",
+                    title="规划任务",
+                    purpose="生成任务计划",
+                )
+            ],
+        ),
+    )
+
+    task = _build_task(
+        db=db_session,
+        session_id=session.id,
+        user_message_id=message.id,
+        parsed=ParsedTaskSpec(
+            aoi_input="uploaded_aoi",
+            aoi_source_type="file_upload",
+            analysis_type="WORKFLOW",
+            preferred_output=["png_map"],
+            user_priority="balanced",
+        ),
+        uploaded_files=[uploaded],
+        require_approval=False,
+    )
+
+    active_revision = get_active_revision(db_session, task.id)
+
+    assert task.status == "waiting_clarification"
+    assert task.interaction_state == "execution_blocked"
+    assert task.task_spec is not None
+    assert task.task_spec.need_confirmation is True
+    assert "AOI normalization failed" in (task.task_spec.raw_spec_json.get("clarification_message") or "")
+    assert active_revision is not None
+    assert active_revision.execution_blocked is True
+    assert active_revision.response_mode == "ask_missing_fields"
+
+
+def test_create_message_and_task_surfaces_blocked_uploaded_aoi_as_clarification(
+    db_session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = SessionRecord(id=make_id("ses"), title="blocked-response", status="active")
+    invalid_geojson = tmp_path / "invalid.geojson"
+    invalid_geojson.write_text(
+        json.dumps(
+            {
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "properties": {"name": "bad-aoi"},
+                        "geometry": {"type": "Point", "coordinates": [116.4, 39.9]},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    uploaded = UploadedFileRecord(
+        id=make_id("file"),
+        session_id=session.id,
+        original_name="invalid.geojson",
+        file_type="geojson",
+        storage_key=str(invalid_geojson),
+        size_bytes=invalid_geojson.stat().st_size,
+        checksum="checksum",
+    )
+    db_session.add_all([session, uploaded])
+    db_session.commit()
+
+    monkeypatch.setattr(
+        "packages.domain.services.orchestrator.parse_task_message",
+        lambda message, has_upload, task_id=None, db_session=None: ParsedTaskSpec(  # noqa: ARG005
+            aoi_input="uploaded_aoi",
+            aoi_source_type="file_upload",
+            analysis_type="WORKFLOW",
+            preferred_output=["png_map"],
+            user_priority="balanced",
+        ),
+    )
+    monkeypatch.setattr(
+        "packages.domain.services.orchestrator.build_task_plan",
+        lambda parsed, task_id=None, db_session=None: TaskPlan(  # noqa: ARG005
+            version="agent-v2",
+            mode="llm_plan_execute_gis_workspace",
+            status="ready",
+            objective="clip",
+            reasoning_summary="clip",
+            missing_fields=[],
+            steps=[
+                TaskPlanStep(
+                    step_name="plan_task",
+                    tool_name="planner.build",
+                    title="规划任务",
+                    purpose="生成任务计划",
+                )
+            ],
+        ),
+    )
+
+    response = create_message_and_task(
+        db_session,
+        MessageCreateRequest(
+            session_id=session.id,
+            content="用我上传的边界文件作为 AOI",
+            file_ids=[uploaded.id],
+        ),
+        require_approval=False,
+    )
+
+    detail = get_task_detail(db_session, response.task_id or "")
+
+    assert response.task_id is not None
+    assert response.need_clarification is True
+    assert response.task_status == "waiting_clarification"
+    assert "AOI normalization failed" in (response.clarification_message or "")
+    assert detail.interaction_state == "execution_blocked"
+    assert detail.active_revision is not None
+    assert detail.active_revision.execution_blocked is True

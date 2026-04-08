@@ -26,6 +26,7 @@ from packages.domain.models import (
 from packages.domain.services.aoi import (
     build_named_aoi_clarification_message,
     clone_task_aoi,
+    normalize_active_revision_aoi,
     normalize_task_aoi,
     upsert_task_aoi,
 )
@@ -1004,6 +1005,7 @@ def _build_task(
     existing_task: TaskRunRecord | None = None,
 ) -> TaskRunRecord:
     safe_parsed = parsed
+    defer_revision_aoi_normalization = safe_parsed.aoi_source_type == "file_upload"
     upload_slots = classify_uploaded_inputs(uploaded_files or [])
     parser_error_code, parser_error_message = extract_parser_failure_error(safe_parsed)
     if existing_task is None:
@@ -1060,16 +1062,17 @@ def _build_task(
         task_spec.raw_spec_json = _build_task_spec_raw_payload(safe_parsed, upload_slots)
     db.flush()
 
-    normalized_aoi = normalize_task_aoi(task=task, uploaded_files=uploaded_files)
-    if normalized_aoi is not None:
-        upsert_task_aoi(task=task, normalized_aoi=normalized_aoi)
-    elif inherited_aoi is not None:
-        clone_task_aoi(task=task, original_aoi=inherited_aoi)
-    elif safe_parsed.aoi_input and safe_parsed.aoi_source_type in {"admin_name", "place_alias"}:
-        safe_parsed = _require_named_aoi_clarification(safe_parsed)
-        task.status = TASK_STATUS_WAITING_CLARIFICATION
-        task_spec.need_confirmation = True
-        task_spec.raw_spec_json = _build_task_spec_raw_payload(safe_parsed, upload_slots)
+    if not defer_revision_aoi_normalization:
+        normalized_aoi = normalize_task_aoi(task=task, uploaded_files=uploaded_files)
+        if normalized_aoi is not None:
+            upsert_task_aoi(task=task, normalized_aoi=normalized_aoi)
+        elif inherited_aoi is not None:
+            clone_task_aoi(task=task, original_aoi=inherited_aoi)
+        elif safe_parsed.aoi_input and safe_parsed.aoi_source_type in {"admin_name", "place_alias"}:
+            safe_parsed = _require_named_aoi_clarification(safe_parsed)
+            task.status = TASK_STATUS_WAITING_CLARIFICATION
+            task_spec.need_confirmation = True
+            task_spec.raw_spec_json = _build_task_spec_raw_payload(safe_parsed, upload_slots)
 
     try:
         task_plan = build_task_plan(safe_parsed, task_id=task.id, db_session=db)
@@ -1131,6 +1134,36 @@ def _build_task(
         else "confirm_understanding"
     )
     activate_revision(db, task=task, revision=revision)
+
+    if defer_revision_aoi_normalization:
+        refresh_result = normalize_active_revision_aoi(
+            db,
+            task=task,
+            revision=revision,
+            uploaded_files=uploaded_files,
+        )
+        if refresh_result.execution_blocked:
+            blocked_reason = revision.execution_blocked_reason or "AOI normalization failed."
+            blocked_missing_fields = list(safe_parsed.missing_fields)
+            if "aoi_boundary" not in blocked_missing_fields:
+                blocked_missing_fields.append("aoi_boundary")
+            safe_parsed = safe_parsed.model_copy(
+                update={
+                    "need_confirmation": True,
+                    "missing_fields": blocked_missing_fields,
+                    "clarification_message": blocked_reason,
+                }
+            )
+            task_spec.need_confirmation = True
+            task_spec.raw_spec_json = _build_task_spec_raw_payload(safe_parsed, upload_slots)
+            revision.response_mode = "ask_missing_fields"
+            revision.response_payload_json = {
+                "response_mode": "ask_missing_fields",
+                "execution_blocked": True,
+                "blocked_reason": blocked_reason,
+            }
+            task.last_response_mode = "ask_missing_fields"
+            db.flush()
 
     append_task_event(
         db,
