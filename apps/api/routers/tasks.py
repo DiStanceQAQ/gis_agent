@@ -1,11 +1,12 @@
+import asyncio
 import json
-import time
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from apps.api.deps import get_db
+from packages.domain.database import SessionLocal
 from packages.domain.services.orchestrator import (
     approve_task_plan,
     get_task_detail,
@@ -53,26 +54,29 @@ def _encode_sse(*, event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+def _load_task_events_payload(task_id: str, since_id: int) -> TaskEventsResponse:
+    with SessionLocal() as db:
+        return get_task_events(db=db, task_id=task_id, since_id=since_id)
+
+
 @router.get(
     "/tasks/{task_id}/events/stream",
     responses={400: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
 )
-def stream_task_events_endpoint(
+async def stream_task_events_endpoint(
     task_id: str,
     since_id: int = Query(default=0, ge=0),
     poll_interval_ms: int = Query(default=800, ge=100, le=10000),
     max_events: int | None = Query(default=None, ge=1, le=1000),
-    db: Session = Depends(get_db),
 ) -> StreamingResponse:
     # Validate task existence and cursor before opening stream.
-    get_task_events(db=db, task_id=task_id, since_id=since_id)
-    local_since = since_id
+    _load_task_events_payload(task_id, since_id)
 
-    def _event_iter():
-        nonlocal local_since
+    async def _event_iter():
+        local_since = since_id
         emitted = 0
         while True:
-            payload = get_task_events(db=db, task_id=task_id, since_id=local_since)
+            payload = await asyncio.to_thread(_load_task_events_payload, task_id, local_since)
             if payload.events:
                 for event in payload.events:
                     yield _encode_sse(event="task_event", data=event.model_dump(mode="json"))
@@ -85,7 +89,7 @@ def stream_task_events_endpoint(
 
             if max_events is not None and emitted >= max_events:
                 return
-            time.sleep(poll_interval_ms / 1000)
+            await asyncio.sleep(poll_interval_ms / 1000)
 
     return StreamingResponse(
         _event_iter(),

@@ -387,8 +387,14 @@ def _resolve_chat_upload_files(
 ) -> list[UploadedFileRecord]:
     if preferred_file_ids:
         try:
-            return _load_uploaded_files_by_payload_order(db, file_ids=preferred_file_ids)
-        except AppError:
+            return _load_uploaded_files_by_payload_order(
+                db,
+                file_ids=preferred_file_ids,
+                session_id=session_id,
+            )
+        except AppError as exc:
+            if exc.error_code != ErrorCode.FILE_NOT_FOUND:
+                raise
             logger.warning(
                 "chat.upload_files_from_payload_failed",
                 extra={"session_id": session_id, "file_ids": preferred_file_ids},
@@ -553,6 +559,7 @@ def _load_uploaded_files_by_payload_order(
     db: Session,
     *,
     file_ids: list[str],
+    session_id: str | None = None,
 ) -> list[UploadedFileRecord]:
     files = db.query(UploadedFileRecord).filter(UploadedFileRecord.id.in_(file_ids)).all()
     files_by_id = {record.id: record for record in files}
@@ -563,6 +570,18 @@ def _load_uploaded_files_by_payload_order(
             message="One or more uploaded files were not found.",
             detail={"file_ids": missing_file_ids},
         )
+    if session_id is not None:
+        invalid_file_ids = [
+            file_id
+            for file_id in file_ids
+            if files_by_id[file_id].session_id != session_id
+        ]
+        if invalid_file_ids:
+            raise AppError.bad_request(
+                error_code=ErrorCode.BAD_REQUEST,
+                message="One or more uploaded files do not belong to the current session.",
+                detail={"session_id": session_id, "file_ids": invalid_file_ids},
+            )
     return [files_by_id[file_id] for file_id in file_ids]
 
 
@@ -976,7 +995,11 @@ def create_message_and_task(
 
     files = []
     if payload.file_ids:
-        files = _load_uploaded_files_by_payload_order(db, file_ids=payload.file_ids)
+        files = _load_uploaded_files_by_payload_order(
+            db,
+            file_ids=payload.file_ids,
+            session_id=payload.session_id,
+        )
 
     if existing_user_message is None:
         message = _persist_message(
@@ -1212,15 +1235,27 @@ def create_message(db: Session, payload: MessageCreateRequest) -> MessageCreateR
         intent_result.intent == "task"
         and intent_result.confidence >= settings.intent_task_confidence_threshold
     ):
-        return _create_chat_mode_response(
-            db,
-            user_message_id=message.id,
-            session_id=payload.session_id,
-            assistant_message=TASK_CONFIRMATION_PROMPT,
-            intent=intent_result.intent,
-            intent_confidence=intent_result.confidence,
-            awaiting_task_confirmation=True,
+        if settings.intent_task_confirmation_required:
+            return _create_chat_mode_response(
+                db,
+                user_message_id=message.id,
+                session_id=payload.session_id,
+                assistant_message=TASK_CONFIRMATION_PROMPT,
+                intent=intent_result.intent,
+                intent_confidence=intent_result.confidence,
+                awaiting_task_confirmation=True,
+            )
+
+        task_response = create_message_and_task(
+            db=db,
+            payload=payload,
+            existing_user_message=message,
+            task_request_content=payload.content,
         )
+        task_response.intent = intent_result.intent
+        task_response.intent_confidence = intent_result.confidence
+        task_response.awaiting_task_confirmation = False
+        return task_response
 
     assistant_message = generate_chat_reply(
         user_message=payload.content,

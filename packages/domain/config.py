@@ -63,6 +63,7 @@ class Settings(BaseSettings):
     agent_step_react_timeout_seconds: int = 30
     intent_router_enabled: bool = True
     intent_task_confidence_threshold: float = 0.75
+    intent_task_confirmation_required: bool = False
     intent_history_limit: int = 8
     intent_confirmation_keywords: str = "开始执行,按这个执行,确认执行,就按这个来"
     local_files_only_mode: bool = True

@@ -17,6 +17,7 @@ def test_intent_router_defaults_are_enabled(monkeypatch: pytest.MonkeyPatch) -> 
     for name in (
         "GIS_AGENT_INTENT_ROUTER_ENABLED",
         "GIS_AGENT_INTENT_TASK_CONFIDENCE_THRESHOLD",
+        "GIS_AGENT_INTENT_TASK_CONFIRMATION_REQUIRED",
         "GIS_AGENT_INTENT_HISTORY_LIMIT",
         "GIS_AGENT_INTENT_CONFIRMATION_KEYWORDS",
     ):
@@ -26,6 +27,7 @@ def test_intent_router_defaults_are_enabled(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert settings.intent_router_enabled is True
     assert settings.intent_task_confidence_threshold == 0.75
+    assert settings.intent_task_confirmation_required is False
     assert settings.intent_history_limit == 8
     assert settings.intent_confirmation_keywords == "开始执行,按这个执行,确认执行,就按这个来"
 

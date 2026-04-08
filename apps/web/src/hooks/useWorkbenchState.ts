@@ -237,79 +237,13 @@ export function useWorkbenchState() {
 
   const activeTaskIdRef = useRef<string | null>(null);
   const refreshInFlightRef = useRef(false);
+  const refreshQueuedRef = useRef(false);
   const streamCursorRef = useRef(0);
-  const assistantStreamTimerRef = useRef<number | null>(null);
-  const streamPlaybackIntervalRef = useRef<number | null>(null);
-  const streamPlaybackQueueRef = useRef("");
-  const streamPlaybackDoneRef = useRef(false);
-  const streamPlaybackResolverRef = useRef<(() => void) | null>(null);
   const mapFocusNonceRef = useRef(0);
 
   const pushMapFocusRequest = useCallback((kind: MapFocusRequest["kind"], id: string): void => {
     mapFocusNonceRef.current += 1;
     setMapFocusRequest({ kind, id, nonce: mapFocusNonceRef.current });
-  }, []);
-
-  const clearAssistantStreamTimer = useCallback(() => {
-    if (assistantStreamTimerRef.current !== null) {
-      window.clearTimeout(assistantStreamTimerRef.current);
-      assistantStreamTimerRef.current = null;
-    }
-  }, []);
-
-  const stopStreamPlayback = useCallback(() => {
-    if (streamPlaybackIntervalRef.current !== null) {
-      window.clearInterval(streamPlaybackIntervalRef.current);
-      streamPlaybackIntervalRef.current = null;
-    }
-  }, []);
-
-  const resetStreamPlayback = useCallback(() => {
-    stopStreamPlayback();
-    streamPlaybackQueueRef.current = "";
-    streamPlaybackDoneRef.current = false;
-    if (streamPlaybackResolverRef.current) {
-      streamPlaybackResolverRef.current();
-      streamPlaybackResolverRef.current = null;
-    }
-  }, [stopStreamPlayback]);
-
-  const startStreamPlayback = useCallback((): Promise<void> => {
-    resetStreamPlayback();
-    setStreamingAssistantMessage("");
-
-    return new Promise<void>((resolve) => {
-      streamPlaybackResolverRef.current = resolve;
-      streamPlaybackIntervalRef.current = window.setInterval(() => {
-        const pending = streamPlaybackQueueRef.current;
-        if (pending.length > 0) {
-          const take = 1;
-          const chunk = pending.slice(0, take);
-          streamPlaybackQueueRef.current = pending.slice(take);
-          setStreamingAssistantMessage((current) => `${current ?? ""}${chunk}`);
-          return;
-        }
-
-        if (streamPlaybackDoneRef.current) {
-          stopStreamPlayback();
-          streamPlaybackResolverRef.current = null;
-          resolve();
-        }
-      }, 24);
-    });
-  }, [resetStreamPlayback, stopStreamPlayback]);
-
-  const enqueueStreamDelta = useCallback((delta: string) => {
-    streamPlaybackQueueRef.current += delta;
-  }, []);
-
-  const finishStreamPlayback = useCallback(() => {
-    streamPlaybackDoneRef.current = true;
-    if (streamPlaybackIntervalRef.current === null && streamPlaybackResolverRef.current) {
-      const resolve = streamPlaybackResolverRef.current;
-      streamPlaybackResolverRef.current = null;
-      resolve();
-    }
   }, []);
 
   useEffect(() => {
@@ -319,13 +253,6 @@ export function useWorkbenchState() {
   useEffect(() => {
     streamCursorRef.current = streamCursor;
   }, [streamCursor]);
-
-  useEffect(() => {
-    return () => {
-      clearAssistantStreamTimer();
-      resetStreamPlayback();
-    };
-  }, [clearAssistantStreamTimer, resetStreamPlayback]);
 
   const loadLatestMessages = useCallback(async (targetSessionId: string): Promise<void> => {
     setIsLoadingMessages(true);
@@ -362,28 +289,42 @@ export function useWorkbenchState() {
 
   const refreshTaskState = useCallback(async (targetTaskId?: string | null): Promise<void> => {
     const nextTaskId = targetTaskId ?? activeTaskIdRef.current;
-    if (!nextTaskId || refreshInFlightRef.current) {
+    if (!nextTaskId) {
+      return;
+    }
+    if (refreshInFlightRef.current) {
+      refreshQueuedRef.current = true;
       return;
     }
 
     refreshInFlightRef.current = true;
     try {
-      const [detail, eventsResponse] = await Promise.all([getTask(nextTaskId), getTaskEvents(nextTaskId)]);
+      const [detail, eventsResponse] = await Promise.all([
+        getTask(nextTaskId),
+        getTaskEvents(nextTaskId, streamCursorRef.current),
+      ]);
       if (activeTaskIdRef.current !== nextTaskId) {
         return;
       }
       startTransition(() => {
         setTask(detail);
-        setTaskEventsCount(eventsResponse.events.length);
+        if (eventsResponse.events.length > 0) {
+          setTaskEventsCount((current) => current + eventsResponse.events.length);
+        }
         setTaskHistory((current) => upsertTaskHistory(current, detail));
         setStreamCursor(eventsResponse.next_cursor);
       });
+      streamCursorRef.current = eventsResponse.next_cursor;
     } catch (error) {
       if (activeTaskIdRef.current === nextTaskId) {
         setSubmitError(error instanceof Error ? error.message : "任务状态获取失败。");
       }
     } finally {
       refreshInFlightRef.current = false;
+      if (refreshQueuedRef.current) {
+        refreshQueuedRef.current = false;
+        void refreshTaskState(nextTaskId);
+      }
     }
   }, []);
 
@@ -407,8 +348,9 @@ export function useWorkbenchState() {
       if (event.event_id <= streamCursorRef.current) {
         return;
       }
-      setStreamCursor(event.event_id);
-      streamCursorRef.current = event.event_id;
+      const nextCursor = Math.max(streamCursorRef.current, event.event_id);
+      setStreamCursor(nextCursor);
+      streamCursorRef.current = nextCursor;
       setTaskEventsCount((current) => current + 1);
       void refreshTaskState(taskId);
     },
@@ -549,16 +491,13 @@ export function useWorkbenchState() {
     setMessages((current) => mergeSessionMessages(current, [optimisticUserMessage], false));
     setComposerText("");
 
-    clearAssistantStreamTimer();
-    resetStreamPlayback();
     setStreamingAssistantMessage(null);
     setIsSubmitting(true);
     setSubmitError(null);
     setNotice(null);
 
     try {
-      let streamPlaybackPromise: Promise<void> | null = null;
-      let streamPlaybackActive = false;
+      let hasDelta = false;
       let streamedAssistant = "";
       const response = await createMessageStream(
         {
@@ -568,41 +507,25 @@ export function useWorkbenchState() {
         },
         {
           onDelta: (text) => {
+            hasDelta = true;
             streamedAssistant += text;
-            if (!streamPlaybackActive) {
-              streamPlaybackPromise = startStreamPlayback();
-              streamPlaybackActive = true;
-            }
-            enqueueStreamDelta(text);
+            setStreamingAssistantMessage((current) => `${current ?? ""}${text}`);
           },
         },
       );
 
       if (response.mode === "task" && response.task_id) {
-        if (streamPlaybackActive) {
-          finishStreamPlayback();
-          await streamPlaybackPromise;
-        }
         setStreamingAssistantMessage(null);
         await Promise.all([hydrateTask(response.task_id), loadLatestMessages(sessionId)]);
         if (response.need_clarification && !response.assistant_message) {
           setNotice(response.clarification_message ?? "任务需要补充信息后才能继续执行。");
         }
       } else {
-        if (!streamPlaybackActive && response.assistant_message) {
-          streamedAssistant = response.assistant_message;
-          streamPlaybackPromise = startStreamPlayback();
-          streamPlaybackActive = true;
-          enqueueStreamDelta(response.assistant_message);
-        }
-
-        if (streamPlaybackActive) {
-          finishStreamPlayback();
-          await streamPlaybackPromise;
-        }
-
         const finalAssistantText = streamedAssistant || response.assistant_message || "";
         if (finalAssistantText) {
+          if (!hasDelta) {
+            setStreamingAssistantMessage(finalAssistantText);
+          }
           const optimisticAssistantMessage: SessionMessage = {
             message_id: `local_assistant_${Date.now()}`,
             role: "assistant",
@@ -623,7 +546,6 @@ export function useWorkbenchState() {
       }
     } catch (error) {
       setSubmitError(error instanceof Error ? error.message : "任务提交失败。");
-      resetStreamPlayback();
       setStreamingAssistantMessage(null);
     } finally {
       setIsSubmitting(false);

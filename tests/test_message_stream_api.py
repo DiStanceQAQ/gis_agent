@@ -56,7 +56,9 @@ def test_message_stream_chat_mode_emits_delta_and_final_payload(monkeypatch) -> 
             raw = "".join(chunk.decode("utf-8") for chunk in response.iter_raw())
 
     parsed = _parse_sse(raw)
-    assert parsed[0][0] == "delta"
+    event_names = [name for name, _ in parsed]
+    assert "ready" in event_names
+    assert "delta" in event_names
     assert parsed[-2][0] == "message"
     assert parsed[-2][1]["mode"] == "chat"
     assert parsed[-1][0] == "done"
@@ -94,5 +96,5 @@ def test_message_stream_task_mode_emits_final_payload_without_delta(monkeypatch)
     parsed = _parse_sse(raw)
     event_names = [name for name, _ in parsed]
     assert "delta" not in event_names
-    assert event_names == ["message", "done"]
-    assert parsed[0][1]["task_id"] == "task_stream_1"
+    assert event_names == ["ready", "message", "done"]
+    assert parsed[1][1]["task_id"] == "task_stream_1"

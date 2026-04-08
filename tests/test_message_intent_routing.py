@@ -41,6 +41,7 @@ CLIP_TASK_REQUEST = "请把 /Users/ljn/gis_data/CACD-2020.tif 裁剪到新疆范
 @pytest.fixture(autouse=True)
 def _patched_message_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(orchestrator, "_queue_or_run", lambda task_id: None)
+    monkeypatch.setattr(get_settings(), "intent_task_confirmation_required", True)
     monkeypatch.setattr(
         orchestrator, "generate_chat_reply", lambda **kwargs: "当然可以，我们先聊聊。"
     )
@@ -331,6 +332,30 @@ def test_high_confidence_task_request_prompts_confirmation_without_creating_task
         _cleanup_session(session_id)
 
 
+def test_high_confidence_task_request_executes_directly_when_confirmation_disabled(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(get_settings(), "intent_task_confirmation_required", False)
+    session_id = _create_session()
+    try:
+        payload = _post_message(client, session_id, TASK_REQUEST)
+
+        assert payload["mode"] == "task"
+        assert payload["task_id"]
+        assert payload["task_status"] == TASK_STATUS_AWAITING_APPROVAL
+        assert payload["awaiting_task_confirmation"] is False
+        assert payload["intent"] == "task"
+        assert payload["intent_confidence"] == 0.95
+
+        with SessionLocal() as db:
+            assert (
+                db.query(TaskRunRecord).filter(TaskRunRecord.session_id == session_id).count() == 1
+            )
+    finally:
+        _cleanup_session(session_id)
+
+
 def test_chat_with_uploaded_files_keeps_chat_mode_until_user_confirms_execution(
     client: TestClient,
 ) -> None:
@@ -358,6 +383,28 @@ def test_chat_with_uploaded_files_keeps_chat_mode_until_user_confirms_execution(
             )
     finally:
         _cleanup_session(session_id)
+
+
+def test_message_rejects_file_ids_from_other_session(client: TestClient) -> None:
+    session_id = _create_session()
+    other_session_id = _create_session()
+    try:
+        other_file_id = _create_uploaded_vector_file(other_session_id, file_id="file_other_session")
+        response = client.post(
+            "/api/v1/messages",
+            json={
+                "session_id": session_id,
+                "content": "你能读到我上传的文件吗？",
+                "file_ids": [other_file_id],
+            },
+        )
+        assert response.status_code == 400
+        payload = response.json()
+        assert payload["error"]["code"] == "bad_request"
+        assert other_file_id in payload["error"]["detail"]["file_ids"]
+    finally:
+        _cleanup_session(session_id)
+        _cleanup_session(other_session_id)
 
 
 def test_explicit_confirmation_uses_latest_request_and_creates_task(client: TestClient) -> None:
