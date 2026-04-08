@@ -15,6 +15,7 @@ from packages.domain.models import (
     UploadedFileRecord,
 )
 from packages.domain.services.conversation_context import build_conversation_context
+from packages.domain.services.task_revisions import get_active_revision
 from packages.domain.utils import make_id
 
 
@@ -186,6 +187,141 @@ def test_build_conversation_context_prioritizes_active_revision_and_preferred_up
     assert [item["id"] for item in bundle.uploaded_files[:2]] == [preferred_upload.id, recent_upload.id]
     assert source_message.id in {item["id"] for item in bundle.relevant_messages}
     assert bundle.trace["latest_active_task"]["task_id"] == task.id
+    assert bundle.trace["selected_files"][0]["file_id"] == preferred_upload.id
+
+
+def test_build_conversation_context_backfills_latest_legacy_task_revision(
+    db_session: Session,
+) -> None:
+    session = _create_session(db_session)
+    source_message = _create_message(
+        db_session,
+        session_id=session.id,
+        content="请基于我刚上传的边界文件分析 2024 年 6 月 NDVI。",
+    )
+    task = TaskRunRecord(
+        id=make_id("task"),
+        session_id=session.id,
+        user_message_id=source_message.id,
+        current_step="parse_task",
+        status="queued",
+        analysis_type="NDVI",
+    )
+    db_session.add(task)
+    db_session.flush()
+    task_spec = TaskSpecRecord(
+        task_id=task.id,
+        aoi_input="uploaded_aoi",
+        aoi_source_type="file_upload",
+        preferred_output=["png_map"],
+        user_priority="balanced",
+        need_confirmation=False,
+        raw_spec_json={
+            "aoi_input": "uploaded_aoi",
+            "aoi_source_type": "file_upload",
+            "time_range": {"start": "2024-06-01", "end": "2024-06-30"},
+            "upload_slots": {"input_vector_file_id": "file_preferred"},
+        },
+    )
+    db_session.add(task_spec)
+    db_session.flush()
+    current_message = _create_message(
+        db_session,
+        session_id=session.id,
+        content="继续用刚才那份边界文件。",
+        created_at=datetime.now(timezone.utc) + timedelta(minutes=1),
+    )
+
+    bundle = build_conversation_context(
+        db_session,
+        session_id=session.id,
+        message_id=current_message.id,
+        message_content=current_message.content,
+    )
+
+    active_revision = get_active_revision(db_session, task.id)
+    assert active_revision is not None
+    assert bundle.latest_active_task_id == task.id
+    assert bundle.latest_active_revision_id == active_revision.id
+    assert bundle.latest_active_revision_summary is None
+    assert bundle.trace["latest_active_task"]["task_id"] == task.id
+    assert bundle.trace["latest_active_revision"]["revision_id"] == active_revision.id
+
+
+def test_build_conversation_context_keeps_preferred_uploads_even_when_older(
+    db_session: Session,
+) -> None:
+    session = _create_session(db_session)
+    source_message = _create_message(
+        db_session,
+        session_id=session.id,
+        content="请基于我刚上传的边界文件分析 2024 年 6 月 NDVI。",
+    )
+    _seed_active_task(db_session, session=session, source_message=source_message)
+    preferred_upload = _create_upload(
+        db_session,
+        session_id=session.id,
+        original_name="preferred-old.shp",
+        file_type="shp",
+        storage_key="/tmp/preferred-old.shp",
+        created_at=datetime.now(timezone.utc) - timedelta(minutes=20),
+    )
+    _create_upload(
+        db_session,
+        session_id=session.id,
+        original_name="newer-1.geojson",
+        file_type="geojson",
+        storage_key="/tmp/newer-1.geojson",
+        created_at=datetime.now(timezone.utc) - timedelta(minutes=4),
+    )
+    _create_upload(
+        db_session,
+        session_id=session.id,
+        original_name="newer-2.geojson",
+        file_type="geojson",
+        storage_key="/tmp/newer-2.geojson",
+        created_at=datetime.now(timezone.utc) - timedelta(minutes=3),
+    )
+    _create_upload(
+        db_session,
+        session_id=session.id,
+        original_name="newer-3.geojson",
+        file_type="geojson",
+        storage_key="/tmp/newer-3.geojson",
+        created_at=datetime.now(timezone.utc) - timedelta(minutes=2),
+    )
+    _create_upload(
+        db_session,
+        session_id=session.id,
+        original_name="newer-4.geojson",
+        file_type="geojson",
+        storage_key="/tmp/newer-4.geojson",
+        created_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+    )
+    _create_upload(
+        db_session,
+        session_id=session.id,
+        original_name="newer-5.geojson",
+        file_type="geojson",
+        storage_key="/tmp/newer-5.geojson",
+        created_at=datetime.now(timezone.utc),
+    )
+    current_message = _create_message(
+        db_session,
+        session_id=session.id,
+        content="继续用刚才那份边界文件。",
+        created_at=datetime.now(timezone.utc) + timedelta(minutes=1),
+    )
+
+    bundle = build_conversation_context(
+        db_session,
+        session_id=session.id,
+        message_id=current_message.id,
+        message_content=current_message.content,
+        preferred_file_ids=[preferred_upload.id],
+    )
+
+    assert bundle.uploaded_files[0]["id"] == preferred_upload.id
     assert bundle.trace["selected_files"][0]["file_id"] == preferred_upload.id
 
 

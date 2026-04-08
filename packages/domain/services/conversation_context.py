@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from packages.domain.models import MessageRecord, TaskRunRecord, TaskSpecRevisionRecord, UploadedFileRecord
 from packages.domain.services.aoi import parse_bbox_text
 from packages.domain.services.intent import is_task_confirmation_message
+from packages.domain.services.task_revisions import ensure_initial_revision_for_task
 
 
 UPLOAD_HINT_PATTERN = re.compile(
@@ -87,7 +88,12 @@ def build_conversation_context(
             {
                 "task_id": latest_active_task.id,
                 "revision_id": latest_active_revision.id if latest_active_revision else None,
-                "reason": "latest session task with an active revision",
+                "reason": (
+                    "latest session task backfilled from legacy task_spec"
+                    if latest_active_revision is not None
+                    and latest_active_revision.change_type == "legacy_backfill"
+                    else "latest session task with an active revision"
+                ),
             }
             if latest_active_task is not None
             else None
@@ -97,7 +103,11 @@ def build_conversation_context(
                 "revision_id": latest_active_revision.id,
                 "task_id": latest_active_revision.task_id,
                 "summary": latest_active_revision.understanding_summary,
-                "reason": "most recent active revision in the session",
+                "reason": (
+                    "lazy backfill from the latest legacy task_spec"
+                    if latest_active_revision.change_type == "legacy_backfill"
+                    else "most recent active revision in the session"
+                ),
             }
             if latest_active_revision is not None
             else None
@@ -151,9 +161,27 @@ def _load_latest_active_revision(
         .first()
     )
     if row is None:
-        return None, None
+        legacy_task = _load_latest_session_task_with_spec(db, session_id=session_id)
+        if legacy_task is None:
+            return None, None
+        revision = ensure_initial_revision_for_task(db, legacy_task)
+        return legacy_task, revision
     revision, task = row
     return task, revision
+
+
+def _load_latest_session_task_with_spec(
+    db: Session,
+    *,
+    session_id: str,
+) -> TaskRunRecord | None:
+    return (
+        db.query(TaskRunRecord)
+        .join(TaskRunRecord.task_spec)
+        .filter(TaskRunRecord.session_id == session_id)
+        .order_by(TaskRunRecord.created_at.desc(), TaskRunRecord.id.desc())
+        .first()
+    )
 
 
 def _select_recent_uploads(
@@ -164,6 +192,18 @@ def _select_recent_uploads(
     preferred_file_ids: list[str],
     limit: int = 5,
 ) -> list[UploadedFileRecord]:
+    ordered: list[UploadedFileRecord] = []
+    seen_ids: set[str] = set()
+
+    for record in _load_preferred_uploads(
+        db,
+        session_id=session_id,
+        preferred_file_ids=preferred_file_ids,
+        before_created_at=before_created_at,
+    ):
+        ordered.append(record)
+        seen_ids.add(record.id)
+
     query = db.query(UploadedFileRecord).filter(UploadedFileRecord.session_id == session_id)
     if before_created_at is not None:
         query = query.filter(UploadedFileRecord.created_at <= before_created_at)
@@ -172,23 +212,37 @@ def _select_recent_uploads(
         .limit(limit)
         .all()
     )
-    uploads_by_id = {record.id: record for record in recent_uploads}
-    ordered: list[UploadedFileRecord] = []
-    seen_ids: set[str] = set()
-
-    for file_id in preferred_file_ids:
-        record = uploads_by_id.get(file_id)
-        if record is None or record.id in seen_ids:
-            continue
-        ordered.append(record)
-        seen_ids.add(record.id)
-
     for record in recent_uploads:
         if record.id in seen_ids:
             continue
         ordered.append(record)
         seen_ids.add(record.id)
 
+    return ordered
+
+
+def _load_preferred_uploads(
+    db: Session,
+    *,
+    session_id: str,
+    preferred_file_ids: list[str],
+    before_created_at: datetime | None,
+) -> list[UploadedFileRecord]:
+    if not preferred_file_ids:
+        return []
+
+    query = db.query(UploadedFileRecord).filter(
+        UploadedFileRecord.session_id == session_id,
+        UploadedFileRecord.id.in_(preferred_file_ids),
+    )
+    if before_created_at is not None:
+        query = query.filter(UploadedFileRecord.created_at <= before_created_at)
+    found = {record.id: record for record in query.all()}
+    ordered: list[UploadedFileRecord] = []
+    for file_id in preferred_file_ids:
+        record = found.get(file_id)
+        if record is not None:
+            ordered.append(record)
     return ordered
 
 
