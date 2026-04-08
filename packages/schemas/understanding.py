@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -28,6 +29,7 @@ class RevisionSummary(BaseModel):
     revision_id: str
     revision_number: int
     change_type: str
+    created_at: datetime | None = None
     understanding_summary: str | None = None
     execution_blocked: bool = False
     execution_blocked_reason: str | None = None

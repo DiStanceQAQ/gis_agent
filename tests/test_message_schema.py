@@ -110,6 +110,7 @@ def test_task_detail_response_accepts_active_revision_summary() -> None:
             "revision_id": "rev_2",
             "revision_number": 2,
             "change_type": "correction",
+            "created_at": "2026-04-08T10:00:00+00:00",
             "understanding_summary": "上传 shp 中的江西作为 AOI。",
             "execution_blocked": True,
             "execution_blocked_reason": "AOI normalization failed",
@@ -121,6 +122,7 @@ def test_task_detail_response_accepts_active_revision_summary() -> None:
                 "revision_id": "rev_1",
                 "revision_number": 1,
                 "change_type": "initial",
+                "created_at": "2026-04-08T09:50:00+00:00",
                 "understanding_summary": "初始版本。",
                 "field_confidences": {},
                 "ranked_candidates": {},
@@ -132,5 +134,7 @@ def test_task_detail_response_accepts_active_revision_summary() -> None:
     assert detail.last_response_mode == "ask_missing_fields"
     assert detail.active_revision is not None
     assert detail.active_revision.execution_blocked is True
+    assert detail.active_revision.created_at is not None
     assert len(detail.revisions) == 1
     assert detail.revisions[0].revision_id == "rev_1"
+    assert detail.revisions[0].created_at is not None

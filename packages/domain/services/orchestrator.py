@@ -196,6 +196,7 @@ def _build_revision_summary(revision: object) -> dict[str, object]:
         "revision_id": getattr(revision, "id"),
         "revision_number": getattr(revision, "revision_number"),
         "change_type": getattr(revision, "change_type"),
+        "created_at": getattr(revision, "created_at", None),
         "understanding_summary": getattr(revision, "understanding_summary", None),
         "execution_blocked": bool(getattr(revision, "execution_blocked", False)),
         "execution_blocked_reason": getattr(revision, "execution_blocked_reason", None),

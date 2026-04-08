@@ -415,6 +415,7 @@ def test_get_task_detail_returns_active_revision_and_revision_history(
     assert detail.active_revision.revision_id
     assert detail.active_revision.revision_number == 2
     assert detail.active_revision.change_type == "user_edit"
+    assert detail.active_revision.created_at is not None
     assert detail.active_revision.understanding_summary == "北京作为 AOI。"
     assert detail.active_revision.execution_blocked is False
     assert detail.active_revision.execution_blocked_reason is None
@@ -422,6 +423,7 @@ def test_get_task_detail_returns_active_revision_and_revision_history(
     assert detail.active_revision.ranked_candidates["aoi_input"][0]["value"] == "北京"
     assert [revision.revision_number for revision in detail.revisions] == [1, 2]
     assert detail.revisions[0].change_type == "initial_parse"
+    assert detail.revisions[0].created_at is not None
     assert detail.revisions[1].revision_id == detail.active_revision.revision_id
 
 
@@ -444,3 +446,35 @@ def test_get_task_detail_surfaces_execution_blocked_active_revision(
     assert detail.active_revision.execution_blocked_reason == (
         "AOI normalization failed: uploaded boundary is invalid"
     )
+
+
+def test_get_task_detail_includes_lazy_materialized_initial_revision(
+    db_session: Session,
+) -> None:
+    session = SessionRecord(id=make_id("ses"), title="lazy-backfill", status="active")
+    message = MessageRecord(id=make_id("msg"), session_id=session.id, role="user", content="江西")
+    task = TaskRunRecord(
+        id=make_id("task"),
+        session_id=session.id,
+        user_message_id=message.id,
+        status="waiting_clarification",
+        analysis_type="WORKFLOW",
+    )
+    task.task_spec = TaskSpecRecord(
+        task_id=task.id,
+        aoi_input="江西",
+        aoi_source_type="admin_name",
+        preferred_output=["png_map"],
+        user_priority="balanced",
+        need_confirmation=False,
+        raw_spec_json={"aoi_input": "江西", "aoi_source_type": "admin_name"},
+    )
+    db_session.add_all([session, message, task])
+    db_session.commit()
+
+    detail = get_task_detail(db_session, task.id)
+
+    assert detail.active_revision is not None
+    assert detail.active_revision.revision_number == 1
+    assert detail.active_revision.change_type == "legacy_backfill"
+    assert [revision.revision_number for revision in detail.revisions] == [1]

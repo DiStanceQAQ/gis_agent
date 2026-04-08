@@ -10,16 +10,20 @@ from packages.domain.models import (
     ArtifactRecord,
     DatasetCandidateRecord,
     MessageRecord,
+    MessageUnderstandingRecord,
     SessionRecord,
     TaskEventRecord,
     TaskRunRecord,
     TaskSpecRecord,
+    TaskSpecRevisionRecord,
     TaskStepRecord,
     UploadedFileRecord,
 )
 from packages.domain.services import orchestrator
+from packages.domain.services import understanding as understanding_service
 from packages.domain.services.intent import IntentResult, is_task_confirmation_message
 from packages.domain.services.planner import TaskPlan, TaskPlanStep
+from packages.domain.services.response_policy import ResponseDecision
 from packages.domain.services.task_state import TASK_STATUS_AWAITING_APPROVAL, TASK_STATUS_CANCELLED
 from packages.schemas.operation_plan import OperationNode, OperationPlan
 from packages.schemas.task import ParsedTaskSpec
@@ -61,6 +65,28 @@ def _patched_plan_flow(monkeypatch: pytest.MonkeyPatch) -> None:
             created_from="tests",
         ),
     )
+    monkeypatch.setattr(understanding_service, "classify_message_intent", _classify_intent)
+    monkeypatch.setattr(
+        understanding_service,
+        "parse_task_message",
+        lambda message, has_upload, **kwargs: ParsedTaskSpec(  # noqa: ARG005
+            aoi_input="bbox(116.1,39.8,116.5,40.1)",
+            aoi_source_type="bbox",
+            time_range={"start": "2024-06-01", "end": "2024-06-30"},
+            requested_dataset="sentinel2",
+            analysis_type="NDVI",
+            preferred_output=["png_map", "methods_text"],
+            user_priority="balanced",
+            operation_params={
+                "operations": ["raster.band_math"],
+                "expression": "(nir-red)/(nir+red)",
+            },
+            need_confirmation=False,
+            missing_fields=[],
+            clarification_message=None,
+            created_from="tests",
+        ),
+    )
     monkeypatch.setattr(
         orchestrator,
         "build_task_plan",
@@ -79,6 +105,24 @@ def _patched_plan_flow(monkeypatch: pytest.MonkeyPatch) -> None:
                     purpose="生成任务计划",
                 )
             ],
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "decide_response",
+        lambda *args, **kwargs: ResponseDecision(
+            mode="execute_now",
+            assistant_message="关键信息齐了，我会直接开始执行。",
+            editable_fields=[],
+            response_payload={
+                "response_mode": "execute_now",
+                "requires_execution": True,
+                "execution_blocked": False,
+            },
+            execution_blocked=False,
+            requires_task_creation=True,
+            requires_revision_creation=False,
+            requires_execution=True,
         ),
     )
     yield
@@ -103,6 +147,9 @@ def _cleanup_session(session_id: str) -> None:
             db.query(ArtifactRecord).filter(ArtifactRecord.task_id.in_(task_ids)).delete(
                 synchronize_session=False
             )
+            db.query(MessageUnderstandingRecord).filter(
+                MessageUnderstandingRecord.task_id.in_(task_ids)
+            ).delete(synchronize_session=False)
             db.query(TaskEventRecord).filter(TaskEventRecord.task_id.in_(task_ids)).delete(
                 synchronize_session=False
             )
@@ -118,10 +165,16 @@ def _cleanup_session(session_id: str) -> None:
             db.query(TaskSpecRecord).filter(TaskSpecRecord.task_id.in_(task_ids)).delete(
                 synchronize_session=False
             )
+            db.query(TaskSpecRevisionRecord).filter(
+                TaskSpecRevisionRecord.task_id.in_(task_ids)
+            ).delete(synchronize_session=False)
             db.query(TaskRunRecord).filter(TaskRunRecord.id.in_(task_ids)).delete(
                 synchronize_session=False
             )
 
+        db.query(MessageUnderstandingRecord).filter(
+            MessageUnderstandingRecord.session_id == session_id
+        ).delete(synchronize_session=False)
         db.query(MessageRecord).filter(MessageRecord.session_id == session_id).delete(
             synchronize_session=False
         )
