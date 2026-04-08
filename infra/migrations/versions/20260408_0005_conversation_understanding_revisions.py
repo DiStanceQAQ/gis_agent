@@ -68,6 +68,11 @@ def upgrade() -> None:
         sa.Column("context_trace_json", sa.JSON(), nullable=False, server_default=sa.text("'{}'::json")),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     )
+    op.create_index(
+        "ix_message_understandings_derived_revision_id",
+        "message_understandings",
+        ["derived_revision_id"],
+    )
     op.create_index("ix_message_understandings_session_created", "message_understandings", ["session_id", "created_at"])
     op.create_index("ix_message_understandings_task_created", "message_understandings", ["task_id", "created_at"])
 
@@ -75,6 +80,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_index("ix_message_understandings_task_created", table_name="message_understandings")
     op.drop_index("ix_message_understandings_session_created", table_name="message_understandings")
+    op.drop_index("ix_message_understandings_derived_revision_id", table_name="message_understandings")
     op.drop_table("message_understandings")
 
     op.execute("DROP INDEX IF EXISTS ux_task_spec_revisions_active")
