@@ -116,7 +116,21 @@ def test_task_detail_response_accepts_active_revision_summary() -> None:
             "field_confidences": {},
             "ranked_candidates": {},
         },
+        revisions=[
+            {
+                "revision_id": "rev_1",
+                "revision_number": 1,
+                "change_type": "initial",
+                "understanding_summary": "初始版本。",
+                "field_confidences": {},
+                "ranked_candidates": {},
+            }
+        ],
     )
 
+    assert detail.interaction_state == "execution_blocked"
+    assert detail.last_response_mode == "ask_missing_fields"
     assert detail.active_revision is not None
     assert detail.active_revision.execution_blocked is True
+    assert len(detail.revisions) == 1
+    assert detail.revisions[0].revision_id == "rev_1"

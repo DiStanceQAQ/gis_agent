@@ -131,6 +131,8 @@ class TaskDetailResponse(BaseModel):
     task_id: str
     parent_task_id: str | None = None
     status: str
+    interaction_state: str | None = None
+    last_response_mode: str | None = None
     approval_required: bool | None = None
     execution_mode: str | None = None
     execution_submitted: bool | None = None

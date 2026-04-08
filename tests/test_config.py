@@ -60,3 +60,6 @@ def test_conversation_understanding_feature_flags_defaults(
     assert settings.revision_backfill_lazy_enabled is True
     assert settings.understanding_intent_medium_threshold == 0.60
     assert settings.understanding_intent_high_threshold == 0.85
+    assert settings.understanding_field_medium_threshold == 0.60
+    assert settings.understanding_field_high_threshold == 0.80
+    assert settings.understanding_shadow_mode_enabled is False
