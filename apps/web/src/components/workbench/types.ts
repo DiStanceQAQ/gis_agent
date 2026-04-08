@@ -4,7 +4,14 @@ import type {
   TaskHistoryEntry,
   ThemeMode,
 } from "../../hooks/useWorkbenchState";
-import type { Artifact, SessionMessage, TaskDetail } from "../../types";
+import type {
+  Artifact,
+  MessageUnderstanding,
+  ResponseMode,
+  SessionMessage,
+  TaskDetail,
+  UnderstandingResponsePayload,
+} from "../../types";
 
 export type StatusTone = "success" | "failed" | "running" | "queued" | "warning" | "idle";
 
@@ -49,6 +56,9 @@ export type RightColumnProps = {
   currentTaskId: string | null;
   taskHistory: TaskHistoryEntry[];
   currentTask: TaskDetail | null;
+  latestResponseMode: ResponseMode | null;
+  latestUnderstanding: MessageUnderstanding | null;
+  latestResponsePayload: UnderstandingResponsePayload | null;
   sessionMessages: SessionMessage[];
   streamingAssistantMessage: string | null;
   messagesNextCursor: string | null;

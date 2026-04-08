@@ -670,6 +670,116 @@
   color: color-mix(in srgb, var(--color-text) 66%, transparent);
 }
 
+.wb-understanding-card {
+  display: grid;
+  gap: 12px;
+}
+
+.wb-understanding-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.wb-understanding-field {
+  min-width: 0;
+  border: 1px solid color-mix(in srgb, var(--color-text) 12%, transparent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--color-surface-elevated) 68%, transparent);
+  padding: 8px;
+}
+
+.wb-understanding-field span {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--color-text) 54%, transparent);
+}
+
+.wb-understanding-field strong,
+.wb-understanding-field p {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: color-mix(in srgb, var(--color-text) 82%, transparent);
+  word-break: break-word;
+}
+
+.wb-understanding-field-wide {
+  grid-column: 1 / -1;
+}
+
+.wb-understanding-history {
+  display: grid;
+  gap: 8px;
+}
+
+.wb-understanding-history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.wb-understanding-history-head strong {
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.wb-understanding-history-head span {
+  font-size: 10px;
+  color: color-mix(in srgb, var(--color-text) 56%, transparent);
+}
+
+.wb-understanding-history ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.wb-understanding-history-row {
+  border: 1px solid color-mix(in srgb, var(--color-text) 12%, transparent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--color-surface-elevated) 68%, transparent);
+  padding: 8px;
+}
+
+.wb-understanding-history-row.is-blocked {
+  border-color: color-mix(in srgb, var(--color-danger) 28%, transparent);
+}
+
+.wb-understanding-history-row.is-ready {
+  border-color: color-mix(in srgb, var(--color-primary) 22%, transparent);
+}
+
+.wb-understanding-history-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.wb-understanding-history-row-head span {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.wb-understanding-history-row-head small {
+  font-size: 10px;
+  color: color-mix(in srgb, var(--color-text) 54%, transparent);
+}
+
+.wb-understanding-history-row p {
+  margin: 6px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: color-mix(in srgb, var(--color-text) 70%, transparent);
+}
+
 .wb-chat-plan-editor {
   margin-top: 8px;
   width: 100%;
@@ -878,6 +988,10 @@
 
   .wb-topbar {
     padding: 0 10px;
+  }
+
+  .wb-understanding-grid {
+    grid-template-columns: 1fr;
   }
 }
 

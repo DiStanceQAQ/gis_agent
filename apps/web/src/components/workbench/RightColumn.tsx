@@ -1,5 +1,5 @@
 import type { KeyboardEvent } from "react";
-import type { SessionMessage, TaskStep } from "../../types";
+import type { SessionMessage, TaskDetail, TaskStep } from "../../types";
 import type { RightColumnProps, StatusTone } from "./types";
 
 type PipelineRow = {
@@ -151,6 +151,62 @@ function bubbleClass(role: string): string {
   return "wb-chat-bubble wb-chat-bubble-user";
 }
 
+function responseModeLabel(mode?: string | null): string {
+  switch (mode) {
+    case "confirm_understanding":
+      return "确认理解";
+    case "ask_missing_fields":
+      return "补充字段";
+    case "execute_now":
+      return "立即执行";
+    case "awaiting_approval":
+      return "等待审批";
+    case "show_revision":
+      return "显示修订";
+    case "chat_reply":
+      return "普通对话";
+    default:
+      return mode ?? "未提供";
+  }
+}
+
+function interactionStateLabel(state?: string | null): string {
+  switch (state) {
+    case "understanding":
+      return "理解中";
+    case "execution_blocked":
+      return "执行受阻";
+    case "awaiting_approval":
+      return "等待审批";
+    case "approved":
+      return "已批准";
+    case "running":
+      return "执行中";
+    case "completed":
+      return "已完成";
+    default:
+      return state ?? "未提供";
+  }
+}
+
+function formatRevisionLabel(revision: TaskDetail["revisions"][number]): string {
+  return `v${revision.revision_number} · ${revision.change_type}`;
+}
+
+function summarizeRevision(revision: TaskDetail["revisions"][number]): string {
+  if (revision.understanding_summary) {
+    return revision.understanding_summary;
+  }
+  if (revision.execution_blocked_reason) {
+    return revision.execution_blocked_reason;
+  }
+  return "没有摘要。";
+}
+
+function revisionHistoryTone(revision: TaskDetail["revisions"][number]): string {
+  return revision.execution_blocked ? "is-blocked" : "is-ready";
+}
+
 function buildSyntheticTaskMessages(currentTask: RightColumnProps["currentTask"]): SessionMessage[] {
   if (!currentTask) {
     return [];
@@ -199,6 +255,9 @@ export default function RightColumn({
   currentTaskId,
   taskHistory,
   currentTask,
+  latestResponseMode,
+  latestUnderstanding,
+  latestResponsePayload,
   sessionMessages,
   streamingAssistantMessage,
   messagesNextCursor,
@@ -233,6 +292,31 @@ export default function RightColumn({
   const conversation = [...sessionMessages, ...syntheticTaskMessages];
   const showTypingIndicator = isSubmitting && (!streamingAssistantMessage || streamingAssistantMessage.length === 0);
   const taskTree = buildTaskTree(taskHistory);
+  const currentResponseMode = currentTask?.last_response_mode ?? latestResponseMode ?? latestResponsePayload?.response_mode ?? null;
+  const currentInteractionState = currentTask?.interaction_state ?? latestResponsePayload?.interaction_state ?? null;
+  const activeRevision = currentTask?.active_revision ?? null;
+  const revisionHistory = currentTask?.revisions ?? [];
+  const understandingSummary =
+    activeRevision?.understanding_summary ??
+    latestUnderstanding?.understanding_summary ??
+    latestResponsePayload?.understanding_summary ??
+    null;
+  const activeRevisionSummary =
+    activeRevision?.understanding_summary ??
+    latestResponsePayload?.active_revision_summary ??
+    understandingSummary;
+  const blockedReason =
+    activeRevision?.execution_blocked_reason ??
+    (latestResponsePayload?.blocked_reason as string | null | undefined) ??
+    null;
+  const missingFields = latestResponsePayload?.missing_fields ?? [];
+  const showUnderstandingCard =
+    Boolean(currentResponseMode) ||
+    Boolean(currentInteractionState) ||
+    Boolean(understandingSummary) ||
+    Boolean(activeRevisionSummary) ||
+    Boolean(blockedReason) ||
+    Boolean(revisionHistory.length);
 
   const handleComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) {
@@ -390,6 +474,63 @@ export default function RightColumn({
             </div>
 
             {planError ? <p className="wb-panel-note wb-note-error">{planError}</p> : null}
+          </section>
+        ) : null}
+
+        {showUnderstandingCard ? (
+          <section className="wb-chat-card wb-understanding-card">
+            <h3>理解与修订</h3>
+            <div className="wb-understanding-grid">
+              <div className="wb-understanding-field">
+                <span>当前响应模式</span>
+                <strong>{responseModeLabel(currentResponseMode)}</strong>
+              </div>
+              <div className="wb-understanding-field">
+                <span>interaction_state</span>
+                <strong>{interactionStateLabel(currentInteractionState)}</strong>
+              </div>
+              <div className="wb-understanding-field wb-understanding-field-wide">
+                <span>理解摘要</span>
+                <p>{understandingSummary ?? "暂无理解摘要。"}</p>
+              </div>
+              <div className="wb-understanding-field wb-understanding-field-wide">
+                <span>当前修订摘要</span>
+                <p>
+                  {activeRevision ? `v${activeRevision.revision_number} · ${activeRevision.change_type} · ` : ""}
+                  {activeRevisionSummary ?? "暂无活动修订。"}
+                </p>
+              </div>
+              <div className="wb-understanding-field wb-understanding-field-wide">
+                <span>阻塞原因</span>
+                <p>{blockedReason ?? "未阻塞。"}</p>
+              </div>
+              <div className="wb-understanding-field wb-understanding-field-wide">
+                <span>缺失字段</span>
+                <p>{missingFields.length ? missingFields.join("、") : "暂无。"}</p>
+              </div>
+            </div>
+
+            <div className="wb-understanding-history">
+              <div className="wb-understanding-history-head">
+                <strong>修订历史</strong>
+                <span>{revisionHistory.length ? `${revisionHistory.length} 条` : "0 条"}</span>
+              </div>
+              {revisionHistory.length ? (
+                <ul>
+                  {revisionHistory.slice(-5).map((revision) => (
+                    <li key={revision.revision_id} className={`wb-understanding-history-row ${revisionHistoryTone(revision)}`}>
+                      <div className="wb-understanding-history-row-head">
+                        <span>{formatRevisionLabel(revision)}</span>
+                        <small>{revision.execution_blocked ? "执行受阻" : "可执行"}</small>
+                      </div>
+                      <p>{summarizeRevision(revision)}</p>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="wb-panel-note">当前任务还没有修订历史。</p>
+              )}
+            </div>
           </section>
         ) : null}
 

@@ -26,6 +26,75 @@ export type SessionMessage = {
   created_at?: string | null;
 };
 
+export type ConfidenceLevel = "low" | "medium" | "high";
+
+export type ConfidenceEvidence = {
+  source: string;
+  weight: number;
+  detail: string;
+};
+
+export type FieldConfidence = {
+  score: number;
+  level: ConfidenceLevel;
+  evidence: ConfidenceEvidence[];
+};
+
+export type ResponseMode =
+  | "execute_now"
+  | "confirm_understanding"
+  | "ask_missing_fields"
+  | "show_revision"
+  | "chat_reply"
+  | string;
+
+export type MessageUnderstanding = {
+  intent: string;
+  intent_confidence: number;
+  understanding_summary?: string | null;
+  revision_id?: string | null;
+  revision_number?: number | null;
+  editable_fields: string[];
+  field_confidences: Record<string, FieldConfidence>;
+  field_evidence: Record<string, string[]>;
+  ranked_candidates: Record<string, Array<Record<string, unknown>>>;
+};
+
+export type UnderstandingResponsePayload = Record<string, unknown> & {
+  response_mode?: ResponseMode | null;
+  intent?: string | null;
+  intent_confidence?: number | null;
+  understanding_summary?: string | null;
+  interaction_state?: string | null;
+  editable_fields?: string[];
+  missing_fields?: string[];
+  require_approval?: boolean;
+  execution_blocked?: boolean;
+  blocked_reason?: string | null;
+  requires_task_creation?: boolean;
+  requires_revision_creation?: boolean;
+  requires_execution?: boolean;
+  revision_number?: number | null;
+  revision_change_type?: string | null;
+  active_revision_summary?: string | null;
+  active_response_mode?: string | null;
+  field_confidences?: Record<string, FieldConfidence>;
+  field_evidence?: Record<string, string[]>;
+  ranked_candidates?: Record<string, Array<Record<string, unknown>>>;
+};
+
+export type RevisionSummary = {
+  revision_id: string;
+  revision_number: number;
+  change_type: string;
+  created_at?: string | null;
+  understanding_summary?: string | null;
+  execution_blocked: boolean;
+  execution_blocked_reason?: string | null;
+  field_confidences: Record<string, FieldConfidence>;
+  ranked_candidates: Record<string, Array<Record<string, unknown>>>;
+};
+
 export type SessionMessagesResponse = {
   session_id: string;
   next_cursor?: string | null;
@@ -59,6 +128,9 @@ export type MessageCreateResponse = {
   assistant_message?: string | null;
   intent?: string | null;
   intent_confidence?: number | null;
+  response_mode?: ResponseMode | null;
+  understanding?: MessageUnderstanding | null;
+  response_payload?: UnderstandingResponsePayload | null;
   awaiting_task_confirmation?: boolean;
   need_clarification: boolean;
   need_approval?: boolean;
@@ -188,6 +260,8 @@ export type TaskDetail = {
   task_id: string;
   parent_task_id?: string | null;
   status: string;
+  interaction_state?: string | null;
+  last_response_mode?: ResponseMode | null;
   current_step?: string | null;
   analysis_type: string;
   created_at?: string | null;
@@ -198,6 +272,8 @@ export type TaskDetail = {
   candidates: Candidate[];
   steps: TaskStep[];
   artifacts: Artifact[];
+  active_revision?: RevisionSummary | null;
+  revisions: RevisionSummary[];
   summary_text?: string | null;
   methods_text?: string | null;
   png_preview_url?: string | null;

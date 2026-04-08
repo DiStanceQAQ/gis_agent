@@ -249,6 +249,9 @@ export default function WorkbenchPage({ state }: WorkbenchPageProps) {
           currentTaskId={currentTask?.task_id ?? null}
           taskHistory={currentHistory}
           currentTask={currentTask}
+          latestResponseMode={state.latestUnderstandingSnapshot.responseMode}
+          latestUnderstanding={state.latestUnderstandingSnapshot.understanding}
+          latestResponsePayload={state.latestUnderstandingSnapshot.responsePayload}
           sessionMessages={visibleSessionMessages}
           streamingAssistantMessage={state.streamingAssistantMessage}
           messagesNextCursor={state.messagesNextCursor}
