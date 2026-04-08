@@ -271,6 +271,46 @@ def understand_message(
 3. `ParsedTaskSpec` 仍复用现有 schema，但不再是唯一上游对象。
 4. `trace` 记录每个阶段的白盒输入与中间结果。
 
+#### 6.2.1 Parser Integration Sequence
+
+`Understanding Engine` 与 `parser` 的关系需要明确：
+
+1. `Context Builder` 先完成上下文组装。
+2. `Understanding Engine` 先做高层 intent 判断。
+3. 若 intent 为 `new_task | task_correction | task_followup | task_confirmation` 之一，则同步调用 parser。
+4. parser 输出作为 `parsed_candidates` 和 `parsed_spec` 的组成部分进入理解结果。
+5. `Understanding Engine` 再结合 active revision、recent uploads、AOI 候选与 evidence，对 parser 输出进行二次解释。
+6. 最终 truth 不是裸 `ParsedTaskSpec`，而是 `MessageUnderstanding + active revision` 共同决定的当前 revision 输入。
+
+结论：
+
+- `ParsedTaskSpec` 仍然是重要中间对象，也是 planner / runtime 过渡期镜像输入。
+- `ParsedTaskSpec` 不再单独代表“最终系统理解”。
+
+```mermaid
+sequenceDiagram
+    participant U as User Message
+    participant C as Context Builder
+    participant I as Understanding Engine
+    participant P as Parser
+    participant R as Revision Manager
+    participant RP as Response Policy
+
+    U->>C: build context bundle
+    C-->>I: context + explicit signals
+    I->>I: classify intent
+    alt task-like intent
+        I->>P: parse message with context summary
+        P-->>I: ParsedTaskSpec + parser candidates
+        I->>I: merge parser output with active revision and evidence
+        I-->>R: MessageUnderstanding
+        R-->>RP: candidate active revision
+    else chat / ambiguous
+        I-->>RP: MessageUnderstanding
+    end
+    RP-->>U: response_mode + assistant reply
+```
+
 ### 6.3 `task_revisions.py`
 
 职责：管理 revision 生命周期，包括创建、激活、回滚、合并、快照镜像。
@@ -329,6 +369,39 @@ def get_active_revision(db: Session, task_id: str) -> TaskSpecRevisionRecord | N
 3. 任何 correction 都创建新 revision，不修改旧 revision。
 4. `user_revision_count` 与 `user_last_revision_at` 在 correction 激活时更新。
 
+#### 6.3.1 Correction Activation Sequence
+
+用户纠正不会“就地改当前 revision”，而是走以下时序：
+
+1. 当前消息被识别为 `task_correction`。
+2. 基于当前 active revision 创建新 revision 草稿。
+3. 新 revision 写入 `task_spec_revisions`，`is_active=false`。
+4. 若该 revision 通过基本结构校验，则进入激活事务。
+5. 激活事务中：
+   - 清除旧 active revision 的 `is_active`
+   - 将新 revision 标记为 `is_active=true`
+   - 同步更新 `task_runs.last_understanding_message_id`
+   - 同步更新 `task_runs.last_response_mode`
+   - 过渡期镜像写入 `task_specs`
+   - 如为用户纠正，更新 `user_revision_count` 和 `user_last_revision_at`
+6. 激活完成后再由 `Response Policy` 选择 `show_revision / confirm_understanding / execute_now`
+
+说明：
+
+- 新 revision 在激活前是短暂中间态，但不对外暴露为 active。
+- 第一版不引入额外“draft revision status”字段，是否 active 即可表达中间态。
+
+#### 6.3.2 Revision Activation Reliability
+
+`revision` 激活涉及 `task_spec_revisions`、`task_specs`、`task_runs` 三张表，但它们位于同一数据库内，因此不需要分布式事务。
+
+可靠性要求：
+
+1. 激活必须在同一个数据库事务中完成。
+2. 激活前应对所属 task 行做锁定，避免并发 correction 导致双 active。
+3. 若事务失败，保持旧 active revision 不变。
+4. 激活逻辑必须幂等：重复提交同一 revision 激活请求，不应产生两个 active revision。
+
 ### 6.4 `response_policy.py`
 
 职责：根据理解结果与任务风险决定响应模式。
@@ -374,6 +447,37 @@ def decide_response_mode(
 4. 字段完整但存在中风险或中置信度 -> `confirm_understanding`
 5. 字段完整 + 低风险 + 高置信度 -> `execute_now`
 
+#### 6.4.1 Bootstrap Thresholds
+
+第一版建议先采用固定阈值，Phase 5 再基于真实数据调参：
+
+| 维度 | low | medium | high |
+|------|-----|--------|------|
+| `intent_confidence` | `< 0.60` | `0.60 - 0.84` | `>= 0.85` |
+| `field_confidence` | `< 0.60` | `0.60 - 0.79` | `>= 0.80` |
+
+初始决策建议：
+
+1. 任一关键字段为 `low` -> `ask_missing_fields`
+2. 无 `low`，但存在关键字段为 `medium` -> `confirm_understanding`
+3. correction 成功形成可展示 revision -> `show_revision`
+4. 所有关键字段为 `high` 且风险为 `low` -> `execute_now`
+
+第一版风险分层建议：
+
+- `low risk`
+  - 明确输入文件
+  - 明确 AOI 来源
+  - 操作为已有白名单且参数完整
+- `medium risk`
+  - AOI 来源存在候选竞争
+  - 用户刚进行了 correction
+  - 输出影响已有任务上下文，但可回滚
+- `high risk`
+  - AOI 规范化失败
+  - 关键字段冲突
+  - parser 与 prior revision 严重不一致
+
 ### 6.5 `parser.py`（增强，不重写）
 
 保留现有 `ParsedTaskSpec` 与 repair loop，但改为理解引擎的子模块。
@@ -396,6 +500,35 @@ def infer_aoi_source_candidates(
 ) -> list[dict[str, object]]:
     """Return ranked AOI source candidates with white-box evidence."""
 ```
+
+#### 6.5.1 Repair Prompt 摘要规则
+
+parser repair prompt 不直接塞入完整上下文，而是使用结构化摘要，避免 prompt 失控。
+
+第一版摘要规则：
+
+1. 当前消息原文
+2. active revision 摘要
+   - `analysis_type`
+   - 当前 AOI 来源
+   - 当前 time range
+   - 最近一次 response mode
+3. 最近上传文件摘要
+   - 文件名
+   - 文件类型
+   - 创建时间
+4. 最多 3 条与当前消息强相关的历史消息摘要
+   - 仅保留 role + 内容摘要 + message_id
+5. 当前显式信号摘要
+   - 是否命中上传提示
+   - 是否命中 bbox
+   - 是否命中纠正句式
+
+禁止直接注入：
+
+- 全量历史消息原文
+- 完整 prompt 链
+- 大段文件预览内容
 
 ## 7. 数据模型设计
 
@@ -430,6 +563,15 @@ def infer_aoi_source_candidates(
 - `(task_id, created_at desc)` 复合索引
 - 若数据库支持，增加 `WHERE is_active = true` 的部分唯一索引，保证每个 task 只有一个 active revision
 
+兼容性说明：
+
+1. 若当前数据库支持部分唯一索引，则以数据库约束保证“每 task 仅一个 active revision”。
+2. 若不支持部分唯一索引，则采用应用层备选方案：
+   - 激活前锁定 `task_runs` 对应行
+   - 先清除旧 active，再设置新 active
+   - 提交前二次检查同 task 下 active revision 数量
+   - 若校验失败则事务回滚
+
 说明：
 
 1. `understanding_trace_json` 必须存摘要，不存整段 prompt / 全量历史原文。
@@ -459,6 +601,16 @@ def infer_aoi_source_candidates(
 1. 记录每条用户消息是如何被理解的，即使它没有产生 revision。
 2. 支持离线分析：哪些消息被误判为 `chat` / `task_correction`。
 3. 支持前端在消息时间线上回放“系统当时是怎么理解的”。
+
+保留与归档建议：
+
+1. `message_understandings` 默认保留完整记录，短期不做强删除。
+2. 若增长过快，优先做按月份归档或分区，而不是删除最新数据。
+3. 查询默认只按：
+   - `message_id`
+   - `session_id + created_at`
+   - `task_id + created_at`
+4. 不为全文搜索设计二级索引；如后续需要，单独建设检索侧表。
 
 ### 7.3 保留表：`task_specs`（过渡期镜像）
 
@@ -540,6 +692,24 @@ stateDiagram-v2
 - `show_revision`：`interaction_state=awaiting_user_input`
 - `execute_now`：进入 `awaiting_approval` 或 `execution_ready`
 
+#### 8.6 Status × Interaction State 兼容矩阵
+
+第一版兼容矩阵建议如下：
+
+| `task.status` | `interaction_state` | 含义 |
+|---------------|---------------------|------|
+| `draft` | `understanding` | 正在理解消息，尚未形成稳定 revision |
+| `waiting_clarification` | `awaiting_user_input` | 仍需用户补充或确认 |
+| `awaiting_approval` | `awaiting_approval` | 任务理解已稳定，等待审批 |
+| `queued` | `execution_ready` | 已准备进入执行队列 |
+| `running` | `running` | 正在执行 |
+| `success/failed/cancelled` | `terminal` | 终态 |
+
+说明：
+
+1. 现有代码中的执行状态名已经是 `awaiting_approval`，本设计不要求重命名。
+2. 本次新增的是交互层语义，不是对执行状态枚举的整体替换。
+
 ## 9. 白盒 Confidence 设计
 
 ### 9.1 设计要求
@@ -611,6 +781,24 @@ stateDiagram-v2
 
 - 只输出一个数字，不给证据
 - 用 embedding 黑箱分数替代规则信号
+
+#### 9.3.1 第一版权重示意
+
+第一版只提供启发式初始权重，Phase 5 再做调参：
+
+| 信号 | 建议权重 |
+|------|----------|
+| 当前消息显式 bbox | `+0.80` 给 `bbox` |
+| 当前消息提到上传文件 / shp / 边界 | `+0.70` 给 `file_upload` |
+| AOI 文本像行政区 | `+0.50` 给 `admin_name` |
+| 最近上传文件存在 | `+0.25` 给 `file_upload` |
+| 当前消息是纠正式句式且 prior revision 为某来源 | 对 prior 来源 `-0.20` |
+| prior revision 与当前显式信号一致 | 对对应候选 `+0.15` |
+
+说明：
+
+1. 这是 bootstrap 值，不代表最终生产最优值。
+2. evidence 必须同时记录“加了多少分”和“为什么加分”。
 
 ## 10. API 契约设计
 
@@ -688,6 +876,13 @@ stateDiagram-v2
 - `ask_missing_fields` -> `need_clarification=true`
 - `show_revision` -> `need_clarification=false`，但 `understanding.editable_fields` 非空
 
+前端兼容约定：
+
+1. Phase 4 默认采用“加字段，不改旧字段语义”的策略，不强制版本化 API。
+2. 旧前端若忽略未知字段，仍可只消费旧字段。
+3. 新前端可通过 `response_mode` 或 `understanding` 是否存在，判断是否进入新协议能力。
+4. 若某一端存在严格 schema 校验，可通过 feature flag 暂不返回新字段，而不是立即升级 API 版本。
+
 ### 10.4 任务详情 API 扩展
 
 建议 `TaskDetailResponse` 新增：
@@ -746,6 +941,12 @@ stateDiagram-v2
    - `response_policy.py`
 3. `orchestrator` 只负责编排，不再承载主要理解策略。
 
+分阶段收缩旧分支：
+
+1. Phase 2 后，现有 intent routing 分支应以 `understanding` 结果为主，旧 `chat | task | ambiguous` 仅保留兼容。
+2. Phase 3 后，现有 follow-up override 逻辑应逐步收缩为 revision correction/followup 的兼容 fallback。
+3. Phase 4 后，旧的确认提示分支应主要由 `response_mode` 驱动；旧布尔字段仅用于兼容响应。
+
 ### 12.2 `parser.py`
 
 保留：
@@ -777,6 +978,28 @@ stateDiagram-v2
 - correction 激活新 revision 后，可重新规范化 AOI
 - AOI 规范化失败时，应反馈到 revision trace 与 response policy
 
+#### 12.5 AOI 规范化与 Revision 生命周期
+
+AOI 规范化不应阻止 revision 被创建，但会影响该 revision 是否可直接进入执行。
+
+建议流程：
+
+1. revision 创建时保存原始 AOI 理解结果。
+2. 激活后触发 AOI 规范化。
+3. 若规范化成功：
+   - 更新 `aois`
+   - 在 trace 中记录成功摘要
+   - `Response Policy` 可继续进入 `confirm_understanding / execute_now`
+4. 若规范化失败：
+   - 保留该 revision 为 active，但标记其风险为 `high`
+   - 追加任务事件，如 `task_aoi_normalization_failed`
+   - 在 `understanding_trace_json` 与 `message_understandings` 中记录错误摘要
+   - `Response Policy` 强制降级为 `ask_missing_fields`
+
+原因：
+
+- revision 代表“系统此刻的理解”，即便理解无法立即执行，也应保留用于用户继续修正。
+
 ## 13. 数据迁移与升级策略
 
 ### 13.1 Phase 0
@@ -795,6 +1018,9 @@ stateDiagram-v2
 2. 明确新服务接口签名
 3. 明确数据库 schema 与索引
 4. 编写 Alembic 迁移草案
+   - 包括大表回填策略
+   - 包括索引创建顺序
+   - 包括向后兼容与回滚策略
 5. 产出状态机图与测试矩阵
 
 ### 13.3 Phase 1：数据层
@@ -804,6 +1030,24 @@ stateDiagram-v2
 3. 为现有 `task_runs` 增加 `interaction_state` 等字段
 4. 迁移脚本将现有 `task_specs` 回填为 revision `v1`
 5. 激活 revision 时同步镜像更新 `task_specs`
+
+大表迁移策略：
+
+1. Schema migration 与数据 backfill 分离：
+   - 先建表、建索引、上代码
+   - 再做数据回填
+2. 回填采用分批策略：
+   - 按主键或创建时间分页
+   - 每批固定数量，例如 `500 - 2000` 条
+   - 每批单独提交事务
+3. 新任务自上线起双写：
+   - 写 revision
+   - 同步镜像写 `task_specs`
+4. 老任务支持 lazy materialization：
+   - 若读取任务时发现缺少 revision，可即时生成 `v1`
+   - 后台 backfill job 持续补齐
+
+这样即使已有 10 万+ 任务，也无需一次性全量停机迁移。
 
 ### 13.4 Phase 2：Context Builder + Understanding Engine
 
@@ -829,6 +1073,23 @@ stateDiagram-v2
 1. Shadow mode 并行运行旧链路与新链路
 2. 记录差异、误判、用户纠正轨迹
 3. 逐步提升新链路权重并保留开关
+
+### 13.8 Feature Flag 策略
+
+建议至少拆成以下独立开关：
+
+1. `conversation_context_enabled`
+2. `understanding_engine_enabled`
+3. `task_revisions_enabled`
+4. `response_mode_enabled`
+5. `message_understanding_payload_enabled`
+6. `revision_backfill_lazy_enabled`
+
+原则：
+
+1. 能按能力开关，而不是只有一个总开关。
+2. 能按环境开关：dev / staging / prod。
+3. 能在 Phase 5 灰度时逐项放量。
 
 ## 14. 测试策略
 
@@ -961,6 +1222,16 @@ stateDiagram-v2
 2. `task_specs` 仅做过渡镜像
 3. 每个 phase 都标明“可删除的旧逻辑”清单
 
+### 16.5 Feature Flag 管理复杂度
+
+风险：功能开关过多后，组合状态可能变复杂。
+
+缓解：
+
+1. 只保留 phase 所需的最小开关集
+2. 记录每个环境的开关矩阵
+3. 每个 phase 结束后，清理已稳定的临时 flag
+
 ## 17. 验收标准
 
 系统应满足：
@@ -983,6 +1254,17 @@ stateDiagram-v2
 6. `Phase 4a`：Response Policy + API + 前端只读展示
 7. `Phase 4b`：前端内联修正
 8. `Phase 5`：shadow mode + 调参 + 灰度上线
+
+关键路径说明：
+
+1. `Phase 0` 的 golden fixtures 与 `Phase 0.5` 的 schema/interface 设计可以并行推进。
+2. 真正的关键路径是：
+   - spec 定稿
+   - schema migration
+   - revision 数据层
+   - understanding engine
+   - response policy
+3. 前端只读展示可在后端 `response_mode + understanding` 契约稳定后并行启动。
 
 ## 19. 结论
 
