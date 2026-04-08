@@ -25,6 +25,7 @@ class SessionRecord(Base):
 
     messages: Mapped[list[MessageRecord]] = relationship(back_populates="session")
     tasks: Mapped[list[TaskRunRecord]] = relationship(back_populates="session")
+    message_understandings: Mapped[list[MessageUnderstandingRecord]] = relationship(back_populates="session")
 
 
 class MessageRecord(Base):
@@ -38,6 +39,7 @@ class MessageRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     session: Mapped[SessionRecord] = relationship(back_populates="messages")
+    understanding: Mapped[MessageUnderstandingRecord | None] = relationship(back_populates="message", uselist=False)
 
 
 class UploadedFileRecord(Base):
@@ -74,6 +76,9 @@ class TaskRunRecord(Base):
     recommendation_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     result_summary_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     methods_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    interaction_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    last_understanding_message_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    last_response_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -89,6 +94,8 @@ class TaskRunRecord(Base):
     events: Mapped[list[TaskEventRecord]] = relationship(back_populates="task")
     artifacts: Mapped[list[ArtifactRecord]] = relationship(back_populates="task")
     llm_calls: Mapped[list[LLMCallLogRecord]] = relationship(back_populates="task")
+    revisions: Mapped[list[TaskSpecRevisionRecord]] = relationship(back_populates="task")
+    message_understandings: Mapped[list[MessageUnderstandingRecord]] = relationship(back_populates="task")
 
 
 class LLMCallLogRecord(Base):
@@ -127,6 +134,65 @@ class TaskSpecRecord(Base):
     raw_spec_json: Mapped[dict] = mapped_column(JSON)
 
     task: Mapped[TaskRunRecord] = relationship(back_populates="task_spec")
+
+
+class TaskSpecRevisionRecord(Base):
+    __tablename__ = "task_spec_revisions"
+    __table_args__ = (
+        Index("ix_task_spec_revisions_task_active", "task_id", "is_active"),
+        Index("ix_task_spec_revisions_task_created", "task_id", "created_at"),
+        Index("ux_task_spec_revisions_task_revision", "task_id", "revision_number", unique=True),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    task_id: Mapped[str] = mapped_column(ForeignKey("task_runs.id", ondelete="CASCADE"), index=True)
+    revision_number: Mapped[int] = mapped_column(Integer)
+    base_revision_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    source_message_id: Mapped[str] = mapped_column(ForeignKey("messages.id"), index=True)
+    change_type: Mapped[str] = mapped_column(String(32))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    understanding_intent: Mapped[str] = mapped_column(String(32))
+    understanding_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_spec_json: Mapped[dict] = mapped_column(JSON)
+    field_confidences_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    ranked_candidates_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    response_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    response_payload_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    execution_blocked: Mapped[bool] = mapped_column(Boolean, default=False)
+    execution_blocked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    understanding_trace_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    user_revision_count: Mapped[int] = mapped_column(Integer, default=0)
+    user_last_revision_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    task: Mapped[TaskRunRecord] = relationship(back_populates="revisions")
+    source_message: Mapped[MessageRecord] = relationship()
+
+
+class MessageUnderstandingRecord(Base):
+    __tablename__ = "message_understandings"
+    __table_args__ = (
+        Index("ix_message_understandings_session_created", "session_id", "created_at"),
+        Index("ix_message_understandings_task_created", "task_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    message_id: Mapped[str] = mapped_column(ForeignKey("messages.id", ondelete="CASCADE"), unique=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id"), index=True)
+    task_id: Mapped[str | None] = mapped_column(ForeignKey("task_runs.id"), nullable=True, index=True)
+    derived_revision_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    intent: Mapped[str] = mapped_column(String(32))
+    intent_confidence: Mapped[float] = mapped_column(Float)
+    understanding_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    response_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    field_confidences_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    field_evidence_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    context_trace_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    message: Mapped[MessageRecord] = relationship(back_populates="understanding")
+    session: Mapped[SessionRecord] = relationship(back_populates="message_understandings")
+    task: Mapped[TaskRunRecord | None] = relationship(back_populates="message_understandings")
 
 
 class AOIRecord(Base):
