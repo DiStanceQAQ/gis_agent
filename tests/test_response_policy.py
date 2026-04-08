@@ -227,6 +227,34 @@ def test_all_high_with_no_approval_executes_now() -> None:
     assert decision.response_payload["execution_blocked"] is False
 
 
+def test_all_high_with_approval_required_still_executes_now() -> None:
+    understanding = _understanding(
+        intent="new_task",
+        field_scores={
+            "aoi_input": 0.92,
+            "aoi_source_type": 0.91,
+            "time_range": 0.88,
+            "analysis_type": 0.95,
+        },
+        parsed_spec=ParsedTaskSpec(
+            aoi_input="江西",
+            aoi_source_type="admin_name",
+            time_range={"start": "2024-06-01", "end": "2024-06-30"},
+            analysis_type="WORKFLOW",
+        ),
+    )
+
+    decision = decide_response(
+        understanding,
+        active_revision=None,
+        require_approval=True,
+    )
+
+    assert decision.mode == "execute_now"
+    assert decision.requires_execution is True
+    assert decision.response_payload["require_approval"] is True
+
+
 def test_blocked_active_revision_forces_non_executable_response() -> None:
     understanding = _understanding(
         intent="new_task",
