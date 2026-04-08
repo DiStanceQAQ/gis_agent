@@ -259,6 +259,156 @@ def test_confirmation_signal_with_active_task_promotes_to_task_confirmation(
     assert understanding.intent == "task_confirmation"
 
 
+def test_understanding_persists_context_builder_trace_details(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: Session,
+) -> None:
+    session = _create_session(db_session)
+    message = _create_message(
+        db_session,
+        session_id=session.id,
+        content="请分析 2024 年 6 月 NDVI。",
+    )
+    upload_file_id = "file_123"
+    context_trace = {
+        "session_id": session.id,
+        "message_id": message.id,
+        "selected_files": [
+            {
+                "file_id": upload_file_id,
+                "original_name": "clip.geojson",
+                "reason": "preferred_file_ids",
+            }
+        ],
+        "selected_messages": [
+            {
+                "message_id": "msg_prior",
+                "role": "user",
+                "reason": "nearby recent session message",
+            }
+        ],
+    }
+
+    monkeypatch.setattr(
+        "packages.domain.services.understanding.classify_message_intent",
+        lambda *args, **kwargs: IntentResult(intent="chat", confidence=0.88, reason="chat-like"),
+    )
+
+    understanding = understand_message(
+        message.content,
+        context=_bundle(
+            session_id=session.id,
+            message_id=message.id,
+            latest_active_task_id=None,
+            latest_active_revision_id=None,
+            latest_active_revision_summary=None,
+            explicit_signals={
+                "upload_file_hint": False,
+                "bbox_hint": False,
+                "admin_region_hint": False,
+                "confirmation_hint": False,
+                "correction_hint": False,
+                "revision_field_overlap": {
+                    "revision_id": None,
+                    "fields": [],
+                    "matched_signals": [],
+                },
+            },
+            relevant_messages=[{"id": message.id, "role": "user", "content": message.content}],
+            uploaded_files=[{"id": upload_file_id, "original_name": "clip.geojson"}],
+            trace=context_trace,
+        ),
+        db_session=db_session,
+    )
+
+    row = persist_message_understanding(
+        db_session,
+        message_id=message.id,
+        session_id=session.id,
+        understanding=understanding,
+    )
+
+    assert row.context_trace_json["context_builder"]["selected_files"][0]["file_id"] == upload_file_id
+    assert row.context_trace_json["context_builder"]["selected_messages"][0]["message_id"] == "msg_prior"
+
+
+def test_understanding_orders_history_chronologically_before_classification(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: Session,
+) -> None:
+    session = _create_session(db_session)
+    older_message = _create_message(
+        db_session,
+        session_id=session.id,
+        content="更早的上下文。",
+    )
+    newer_message = _create_message(
+        db_session,
+        session_id=session.id,
+        content="更晚的上下文。",
+    )
+    current_message = _create_message(
+        db_session,
+        session_id=session.id,
+        content="你好，今天怎么样？",
+    )
+
+    captured_history: list[dict[str, str]] = []
+
+    def _fake_classify_message_intent(message: str, *, history, task_id=None, db_session=None) -> IntentResult:  # noqa: ANN001, ANN002
+        captured_history.extend(history)
+        return IntentResult(intent="chat", confidence=0.88, reason="chat-like")
+
+    monkeypatch.setattr(
+        "packages.domain.services.understanding.classify_message_intent",
+        _fake_classify_message_intent,
+    )
+
+    understanding = understand_message(
+        current_message.content,
+        context=_bundle(
+            session_id=session.id,
+            message_id=current_message.id,
+            latest_active_task_id=None,
+            latest_active_revision_id=None,
+            latest_active_revision_summary=None,
+            explicit_signals={
+                "upload_file_hint": False,
+                "bbox_hint": False,
+                "admin_region_hint": False,
+                "confirmation_hint": False,
+                "correction_hint": False,
+                "revision_field_overlap": {
+                    "revision_id": None,
+                    "fields": [],
+                    "matched_signals": [],
+                },
+            },
+            relevant_messages=[
+                {
+                    "id": newer_message.id,
+                    "role": "assistant",
+                    "content": newer_message.content,
+                    "created_at": datetime(2024, 6, 2, tzinfo=timezone.utc).isoformat(),
+                },
+                {
+                    "id": older_message.id,
+                    "role": "user",
+                    "content": older_message.content,
+                    "created_at": datetime(2024, 6, 1, tzinfo=timezone.utc).isoformat(),
+                },
+            ],
+        ),
+        db_session=db_session,
+    )
+
+    assert understanding.intent == "chat"
+    assert [item["content"] for item in captured_history] == [
+        older_message.content,
+        newer_message.content,
+    ]
+
+
 def test_task_like_understanding_calls_parser_and_builds_field_confidences(
     monkeypatch: pytest.MonkeyPatch,
     db_session: Session,

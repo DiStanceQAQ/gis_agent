@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from copy import deepcopy
+from datetime import datetime
 from typing import Any, Literal
 
 from sqlalchemy.orm import Session
@@ -161,6 +163,7 @@ def understand_message(
             "latest_active_revision_summary": context.latest_active_revision_summary,
             "explicit_signals": context.explicit_signals,
         },
+        "context_builder": deepcopy(context.trace),
         "classifier": {
             "intent": base_intent.intent,
             "confidence": base_intent.confidence,
@@ -697,14 +700,21 @@ def _build_understanding_summary(
 
 
 def _build_history(context: ConversationContextBundle) -> list[dict[str, str]]:
-    history: list[dict[str, str]] = []
+    history_with_order: list[tuple[datetime | None, int, dict[str, str]]] = []
     for item in context.relevant_messages:
         role = str(item.get("role") or "user")
         content = str(item.get("content") or "")
         if not content:
             continue
-        history.append({"role": role, "content": content})
-    return history
+        history_with_order.append(
+            (
+                _coerce_message_datetime(item.get("created_at")),
+                len(history_with_order),
+                {"role": role, "content": content},
+            )
+        )
+    history_with_order.sort(key=lambda item: (item[0] is None, item[0] or datetime.min, item[1]))
+    return [item[2] for item in history_with_order]
 
 
 def _confidence_level(score: float, settings: Any) -> Literal["low", "medium", "high"]:
@@ -723,6 +733,17 @@ def _extract_context_value(trace: dict[str, object], path: tuple[str, str]) -> s
         current = current.get(key)
     if isinstance(current, str) and current:
         return current
+    return None
+
+
+def _coerce_message_datetime(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
     return None
 
 
