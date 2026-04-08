@@ -31,6 +31,7 @@ from packages.domain.services.aoi import (
 )
 from packages.domain.services.agent_runtime import run_task_runtime
 from packages.domain.services.chat import generate_chat_reply, generate_chat_reply_stream
+from packages.domain.services.conversation_context import build_conversation_context
 from packages.domain.services.input_slots import classify_uploaded_inputs
 from packages.domain.services.intent import classify_message_intent, is_task_confirmation_message
 from packages.domain.services.operation_plan_builder import build_operation_plan_from_registry
@@ -43,6 +44,7 @@ from packages.domain.services.parser import (
     parse_task_message,
 )
 from packages.domain.services.plan_guard import validate_operation_plan
+from packages.domain.services.response_policy import ResponseDecision, decide_response
 from packages.domain.services.storage import (
     build_artifact_path,
     detect_file_type,
@@ -53,6 +55,7 @@ from packages.domain.services.task_revisions import (
     activate_revision,
     create_initial_revision,
     ensure_initial_revision_for_task,
+    get_active_revision,
 )
 from packages.domain.services.task_state import (
     TASK_STATUS_APPROVED,
@@ -62,6 +65,11 @@ from packages.domain.services.task_state import (
     TASK_STATUS_WAITING_CLARIFICATION,
     set_task_status,
     write_task_error,
+)
+from packages.domain.services.understanding import (
+    MessageUnderstanding,
+    persist_message_understanding,
+    understand_message,
 )
 from packages.domain.utils import make_id, merge_dicts
 from packages.schemas.file import UploadedFileResponse
@@ -85,6 +93,7 @@ from packages.schemas.task import (
     TaskPlanResponse,
     TaskStepResponse,
 )
+from packages.schemas.understanding import UnderstandingResponse
 
 logger = get_logger(__name__)
 
@@ -646,6 +655,124 @@ def _create_chat_mode_response(
     )
 
 
+def _understanding_pipeline_enabled(settings: object) -> bool:
+    return bool(
+        getattr(settings, "conversation_context_enabled", False)
+        and getattr(settings, "understanding_engine_enabled", False)
+        and getattr(settings, "response_mode_enabled", False)
+    )
+
+
+def _serialize_understanding_response(
+    *,
+    understanding: MessageUnderstanding,
+    response_decision: ResponseDecision,
+    active_revision: object | None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "intent": understanding.intent,
+        "intent_confidence": understanding.intent_confidence,
+        "understanding_summary": understanding.understanding_summary,
+        "editable_fields": list(response_decision.editable_fields),
+        "field_confidences": understanding.field_confidences_dump(),
+        "field_evidence": understanding.field_evidence_dump(),
+        "ranked_candidates": deepcopy(understanding.ranked_candidates),
+    }
+    if active_revision is not None:
+        revision_id = getattr(active_revision, "id", None)
+        revision_number = getattr(active_revision, "revision_number", None)
+        if isinstance(revision_id, str) and revision_id:
+            payload["revision_id"] = revision_id
+        if isinstance(revision_number, int):
+            payload["revision_number"] = revision_number
+    return payload
+
+
+def _attach_understanding_metadata(
+    response: MessageCreateResponse,
+    *,
+    understanding: MessageUnderstanding | None,
+    response_decision: ResponseDecision | None,
+    active_revision: object | None,
+    include_payload: bool,
+) -> MessageCreateResponse:
+    if understanding is None or response_decision is None:
+        return response
+
+    response.response_mode = response_decision.mode
+    if include_payload:
+        response.understanding = UnderstandingResponse.model_validate(
+            _serialize_understanding_response(
+                understanding=understanding,
+                response_decision=response_decision,
+                active_revision=active_revision,
+            )
+        )
+        response.response_payload = deepcopy(response_decision.response_payload)
+    return response
+
+
+def _persist_understanding_metadata(
+    db: Session,
+    *,
+    message_id: str,
+    session_id: str,
+    understanding: MessageUnderstanding | None,
+    response_decision: ResponseDecision | None,
+    task_id: str | None = None,
+    active_revision: object | None = None,
+) -> None:
+    if understanding is None or response_decision is None:
+        return
+
+    persist_message_understanding(
+        db,
+        message_id=message_id,
+        session_id=session_id,
+        understanding=understanding,
+        task_id=task_id,
+        derived_revision_id=getattr(active_revision, "id", None),
+        response_mode=response_decision.mode,
+    )
+
+
+def _finalize_response_with_understanding(
+    db: Session,
+    response: MessageCreateResponse,
+    *,
+    message_id: str,
+    session_id: str,
+    understanding: MessageUnderstanding | None,
+    response_decision: ResponseDecision | None,
+    active_revision: object | None,
+    include_payload: bool,
+    task_id: str | None = None,
+) -> MessageCreateResponse:
+    resolved_active_revision = active_revision
+    if resolved_active_revision is None and task_id is not None:
+        resolved_active_revision = get_active_revision(db, task_id)
+
+    response = _attach_understanding_metadata(
+        response,
+        understanding=understanding,
+        response_decision=response_decision,
+        active_revision=resolved_active_revision,
+        include_payload=include_payload,
+    )
+    _persist_understanding_metadata(
+        db,
+        message_id=message_id,
+        session_id=session_id,
+        understanding=understanding,
+        response_decision=response_decision,
+        task_id=task_id,
+        active_revision=resolved_active_revision,
+    )
+    if understanding is not None and response_decision is not None:
+        db.commit()
+    return response
+
+
 def _resolve_uploaded_storage_path(storage_key: str) -> str:
     candidate = Path(storage_key)
     if candidate.is_absolute():
@@ -1173,6 +1300,8 @@ def create_message(
     settings = get_settings()
     if not settings.intent_router_enabled:
         return create_message_and_task(db=db, payload=payload)
+    understanding_enabled = _understanding_pipeline_enabled(settings)
+    include_understanding_payload = bool(settings.message_understanding_payload_enabled)
 
     session = db.get(SessionRecord, payload.session_id)
     if session is None:
@@ -1202,6 +1331,9 @@ def create_message(
         history=history,
         db_session=db,
     )
+    message_understanding: MessageUnderstanding | None = None
+    response_decision: ResponseDecision | None = None
+    active_revision = None
 
     if is_task_confirmation_message(payload.content):
         confirmation_prompt_message = _load_active_confirmation_prompt_message(
@@ -1211,13 +1343,23 @@ def create_message(
             limit=settings.intent_history_limit,
         )
         if confirmation_prompt_message is None:
-            return _create_chat_mode_response(
+            response = _create_chat_mode_response(
                 db,
                 user_message_id=message.id,
                 session_id=payload.session_id,
                 assistant_message=TASK_CONFIRMATION_MISSING_CONTEXT_PROMPT,
                 intent=intent_result.intent,
                 intent_confidence=intent_result.confidence,
+            )
+            return _finalize_response_with_understanding(
+                db,
+                response,
+                message_id=message.id,
+                session_id=payload.session_id,
+                understanding=message_understanding,
+                response_decision=response_decision,
+                active_revision=active_revision,
+                include_payload=include_understanding_payload,
             )
 
         session_file_ids = _load_recent_session_file_ids(
@@ -1234,13 +1376,23 @@ def create_message(
             limit=settings.intent_history_limit,
         )
         if source_request_message is None:
-            return _create_chat_mode_response(
+            response = _create_chat_mode_response(
                 db,
                 user_message_id=message.id,
                 session_id=payload.session_id,
                 assistant_message=TASK_CONFIRMATION_MISSING_CONTEXT_PROMPT,
                 intent=intent_result.intent,
                 intent_confidence=intent_result.confidence,
+            )
+            return _finalize_response_with_understanding(
+                db,
+                response,
+                message_id=message.id,
+                session_id=payload.session_id,
+                understanding=message_understanding,
+                response_decision=response_decision,
+                active_revision=active_revision,
+                include_payload=include_understanding_payload,
             )
 
         fallback_file_ids = _load_recent_session_file_ids(
@@ -1268,7 +1420,39 @@ def create_message(
         task_response.intent = intent_result.intent
         task_response.intent_confidence = intent_result.confidence
         task_response.awaiting_task_confirmation = False
-        return task_response
+        return _finalize_response_with_understanding(
+            db,
+            task_response,
+            message_id=message.id,
+            session_id=payload.session_id,
+            understanding=message_understanding,
+            response_decision=response_decision,
+            active_revision=active_revision,
+            include_payload=include_understanding_payload,
+            task_id=task_response.task_id,
+        )
+
+    if understanding_enabled:
+        conversation_context = build_conversation_context(
+            db,
+            session_id=payload.session_id,
+            message_id=message.id,
+            message_content=payload.content,
+            preferred_file_ids=payload.file_ids,
+        )
+        if conversation_context.latest_active_task_id is not None:
+            active_revision = get_active_revision(db, conversation_context.latest_active_task_id)
+        message_understanding = understand_message(
+            payload.content,
+            context=conversation_context,
+            task_id=conversation_context.latest_active_task_id,
+            db_session=db,
+        )
+        response_decision = decide_response(
+            message_understanding,
+            active_revision=active_revision,
+            require_approval=True,
+        )
 
     chat_upload_files = _resolve_chat_upload_files(
         db,
@@ -1281,7 +1465,7 @@ def create_message(
         payload.content,
         history=history,
     ):
-        return _create_chat_mode_response(
+        response = _create_chat_mode_response(
             db,
             user_message_id=message.id,
             session_id=payload.session_id,
@@ -1289,13 +1473,54 @@ def create_message(
             intent=intent_result.intent,
             intent_confidence=intent_result.confidence,
         )
+        return _finalize_response_with_understanding(
+            db,
+            response,
+            message_id=message.id,
+            session_id=payload.session_id,
+            understanding=message_understanding,
+            response_decision=response_decision,
+            active_revision=active_revision,
+            include_payload=include_understanding_payload,
+        )
+
+    if response_decision is not None and response_decision.mode in {
+        "confirm_understanding",
+        "ask_missing_fields",
+        "show_revision",
+    }:
+        should_preserve_legacy_confirmation_prompt = (
+            settings.intent_task_confirmation_required
+            and intent_result.intent == "task"
+            and intent_result.confidence >= settings.intent_task_confidence_threshold
+            and response_decision.mode != "confirm_understanding"
+        )
+        if not should_preserve_legacy_confirmation_prompt:
+            response = _create_chat_mode_response(
+                db,
+                user_message_id=message.id,
+                session_id=payload.session_id,
+                assistant_message=response_decision.assistant_message,
+                intent=intent_result.intent,
+                intent_confidence=intent_result.confidence,
+            )
+            return _finalize_response_with_understanding(
+                db,
+                response,
+                message_id=message.id,
+                session_id=payload.session_id,
+                understanding=message_understanding,
+                response_decision=response_decision,
+                active_revision=active_revision,
+                include_payload=include_understanding_payload,
+            )
 
     if (
         intent_result.intent == "task"
         and intent_result.confidence >= settings.intent_task_confidence_threshold
     ):
         if settings.intent_task_confirmation_required:
-            return _create_chat_mode_response(
+            response = _create_chat_mode_response(
                 db,
                 user_message_id=message.id,
                 session_id=payload.session_id,
@@ -1303,6 +1528,16 @@ def create_message(
                 intent=intent_result.intent,
                 intent_confidence=intent_result.confidence,
                 awaiting_task_confirmation=True,
+            )
+            return _finalize_response_with_understanding(
+                db,
+                response,
+                message_id=message.id,
+                session_id=payload.session_id,
+                understanding=message_understanding,
+                response_decision=response_decision,
+                active_revision=active_revision,
+                include_payload=include_understanding_payload,
             )
 
         task_response = create_message_and_task(
@@ -1314,7 +1549,17 @@ def create_message(
         task_response.intent = intent_result.intent
         task_response.intent_confidence = intent_result.confidence
         task_response.awaiting_task_confirmation = False
-        return task_response
+        return _finalize_response_with_understanding(
+            db,
+            task_response,
+            message_id=message.id,
+            session_id=payload.session_id,
+            understanding=message_understanding,
+            response_decision=response_decision,
+            active_revision=active_revision,
+            include_payload=include_understanding_payload,
+            task_id=task_response.task_id,
+        )
 
     if chat_stream_handler is None:
         assistant_message = generate_chat_reply(
@@ -1331,13 +1576,23 @@ def create_message(
             db_session=db,
             on_delta=chat_stream_handler,
         )
-    return _create_chat_mode_response(
+    response = _create_chat_mode_response(
         db,
         user_message_id=message.id,
         session_id=payload.session_id,
         assistant_message=assistant_message,
         intent=intent_result.intent,
         intent_confidence=intent_result.confidence,
+    )
+    return _finalize_response_with_understanding(
+        db,
+        response,
+        message_id=message.id,
+        session_id=payload.session_id,
+        understanding=message_understanding,
+        response_decision=response_decision,
+        active_revision=active_revision,
+        include_payload=include_understanding_payload,
     )
 
 

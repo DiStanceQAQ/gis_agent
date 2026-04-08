@@ -13,6 +13,7 @@ from packages.domain.models import (
     ArtifactRecord,
     DatasetCandidateRecord,
     MessageRecord,
+    MessageUnderstandingRecord,
     SessionRecord,
     TaskEventRecord,
     TaskRunRecord,
@@ -22,13 +23,17 @@ from packages.domain.models import (
 )
 from packages.domain.services import orchestrator
 from packages.domain.services import chat as chat_service
+from packages.domain.services import understanding as understanding_service
+from packages.domain.services.conversation_context import ConversationContextBundle
 from packages.domain.services.intent import IntentResult, is_task_confirmation_message
 from packages.domain.services.llm_client import LLMResponse, LLMUsage
 from packages.domain.services.planner import TaskPlan, TaskPlanStep
+from packages.domain.services.response_policy import ResponseDecision
 from packages.domain.services.task_state import (
     TASK_STATUS_AWAITING_APPROVAL,
     TASK_STATUS_WAITING_CLARIFICATION,
 )
+from packages.domain.services.understanding import EvidenceItem, FieldConfidence, MessageUnderstanding
 from packages.schemas.task import ParsedTaskSpec
 
 
@@ -135,6 +140,12 @@ def _patched_message_flow(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(orchestrator, "classify_message_intent", _classify_intent)
     monkeypatch.setattr(orchestrator, "parse_task_message", _parse_task_message)
+    monkeypatch.setattr(understanding_service, "classify_message_intent", _classify_intent)
+    monkeypatch.setattr(
+        understanding_service,
+        "parse_task_message",
+        lambda message, has_upload, **kwargs: _parse_task_message(message, has_upload),  # noqa: ARG005
+    )
     monkeypatch.setattr(
         orchestrator,
         "build_task_plan",
@@ -174,6 +185,9 @@ def _cleanup_session(session_id: str) -> None:
         ]
 
         if task_ids:
+            db.query(MessageUnderstandingRecord).filter(
+                MessageUnderstandingRecord.task_id.in_(task_ids)
+            ).delete(synchronize_session=False)
             db.query(ArtifactRecord).filter(ArtifactRecord.task_id.in_(task_ids)).delete(
                 synchronize_session=False
             )
@@ -199,6 +213,9 @@ def _cleanup_session(session_id: str) -> None:
         db.query(MessageRecord).filter(MessageRecord.session_id == session_id).delete(
             synchronize_session=False
         )
+        db.query(MessageUnderstandingRecord).filter(
+            MessageUnderstandingRecord.session_id == session_id
+        ).delete(synchronize_session=False)
         db.query(UploadedFileRecord).filter(UploadedFileRecord.session_id == session_id).delete(
             synchronize_session=False
         )
@@ -256,6 +273,63 @@ def _post_message(
     return response.json()
 
 
+def _context_bundle(session_id: str, message_id: str) -> ConversationContextBundle:
+    return ConversationContextBundle(
+        session_id=session_id,
+        message_id=message_id,
+        latest_active_task_id=None,
+        latest_active_revision_id=None,
+        latest_active_revision_summary=None,
+        uploaded_files=[],
+        relevant_messages=[],
+        explicit_signals={},
+        trace={"session_id": session_id, "message_id": message_id},
+    )
+
+
+def _field_confidence(score: float, detail: str) -> FieldConfidence:
+    if score < 0.60:
+        level = "low"
+    elif score < 0.80:
+        level = "medium"
+    else:
+        level = "high"
+    return FieldConfidence(
+        score=score,
+        level=level,
+        evidence=[
+            EvidenceItem(
+                field="analysis_type",
+                source="current_message",
+                weight=score,
+                detail=detail,
+            )
+        ],
+    )
+
+
+def _understanding(
+    *,
+    intent: str,
+    summary: str,
+    parsed_spec: ParsedTaskSpec | None,
+    field_scores: dict[str, float],
+) -> MessageUnderstanding:
+    return MessageUnderstanding(
+        intent=intent,  # type: ignore[arg-type]
+        intent_confidence=0.91,
+        understanding_summary=summary,
+        parsed_spec=parsed_spec,
+        parsed_candidates=parsed_spec.model_dump() if parsed_spec is not None else {},
+        field_confidences={
+            field: _field_confidence(score, f"{field}:{score}")
+            for field, score in field_scores.items()
+        },
+        ranked_candidates={},
+        trace={"source": "test"},
+    )
+
+
 def test_chat_message_returns_chat_mode_and_persists_assistant_message(client: TestClient) -> None:
     session_id = _create_session()
     try:
@@ -271,6 +345,202 @@ def test_chat_message_returns_chat_mode_and_persists_assistant_message(client: T
             assistant_messages = [item for item in messages if item.role == "assistant"]
             assert len(assistant_messages) == 1
             assert assistant_messages[0].content == "当然可以，我们先聊聊。"
+    finally:
+        _cleanup_session(session_id)
+
+
+def test_chat_message_includes_understanding_payload_and_persists_message_understanding(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = _create_session()
+    understanding = _understanding(
+        intent="chat",
+        summary="用户在普通聊天。",
+        parsed_spec=None,
+        field_scores={
+            "aoi_input": 0.0,
+            "aoi_source_type": 0.0,
+            "time_range": 0.0,
+            "analysis_type": 0.0,
+        },
+    )
+    decision = ResponseDecision(
+        mode="chat_reply",
+        assistant_message="当然，我们可以继续聊这个。",
+        editable_fields=[],
+        response_payload={
+            "response_mode": "chat_reply",
+            "requires_execution": False,
+            "execution_blocked": False,
+        },
+        execution_blocked=False,
+        requires_task_creation=False,
+        requires_revision_creation=False,
+        requires_execution=False,
+    )
+    captured_message_id: str | None = None
+
+    def _fake_context_builder(db, *, session_id: str, message_id: str, message_content: str, preferred_file_ids=None):  # noqa: ANN001, ARG001
+        nonlocal captured_message_id
+        captured_message_id = message_id
+        return _context_bundle(session_id, message_id)
+
+    monkeypatch.setattr(orchestrator, "build_conversation_context", _fake_context_builder, raising=False)
+    monkeypatch.setattr(orchestrator, "understand_message", lambda *args, **kwargs: understanding, raising=False)
+    monkeypatch.setattr(orchestrator, "decide_response", lambda *args, **kwargs: decision, raising=False)
+
+    try:
+        payload = _post_message(client, session_id, "你好，今天可以先随便聊聊吗？")
+
+        assert payload["mode"] == "chat"
+        assert payload["response_mode"] == "chat_reply"
+        assert payload["understanding"]["intent"] == "chat"
+        assert payload["understanding"]["understanding_summary"] == "用户在普通聊天。"
+        assert payload["response_payload"]["requires_execution"] is False
+
+        with SessionLocal() as db:
+            row = (
+                db.query(MessageUnderstandingRecord)
+                .filter(MessageUnderstandingRecord.message_id == captured_message_id)
+                .one_or_none()
+            )
+            assert row is not None
+            assert row.response_mode == "chat_reply"
+            assert row.intent == "chat"
+    finally:
+        _cleanup_session(session_id)
+
+
+def test_medium_confidence_task_like_message_returns_confirm_understanding_without_creating_task(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = _create_session()
+    understanding = _understanding(
+        intent="new_task",
+        summary="用户想分析江西 2024 年 6 月 NDVI，但 AOI 来源还需要确认。",
+        parsed_spec=ParsedTaskSpec(
+            aoi_input="江西",
+            aoi_source_type="admin_name",
+            time_range={"start": "2024-06-01", "end": "2024-06-30"},
+            analysis_type="NDVI",
+        ),
+        field_scores={
+            "aoi_input": 0.88,
+            "aoi_source_type": 0.72,
+            "time_range": 0.91,
+            "analysis_type": 0.93,
+        },
+    )
+    decision = ResponseDecision(
+        mode="confirm_understanding",
+        assistant_message="我理解的是：分析江西 2024 年 6 月 NDVI。如果没问题，我就继续。",
+        editable_fields=["aoi_source_type"],
+        response_payload={
+            "response_mode": "confirm_understanding",
+            "editable_fields": ["aoi_source_type"],
+            "requires_execution": False,
+            "execution_blocked": False,
+        },
+        execution_blocked=False,
+        requires_task_creation=True,
+        requires_revision_creation=False,
+        requires_execution=False,
+    )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "build_conversation_context",
+        lambda db, *, session_id, message_id, message_content, preferred_file_ids=None: _context_bundle(session_id, message_id),  # noqa: ANN001, ARG005
+        raising=False,
+    )
+    monkeypatch.setattr(orchestrator, "understand_message", lambda *args, **kwargs: understanding, raising=False)
+    monkeypatch.setattr(orchestrator, "decide_response", lambda *args, **kwargs: decision, raising=False)
+
+    try:
+        payload = _post_message(client, session_id, TASK_REQUEST)
+
+        assert payload["mode"] == "chat"
+        assert payload["task_id"] is None
+        assert payload["awaiting_task_confirmation"] is False
+        assert payload["response_mode"] == "confirm_understanding"
+        assert payload["assistant_message"] == decision.assistant_message
+        assert payload["understanding"]["intent"] == "new_task"
+        assert payload["response_payload"]["editable_fields"] == ["aoi_source_type"]
+
+        with SessionLocal() as db:
+            assert (
+                db.query(TaskRunRecord).filter(TaskRunRecord.session_id == session_id).count() == 0
+            )
+    finally:
+        _cleanup_session(session_id)
+
+
+def test_execute_now_task_response_carries_understanding_metadata(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(get_settings(), "intent_task_confirmation_required", False)
+    session_id = _create_session()
+    understanding = _understanding(
+        intent="new_task",
+        summary="用户请求执行江西 2024 年 6 月 NDVI 分析。",
+        parsed_spec=ParsedTaskSpec(
+            aoi_input="江西",
+            aoi_source_type="admin_name",
+            time_range={"start": "2024-06-01", "end": "2024-06-30"},
+            analysis_type="NDVI",
+        ),
+        field_scores={
+            "aoi_input": 0.92,
+            "aoi_source_type": 0.91,
+            "time_range": 0.94,
+            "analysis_type": 0.95,
+        },
+    )
+    decision = ResponseDecision(
+        mode="execute_now",
+        assistant_message="关键信息齐了，我会直接开始执行。",
+        editable_fields=[],
+        response_payload={
+            "response_mode": "execute_now",
+            "requires_execution": True,
+            "execution_blocked": False,
+        },
+        execution_blocked=False,
+        requires_task_creation=True,
+        requires_revision_creation=False,
+        requires_execution=True,
+    )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "build_conversation_context",
+        lambda db, *, session_id, message_id, message_content, preferred_file_ids=None: _context_bundle(session_id, message_id),  # noqa: ANN001, ARG005
+        raising=False,
+    )
+    monkeypatch.setattr(orchestrator, "understand_message", lambda *args, **kwargs: understanding, raising=False)
+    monkeypatch.setattr(orchestrator, "decide_response", lambda *args, **kwargs: decision, raising=False)
+
+    try:
+        payload = _post_message(client, session_id, TASK_REQUEST)
+
+        assert payload["mode"] == "task"
+        assert payload["task_id"]
+        assert payload["response_mode"] == "execute_now"
+        assert payload["understanding"]["intent"] == "new_task"
+        assert payload["response_payload"]["requires_execution"] is True
+
+        with SessionLocal() as db:
+            row = (
+                db.query(MessageUnderstandingRecord)
+                .filter(MessageUnderstandingRecord.message_id == payload["message_id"])
+                .one_or_none()
+            )
+            assert row is not None
+            assert row.task_id == payload["task_id"]
+            assert row.response_mode == "execute_now"
     finally:
         _cleanup_session(session_id)
 
