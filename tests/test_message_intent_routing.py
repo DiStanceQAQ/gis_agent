@@ -24,6 +24,7 @@ from packages.domain.models import (
 from packages.domain.services import orchestrator
 from packages.domain.services import chat as chat_service
 from packages.domain.services import understanding as understanding_service
+from packages.domain.services.aoi import AOIRefreshResult
 from packages.domain.services.conversation_context import ConversationContextBundle
 from packages.domain.services.intent import IntentResult, is_task_confirmation_message
 from packages.domain.services.llm_client import LLMResponse, LLMUsage
@@ -692,27 +693,504 @@ def test_explicit_confirmation_uses_latest_request_and_creates_task(client: Test
         assert payload["awaiting_task_confirmation"] is False
         assert payload["intent"] == "task"
         assert payload["intent_confidence"] == 0.99
+        assert payload["response_mode"] == "execute_now"
+        assert payload["understanding"]["intent"] == "task_confirmation"
+        assert payload["response_payload"]["require_approval"] is True
+
+        with SessionLocal() as db:
+            row = (
+                db.query(MessageUnderstandingRecord)
+                .filter(MessageUnderstandingRecord.message_id == payload["message_id"])
+                .one_or_none()
+            )
+            assert row is not None
+            assert row.task_id == payload["task_id"]
+            assert row.intent == "task_confirmation"
+            assert row.response_mode == "execute_now"
     finally:
         _cleanup_session(session_id)
 
 
-def test_explicit_confirmation_uses_latest_request_when_parser_context_is_incomplete(
+def test_incomplete_request_surfaces_missing_fields_without_legacy_confirmation_prompt(
     client: TestClient,
 ) -> None:
     session_id = _create_session()
     try:
         first_payload = _post_message(client, session_id, CLIP_TASK_REQUEST)
-        assert first_payload["awaiting_task_confirmation"] is True
+        assert first_payload["mode"] == "chat"
+        assert first_payload["task_id"] is None
+        assert first_payload["awaiting_task_confirmation"] is False
+        assert first_payload["response_mode"] == "ask_missing_fields"
+        assert first_payload["response_payload"]["missing_fields"] == [
+            "aoi_input",
+            "aoi_source_type",
+            "time_range",
+        ]
+
+        payload = _post_message(client, session_id, "好的，继续")
+
+        assert payload["mode"] == "chat"
+        assert payload["task_id"] is None
+        assert payload["awaiting_task_confirmation"] is False
+    finally:
+        _cleanup_session(session_id)
+
+
+def test_confirmation_after_confirm_understanding_creates_task_and_persists_metadata(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = _create_session()
+    understanding = _understanding(
+        intent="new_task",
+        summary="用户想分析江西 2024 年 6 月 NDVI，但 AOI 来源还需要确认。",
+        parsed_spec=ParsedTaskSpec(
+            aoi_input="江西",
+            aoi_source_type="admin_name",
+            time_range={"start": "2024-06-01", "end": "2024-06-30"},
+            analysis_type="NDVI",
+        ),
+        field_scores={
+            "aoi_input": 0.88,
+            "aoi_source_type": 0.72,
+            "time_range": 0.91,
+            "analysis_type": 0.93,
+        },
+    )
+    decision = ResponseDecision(
+        mode="confirm_understanding",
+        assistant_message="我理解的是：分析江西 2024 年 6 月 NDVI。如果没问题，我就继续。",
+        editable_fields=["aoi_source_type"],
+        response_payload={
+            "response_mode": "confirm_understanding",
+            "editable_fields": ["aoi_source_type"],
+            "requires_execution": False,
+            "execution_blocked": False,
+        },
+        execution_blocked=False,
+        requires_task_creation=True,
+        requires_revision_creation=False,
+        requires_execution=False,
+    )
+
+    def _fake_context_builder(db, *, session_id: str, message_id: str, message_content: str, preferred_file_ids=None):  # noqa: ANN001, ARG001
+        return _context_bundle(session_id, message_id)
+
+    def _fake_understand_message(message: str, **kwargs):  # noqa: ANN001, ARG001
+        if message == TASK_REQUEST:
+            return understanding
+        raise AssertionError("confirmation branch should not re-enter understand_message")
+
+    def _fake_decide_response(understanding_obj, **kwargs):  # noqa: ANN001, ARG001
+        if understanding_obj is understanding:
+            return decision
+        raise AssertionError("confirmation branch should synthesize its own response metadata")
+
+    monkeypatch.setattr(orchestrator, "build_conversation_context", _fake_context_builder, raising=False)
+    monkeypatch.setattr(orchestrator, "understand_message", _fake_understand_message, raising=False)
+    monkeypatch.setattr(orchestrator, "decide_response", _fake_decide_response, raising=False)
+
+    try:
+        prompt_payload = _post_message(client, session_id, TASK_REQUEST)
+        assert prompt_payload["mode"] == "chat"
+        assert prompt_payload["response_mode"] == "confirm_understanding"
 
         payload = _post_message(client, session_id, "好的，继续")
 
         assert payload["mode"] == "task"
         assert payload["task_id"]
-        assert payload["task_status"] == TASK_STATUS_WAITING_CLARIFICATION
-        assert payload["need_clarification"] is True
-        assert payload["awaiting_task_confirmation"] is False
-        assert payload["intent"] == "task"
-        assert payload["intent_confidence"] == 0.99
+        assert payload["task_status"] == TASK_STATUS_AWAITING_APPROVAL
+        assert payload["response_mode"] == "execute_now"
+        assert payload["understanding"]["intent"] == "task_confirmation"
+        assert payload["response_payload"]["require_approval"] is True
+
+        with SessionLocal() as db:
+            row = (
+                db.query(MessageUnderstandingRecord)
+                .filter(MessageUnderstandingRecord.message_id == payload["message_id"])
+                .one_or_none()
+            )
+            assert row is not None
+            assert row.task_id == payload["task_id"]
+            assert row.intent == "task_confirmation"
+            assert row.response_mode == "execute_now"
+    finally:
+        _cleanup_session(session_id)
+
+
+def test_delayed_confirmation_after_confirm_understanding_and_chat_does_not_execute_old_request(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = _create_session()
+    understanding = _understanding(
+        intent="new_task",
+        summary="用户想分析江西 2024 年 6 月 NDVI，但 AOI 来源还需要确认。",
+        parsed_spec=ParsedTaskSpec(
+            aoi_input="江西",
+            aoi_source_type="admin_name",
+            time_range={"start": "2024-06-01", "end": "2024-06-30"},
+            analysis_type="NDVI",
+        ),
+        field_scores={
+            "aoi_input": 0.88,
+            "aoi_source_type": 0.72,
+            "time_range": 0.91,
+            "analysis_type": 0.93,
+        },
+    )
+    decision = ResponseDecision(
+        mode="confirm_understanding",
+        assistant_message="我理解的是：分析江西 2024 年 6 月 NDVI。如果没问题，我就继续。",
+        editable_fields=["aoi_source_type"],
+        response_payload={
+            "response_mode": "confirm_understanding",
+            "editable_fields": ["aoi_source_type"],
+            "requires_execution": False,
+            "execution_blocked": False,
+        },
+        execution_blocked=False,
+        requires_task_creation=True,
+        requires_revision_creation=False,
+        requires_execution=False,
+    )
+    chat_understanding = _understanding(
+        intent="chat",
+        summary="用户在普通聊天。",
+        parsed_spec=None,
+        field_scores={
+            "aoi_input": 0.0,
+            "aoi_source_type": 0.0,
+            "time_range": 0.0,
+            "analysis_type": 0.0,
+        },
+    )
+    chat_decision = ResponseDecision(
+        mode="chat_reply",
+        assistant_message="当然，我们可以继续聊这个。",
+        editable_fields=[],
+        response_payload={
+            "response_mode": "chat_reply",
+            "requires_execution": False,
+            "execution_blocked": False,
+        },
+        execution_blocked=False,
+        requires_task_creation=False,
+        requires_revision_creation=False,
+        requires_execution=False,
+    )
+
+    def _fake_context_builder(db, *, session_id: str, message_id: str, message_content: str, preferred_file_ids=None):  # noqa: ANN001, ARG001
+        return _context_bundle(session_id, message_id)
+
+    def _fake_understand_message(message: str, **kwargs):  # noqa: ANN001, ARG001
+        if message == TASK_REQUEST:
+            return understanding
+        return chat_understanding
+
+    def _fake_decide_response(understanding_obj, **kwargs):  # noqa: ANN001, ARG001
+        if understanding_obj is understanding:
+            return decision
+        if understanding_obj is chat_understanding:
+            return chat_decision
+        raise AssertionError("unexpected understanding object")
+
+    monkeypatch.setattr(orchestrator, "build_conversation_context", _fake_context_builder, raising=False)
+    monkeypatch.setattr(orchestrator, "understand_message", _fake_understand_message, raising=False)
+    monkeypatch.setattr(orchestrator, "decide_response", _fake_decide_response, raising=False)
+
+    try:
+        prompt_payload = _post_message(client, session_id, TASK_REQUEST)
+        assert prompt_payload["response_mode"] == "confirm_understanding"
+
+        chat_payload = _post_message(client, session_id, "今天先不做任务，聊聊别的。")
+        assert chat_payload["mode"] == "chat"
+        assert chat_payload["response_mode"] == "chat_reply"
+
+        delayed_confirmation_payload = _post_message(client, session_id, "好的，继续")
+
+        assert delayed_confirmation_payload["mode"] == "chat"
+        assert delayed_confirmation_payload["task_id"] is None
+        assert delayed_confirmation_payload["awaiting_task_confirmation"] is False
+
+        with SessionLocal() as db:
+            assert (
+                db.query(TaskRunRecord).filter(TaskRunRecord.session_id == session_id).count() == 0
+            )
+    finally:
+        _cleanup_session(session_id)
+
+
+def test_task_correction_message_creates_and_activates_new_revision(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = _create_session()
+    try:
+        prompt_payload = _post_message(client, session_id, TASK_REQUEST)
+        assert prompt_payload["awaiting_task_confirmation"] is True
+
+        initial_task_payload = _post_message(client, session_id, "好的，继续")
+        task_id = str(initial_task_payload["task_id"])
+        assert task_id
+
+        with SessionLocal() as db:
+            initial_task = db.get(TaskRunRecord, task_id)
+            assert initial_task is not None
+            initial_revision = next(revision for revision in initial_task.revisions if revision.is_active)
+            initial_revision_id = initial_revision.id
+
+        correction_understanding = _understanding(
+            intent="task_correction",
+            summary="把时间范围改成 2023 年 6 月，其他条件保持不变。",
+            parsed_spec=ParsedTaskSpec(
+                time_range={"start": "2023-06-01", "end": "2023-06-30"},
+                analysis_type="NDVI",
+            ),
+            field_scores={
+                "aoi_input": 0.93,
+                "aoi_source_type": 0.91,
+                "time_range": 0.96,
+                "analysis_type": 0.95,
+            },
+        )
+        correction_decision = ResponseDecision(
+            mode="show_revision",
+            assistant_message="这是我当前的理解：把时间范围改成 2023 年 6 月，其他条件保持不变。你可以直接修改。",
+            editable_fields=["time_range"],
+            response_payload={
+                "response_mode": "show_revision",
+                "requires_revision_creation": True,
+                "requires_execution": False,
+                "execution_blocked": False,
+            },
+            execution_blocked=False,
+            requires_task_creation=False,
+            requires_revision_creation=True,
+            requires_execution=False,
+        )
+
+        original_understand_message = orchestrator.understand_message
+        original_decide_response = orchestrator.decide_response
+        original_context_builder = orchestrator.build_conversation_context
+
+        def _patched_context_builder(db, *, session_id: str, message_id: str, message_content: str, preferred_file_ids=None):  # noqa: ANN001, ARG001
+            if message_content == FOLLOWUP_REQUEST:
+                bundle = _context_bundle(session_id, message_id)
+                bundle.latest_active_task_id = task_id
+                bundle.latest_active_revision_id = initial_revision_id
+                bundle.latest_active_revision_summary = "初始版本"
+                bundle.explicit_signals = {
+                    "confirmation_hint": False,
+                    "correction_hint": True,
+                    "revision_field_overlap": {
+                        "revision_id": initial_revision_id,
+                        "fields": ["time_range"],
+                        "matched_signals": ["correction_hint"],
+                    },
+                }
+                return bundle
+            return original_context_builder(
+                db,
+                session_id=session_id,
+                message_id=message_id,
+                message_content=message_content,
+                preferred_file_ids=preferred_file_ids,
+            )
+
+        def _patched_understand_message(message: str, *args, **kwargs):  # noqa: ANN002, ANN003
+            if message == FOLLOWUP_REQUEST:
+                return correction_understanding
+            return original_understand_message(message, *args, **kwargs)
+
+        def _patched_decide_response(understanding_obj, *args, **kwargs):  # noqa: ANN002, ANN003
+            if understanding_obj is correction_understanding:
+                return correction_decision
+            return original_decide_response(understanding_obj, *args, **kwargs)
+
+        monkeypatch.setattr(orchestrator, "build_conversation_context", _patched_context_builder, raising=False)
+        monkeypatch.setattr(orchestrator, "understand_message", _patched_understand_message, raising=False)
+        monkeypatch.setattr(orchestrator, "decide_response", _patched_decide_response, raising=False)
+
+        payload = _post_message(client, session_id, FOLLOWUP_REQUEST)
+
+        assert payload["mode"] == "chat"
+        assert payload["task_id"] == task_id
+        assert payload["task_status"] == TASK_STATUS_AWAITING_APPROVAL
+        assert payload["response_mode"] == "show_revision"
+        assert payload["understanding"]["intent"] == "task_correction"
+
+        with SessionLocal() as db:
+            task = db.get(TaskRunRecord, task_id)
+            assert task is not None
+            active_revision = next(revision for revision in task.revisions if revision.is_active)
+            assert active_revision.id != initial_revision_id
+            assert active_revision.revision_number == 2
+            assert active_revision.base_revision_id == initial_revision_id
+            assert active_revision.raw_spec_json["time_range"] == {
+                "start": "2023-06-01",
+                "end": "2023-06-30",
+            }
+            assert task.task_spec is not None
+            assert task.task_spec.raw_spec_json["time_range"] == {
+                "start": "2023-06-01",
+                "end": "2023-06-30",
+            }
+            assert task.last_response_mode == "show_revision"
+
+            row = (
+                db.query(MessageUnderstandingRecord)
+                .filter(MessageUnderstandingRecord.message_id == payload["message_id"])
+                .one_or_none()
+            )
+            assert row is not None
+            assert row.task_id == task_id
+            assert row.derived_revision_id == active_revision.id
+            assert row.intent == "task_correction"
+            assert row.response_mode == "show_revision"
+    finally:
+        _cleanup_session(session_id)
+
+
+def test_blocked_task_correction_clears_execution_blocked_and_activates_revision(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = _create_session()
+    try:
+        prompt_payload = _post_message(client, session_id, TASK_REQUEST)
+        assert prompt_payload["awaiting_task_confirmation"] is True
+
+        initial_task_payload = _post_message(client, session_id, "好的，继续")
+        task_id = str(initial_task_payload["task_id"])
+        assert task_id
+
+        with SessionLocal() as db:
+            task = db.get(TaskRunRecord, task_id)
+            assert task is not None
+            active_revision = next(revision for revision in task.revisions if revision.is_active)
+            active_revision.execution_blocked = True
+            active_revision.execution_blocked_reason = "AOI normalization failed: test blocked."
+            active_revision.response_mode = "ask_missing_fields"
+            task.status = TASK_STATUS_WAITING_CLARIFICATION
+            task.current_step = "normalize_aoi"
+            task.interaction_state = "execution_blocked"
+            task.last_response_mode = "ask_missing_fields"
+            if task.task_spec is not None:
+                task.task_spec.need_confirmation = True
+                task.task_spec.raw_spec_json = {
+                    **(task.task_spec.raw_spec_json or {}),
+                    "need_confirmation": True,
+                    "missing_fields": ["aoi_boundary"],
+                    "clarification_message": "AOI normalization failed: test blocked.",
+                }
+            blocked_revision_id = active_revision.id
+            db.commit()
+
+        correction_understanding = _understanding(
+            intent="task_correction",
+            summary="把 AOI 改成江西，其他条件保持不变。",
+            parsed_spec=ParsedTaskSpec(
+                aoi_input="江西",
+                aoi_source_type="admin_name",
+                analysis_type="NDVI",
+            ),
+            field_scores={
+                "aoi_input": 0.94,
+                "aoi_source_type": 0.93,
+                "time_range": 0.91,
+                "analysis_type": 0.95,
+            },
+        )
+        correction_decision = ResponseDecision(
+            mode="show_revision",
+            assistant_message="这是我当前的理解：把 AOI 改成江西，其他条件保持不变。你可以直接修改。",
+            editable_fields=["aoi_input", "aoi_source_type"],
+            response_payload={
+                "response_mode": "show_revision",
+                "requires_revision_creation": True,
+                "requires_execution": False,
+                "execution_blocked": False,
+            },
+            execution_blocked=False,
+            requires_task_creation=False,
+            requires_revision_creation=True,
+            requires_execution=False,
+        )
+
+        original_context_builder = orchestrator.build_conversation_context
+        original_understand_message = orchestrator.understand_message
+        original_decide_response = orchestrator.decide_response
+
+        def _patched_context_builder(db, *, session_id: str, message_id: str, message_content: str, preferred_file_ids=None):  # noqa: ANN001, ARG001
+            if message_content == "把 AOI 改成江西":
+                bundle = _context_bundle(session_id, message_id)
+                bundle.latest_active_task_id = task_id
+                bundle.latest_active_revision_id = blocked_revision_id
+                bundle.latest_active_revision_summary = "阻塞版本"
+                bundle.explicit_signals = {
+                    "confirmation_hint": False,
+                    "correction_hint": True,
+                    "revision_field_overlap": {
+                        "revision_id": blocked_revision_id,
+                        "fields": ["aoi_input", "aoi_source_type"],
+                        "matched_signals": ["correction_hint"],
+                    },
+                }
+                return bundle
+            return original_context_builder(
+                db,
+                session_id=session_id,
+                message_id=message_id,
+                message_content=message_content,
+                preferred_file_ids=preferred_file_ids,
+            )
+
+        def _patched_understand_message(message: str, *args, **kwargs):  # noqa: ANN002, ANN003
+            if message == "把 AOI 改成江西":
+                return correction_understanding
+            return original_understand_message(message, *args, **kwargs)
+
+        def _patched_decide_response(understanding_obj, *args, **kwargs):  # noqa: ANN002, ANN003
+            if understanding_obj is correction_understanding:
+                return correction_decision
+            return original_decide_response(understanding_obj, *args, **kwargs)
+
+        def _patched_normalize_active_revision_aoi(db, *, task, revision, uploaded_files=None):  # noqa: ANN001, ARG001
+            revision.execution_blocked = False
+            revision.execution_blocked_reason = None
+            return AOIRefreshResult(execution_blocked=False, blocked_reason=None, aoi_record=None)
+
+        monkeypatch.setattr(orchestrator, "build_conversation_context", _patched_context_builder, raising=False)
+        monkeypatch.setattr(orchestrator, "understand_message", _patched_understand_message, raising=False)
+        monkeypatch.setattr(orchestrator, "decide_response", _patched_decide_response, raising=False)
+        monkeypatch.setattr(
+            orchestrator,
+            "normalize_active_revision_aoi",
+            _patched_normalize_active_revision_aoi,
+            raising=False,
+        )
+
+        payload = _post_message(client, session_id, "把 AOI 改成江西")
+
+        assert payload["mode"] == "chat"
+        assert payload["task_id"] == task_id
+        assert payload["task_status"] == TASK_STATUS_AWAITING_APPROVAL
+        assert payload["response_mode"] == "show_revision"
+
+        with SessionLocal() as db:
+            task = db.get(TaskRunRecord, task_id)
+            assert task is not None
+            active_revision = next(revision for revision in task.revisions if revision.is_active)
+            assert active_revision.id != blocked_revision_id
+            assert active_revision.revision_number == 2
+            assert active_revision.execution_blocked is False
+            assert task.status == TASK_STATUS_AWAITING_APPROVAL
+            assert task.interaction_state == "understanding"
+            assert task.last_response_mode == "show_revision"
+            assert task.task_spec is not None
+            assert task.task_spec.raw_spec_json["aoi_input"] == "江西"
+            assert task.task_spec.raw_spec_json["aoi_source_type"] == "admin_name"
     finally:
         _cleanup_session(session_id)
 
@@ -801,7 +1279,7 @@ def test_confirmation_reuses_recent_session_uploads_when_current_file_ids_are_em
         _cleanup_session(session_id)
 
 
-def test_followup_style_request_can_be_used_as_confirmation_context(client: TestClient) -> None:
+def test_followup_style_request_uses_revision_guidance_instead_of_legacy_confirmation(client: TestClient) -> None:
     session_id = _create_session()
     try:
         first_prompt = _post_message(client, session_id, TASK_REQUEST)
@@ -813,19 +1291,21 @@ def test_followup_style_request_can_be_used_as_confirmation_context(client: Test
         assert parent_task_id
 
         followup_prompt = _post_message(client, session_id, FOLLOWUP_REQUEST)
-        assert followup_prompt["awaiting_task_confirmation"] is True
+        assert followup_prompt["mode"] == "chat"
+        assert followup_prompt["awaiting_task_confirmation"] is False
+        assert followup_prompt["task_id"] == parent_task_id
+        assert followup_prompt["response_mode"] == "ask_missing_fields"
 
         payload = _post_message(client, session_id, "好的，继续")
 
-        assert payload["mode"] == "task"
-        assert payload["task_id"]
-        assert payload["task_id"] != parent_task_id
+        assert payload["mode"] == "chat"
+        assert payload["task_id"] is None
+        assert payload["awaiting_task_confirmation"] is False
 
         with SessionLocal() as db:
-            task = db.get(TaskRunRecord, payload["task_id"])
-            assert task is not None
-            assert task.parent_task_id == parent_task_id
-            assert task.requested_time_range == {"start": "2023-06-01", "end": "2023-06-30"}
+            assert (
+                db.query(TaskRunRecord).filter(TaskRunRecord.session_id == session_id).count() == 1
+            )
     finally:
         _cleanup_session(session_id)
 

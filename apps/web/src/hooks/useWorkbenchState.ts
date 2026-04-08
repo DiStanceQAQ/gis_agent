@@ -623,7 +623,7 @@ export function useWorkbenchState() {
         setNotice(responseNotice);
       }
 
-      if (response.mode === "task" && response.task_id) {
+      if (response.task_id) {
         setStreamingAssistantMessage(null);
         await Promise.all([hydrateTask(response.task_id), loadLatestMessages(sessionId)]);
       } else {

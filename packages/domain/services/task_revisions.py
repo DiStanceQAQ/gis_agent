@@ -73,6 +73,38 @@ def create_initial_revision(
     return revision
 
 
+def create_correction_revision(
+    db: Session,
+    *,
+    task: TaskRunRecord,
+    base_revision: TaskSpecRevisionRecord,
+    understanding: UnderstandingLike,
+    source_message_id: str,
+    raw_spec_json: dict[str, object] | None = None,
+) -> TaskSpecRevisionRecord:
+    revision = TaskSpecRevisionRecord(
+        id=make_id("rev"),
+        task_id=task.id,
+        revision_number=base_revision.revision_number + 1,
+        base_revision_id=base_revision.id,
+        source_message_id=source_message_id,
+        change_type="correction",
+        is_active=False,
+        understanding_intent=understanding.intent,
+        understanding_summary=understanding.understanding_summary,
+        raw_spec_json=_resolve_revision_raw_spec_json(
+            understanding=understanding,
+            raw_spec_json=raw_spec_json,
+        ),
+        field_confidences_json=understanding.field_confidences_dump(),
+        ranked_candidates_json=understanding.ranked_candidates,
+        understanding_trace_json=understanding.trace,
+    )
+    db.add(revision)
+    db.flush()
+    return revision
+
+
 def activate_revision(
     db: Session,
     *,

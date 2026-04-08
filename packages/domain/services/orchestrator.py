@@ -18,6 +18,7 @@ from packages.domain.logging import get_logger
 from packages.domain.models import (
     AOIRecord,
     MessageRecord,
+    MessageUnderstandingRecord,
     SessionRecord,
     TaskRunRecord,
     TaskSpecRecord,
@@ -54,6 +55,7 @@ from packages.domain.services.storage import (
 from packages.domain.services.task_events import append_task_event, list_task_events
 from packages.domain.services.task_revisions import (
     activate_revision,
+    create_correction_revision,
     create_initial_revision,
     ensure_initial_revision_for_task,
     get_active_revision,
@@ -102,6 +104,9 @@ TASK_CONFIRMATION_PROMPT = (
     "我理解你想发起一个 GIS 分析任务。请回复“好的，继续”或“开始执行”，我会为你生成计划并进入审批。"
 )
 TASK_CONFIRMATION_MISSING_CONTEXT_PROMPT = "我收到了确认，但还没找到上一条可执行的任务请求。请先描述分析区域、时间范围和目标，再回复“好的，继续”。"
+TASK_CONFIRMATION_REQUIRES_REVISION_PROMPT = (
+    "我收到了继续，但当前理解还停留在待修正状态。请直接补充或修改我标出来的字段后，我再继续。"
+)
 UPLOAD_REQUEST_HINT_PATTERN = re.compile(
     r"(上传|文件|边界|geojson|shp|gpkg)",
     re.IGNORECASE,
@@ -127,6 +132,14 @@ class _ParsedTaskUnderstanding:
 
     def field_confidences_dump(self) -> dict[str, object]:
         return dict(self._field_confidences)
+
+
+@dataclass(slots=True)
+class _ConfirmationSourceContext:
+    source_request_message: MessageRecord | None = None
+    source_understanding: MessageUnderstandingRecord | None = None
+    latest_assistant_message: MessageRecord | None = None
+    source_kind: str = "missing"
 
 
 def _build_initial_revision_understanding(
@@ -204,6 +217,224 @@ def _build_revision_summary(revision: object) -> dict[str, object]:
         "field_confidences": dict(getattr(revision, "field_confidences_json", {}) or {}),
         "ranked_candidates": dict(getattr(revision, "ranked_candidates_json", {}) or {}),
     }
+
+
+def _build_confirmation_understanding(
+    *,
+    confirmation_message: str,
+    intent_confidence: float,
+    source_request_message: MessageRecord,
+    source_kind: str,
+    active_revision: object | None,
+) -> MessageUnderstanding:
+    parsed_spec: ParsedTaskSpec | None = None
+    ranked_candidates = {}
+    understanding_summary: str | None = f"用户确认按上一条理解继续：{source_request_message.content.strip()}"
+    if active_revision is not None:
+        raw_spec_json = getattr(active_revision, "raw_spec_json", None)
+        if isinstance(raw_spec_json, dict) and raw_spec_json:
+            try:
+                parsed_spec = ParsedTaskSpec(**raw_spec_json)
+            except Exception:  # pragma: no cover - defensive fallback
+                parsed_spec = None
+        revision_summary = getattr(active_revision, "understanding_summary", None)
+        if isinstance(revision_summary, str) and revision_summary.strip():
+            understanding_summary = revision_summary.strip()
+        ranked_candidates = dict(getattr(active_revision, "ranked_candidates_json", {}) or {})
+
+    return MessageUnderstanding(
+        intent="task_confirmation",
+        intent_confidence=intent_confidence,
+        understanding_summary=understanding_summary,
+        parsed_spec=parsed_spec,
+        parsed_candidates=parsed_spec.model_dump() if parsed_spec is not None else {},
+        field_confidences={},
+        ranked_candidates=ranked_candidates,
+        trace={
+            "message_excerpt": confirmation_message[:120],
+            "confirmation": {
+                "source_message_id": source_request_message.id,
+                "source_kind": source_kind,
+            },
+            "context": {
+                "latest_active_task_id": getattr(active_revision, "task_id", None),
+                "latest_active_revision_id": getattr(active_revision, "id", None),
+                "latest_active_revision_summary": understanding_summary,
+            },
+        },
+    )
+
+
+def _build_confirmation_response_decision(
+    *,
+    task_response: MessageCreateResponse,
+    understanding: MessageUnderstanding,
+    active_revision: object | None,
+) -> ResponseDecision:
+    execution_blocked = bool(getattr(active_revision, "execution_blocked", False))
+    blocked_reason = getattr(active_revision, "execution_blocked_reason", None)
+    need_clarification = bool(task_response.need_clarification or execution_blocked)
+    editable_fields = list(task_response.missing_fields) if need_clarification else []
+    mode = "ask_missing_fields" if need_clarification else "execute_now"
+    response_payload: dict[str, object] = {
+        "response_mode": mode,
+        "intent": understanding.intent,
+        "intent_confidence": understanding.intent_confidence,
+        "understanding_summary": understanding.understanding_summary,
+        "editable_fields": editable_fields,
+        "missing_fields": list(task_response.missing_fields),
+        "require_approval": bool(task_response.need_approval),
+        "field_confidences": understanding.field_confidences_dump(),
+        "field_evidence": understanding.field_evidence_dump(),
+        "ranked_candidates": understanding.ranked_candidates,
+        "execution_blocked": execution_blocked,
+        "blocked_reason": blocked_reason,
+        "requires_task_creation": False,
+        "requires_revision_creation": False,
+        "requires_execution": bool(
+            not task_response.need_approval and not task_response.need_clarification and not execution_blocked
+        ),
+    }
+    if active_revision is not None:
+        response_payload["revision_number"] = getattr(active_revision, "revision_number", None)
+        response_payload["revision_change_type"] = getattr(active_revision, "change_type", None)
+        response_payload["active_revision_summary"] = getattr(active_revision, "understanding_summary", None)
+        response_payload["active_response_mode"] = getattr(active_revision, "response_mode", None)
+
+    return ResponseDecision(
+        mode=mode,
+        assistant_message=task_response.assistant_message or "",
+        editable_fields=editable_fields,
+        response_payload=response_payload,
+        execution_blocked=execution_blocked,
+        requires_task_creation=False,
+        requires_revision_creation=False,
+        requires_execution=bool(response_payload["requires_execution"]),
+    )
+
+
+def _build_revision_override_payload(understanding: MessageUnderstanding) -> dict[str, object]:
+    if understanding.parsed_spec is None:
+        return {}
+    override = understanding.parsed_spec.model_dump(exclude_none=True)
+    if "created_from" not in override:
+        override["created_from"] = "revision"
+    return override
+
+
+def _apply_correction_revision(
+    db: Session,
+    *,
+    task: TaskRunRecord,
+    source_message: MessageRecord,
+    understanding: MessageUnderstanding,
+    response_decision: ResponseDecision,
+    active_revision: object | None,
+    uploaded_files: list[UploadedFileRecord],
+) -> tuple[TaskRunRecord, object, ResponseDecision]:
+    if active_revision is None:
+        return task, active_revision, response_decision
+
+    base_raw_spec = dict(getattr(active_revision, "raw_spec_json", {}) or {})
+    override = _build_revision_override_payload(understanding)
+    merged_raw_spec = merge_dicts(base_raw_spec, override)
+    correction_revision = create_correction_revision(
+        db,
+        task=task,
+        base_revision=active_revision,
+        understanding=understanding,
+        source_message_id=source_message.id,
+        raw_spec_json=merged_raw_spec,
+    )
+    correction_revision.response_mode = response_decision.mode
+    correction_revision.response_payload_json = deepcopy(response_decision.response_payload)
+    activate_revision(db, task=task, revision=correction_revision)
+
+    refresh_result = normalize_active_revision_aoi(
+        db,
+        task=task,
+        revision=correction_revision,
+        uploaded_files=uploaded_files,
+    )
+    if refresh_result.execution_blocked:
+        blocked_reason = correction_revision.execution_blocked_reason or "AOI normalization failed."
+        missing_fields = list(response_decision.response_payload.get("missing_fields", []))
+        if "aoi_boundary" not in missing_fields:
+            missing_fields.append("aoi_boundary")
+        if task.task_spec is not None:
+            task.task_spec.need_confirmation = True
+            raw_spec = dict(task.task_spec.raw_spec_json or {})
+            raw_spec["need_confirmation"] = True
+            raw_spec["missing_fields"] = missing_fields
+            raw_spec["clarification_message"] = blocked_reason
+            task.task_spec.raw_spec_json = raw_spec
+        correction_revision.response_mode = "ask_missing_fields"
+        correction_revision.response_payload_json = {
+            **(correction_revision.response_payload_json or {}),
+            "response_mode": "ask_missing_fields",
+            "execution_blocked": True,
+            "blocked_reason": blocked_reason,
+            "missing_fields": missing_fields,
+        }
+        task.last_response_mode = "ask_missing_fields"
+        response_decision = ResponseDecision(
+            mode="ask_missing_fields",
+            assistant_message=blocked_reason,
+            editable_fields=missing_fields,
+            response_payload=dict(correction_revision.response_payload_json or {}),
+            execution_blocked=True,
+            requires_task_creation=False,
+            requires_revision_creation=False,
+            requires_execution=False,
+        )
+    else:
+        if task.task_spec is not None:
+            task.task_spec.need_confirmation = False
+            raw_spec = dict(task.task_spec.raw_spec_json or {})
+            raw_spec["need_confirmation"] = False
+            raw_spec["missing_fields"] = []
+            raw_spec["clarification_message"] = None
+            task.task_spec.raw_spec_json = raw_spec
+        task.interaction_state = "understanding"
+        set_task_status(
+            db,
+            task,
+            TASK_STATUS_AWAITING_APPROVAL,
+            current_step="awaiting_approval",
+            event_type="task_revision_activated",
+            detail={
+                "revision_id": correction_revision.id,
+                "revision_number": correction_revision.revision_number,
+            },
+            force=True,
+        )
+        correction_revision.response_mode = "show_revision"
+        correction_revision.response_payload_json = {
+            **(correction_revision.response_payload_json or {}),
+            "response_mode": "show_revision",
+            "execution_blocked": False,
+            "blocked_reason": None,
+        }
+        task.last_response_mode = "show_revision"
+        response_decision = ResponseDecision(
+            mode="show_revision",
+            assistant_message=response_decision.assistant_message,
+            editable_fields=response_decision.editable_fields,
+            response_payload={
+                **response_decision.response_payload,
+                "response_mode": "show_revision",
+                "requires_revision_creation": False,
+                "execution_blocked": False,
+                "blocked_reason": None,
+            },
+            execution_blocked=False,
+            requires_task_creation=False,
+            requires_revision_creation=False,
+            requires_execution=False,
+        )
+
+    db.flush()
+    return task, correction_revision, response_decision
 
 
 def create_session(db: Session) -> SessionResponse:
@@ -534,6 +765,82 @@ def _is_executable_followup_request(content: str, *, latest_task: TaskRunRecord 
     if latest_task is None or not is_followup_request(content):
         return False
     return bool(parse_followup_override_message(content, has_upload=False))
+
+
+def _load_latest_confirmation_candidate_message(
+    prior_messages: list[MessageRecord],
+) -> MessageRecord | None:
+    if not prior_messages:
+        return None
+    for message in prior_messages[1:]:
+        if message.role == "assistant":
+            break
+        if message.role != "user" or message.linked_task_id is not None:
+            continue
+        content = message.content.strip()
+        if not content or is_task_confirmation_message(content):
+            continue
+        return message
+    return None
+
+
+def _resolve_confirmation_source_context(
+    db: Session,
+    *,
+    session_id: str,
+    current_message_id: str,
+    limit: int,
+) -> _ConfirmationSourceContext:
+    prior_messages = (
+        db.query(MessageRecord)
+        .filter(
+            MessageRecord.session_id == session_id,
+            MessageRecord.id != current_message_id,
+        )
+        .order_by(MessageRecord.created_at.desc(), MessageRecord.id.desc())
+        .limit(limit)
+        .all()
+    )
+    if not prior_messages:
+        return _ConfirmationSourceContext()
+
+    latest_message = prior_messages[0]
+    if latest_message.role != "assistant":
+        return _ConfirmationSourceContext(latest_assistant_message=latest_message)
+
+    if latest_message.content == TASK_CONFIRMATION_PROMPT:
+        source_request_message = _find_latest_executable_request_message(
+            db,
+            session_id=session_id,
+            current_message_id=current_message_id,
+            confirmation_prompt_message=latest_message,
+            has_recent_uploads=bool(
+                _load_recent_session_file_ids(db, session_id=session_id, limit=limit)
+            ),
+            limit=limit,
+        )
+        return _ConfirmationSourceContext(
+            source_request_message=source_request_message,
+            latest_assistant_message=latest_message,
+            source_kind="legacy_prompt" if source_request_message is not None else "missing",
+        )
+
+    source_request_message = _load_latest_confirmation_candidate_message(prior_messages)
+    if source_request_message is None:
+        return _ConfirmationSourceContext(latest_assistant_message=latest_message)
+
+    source_understanding = (
+        db.query(MessageUnderstandingRecord)
+        .filter(MessageUnderstandingRecord.message_id == source_request_message.id)
+        .one_or_none()
+    )
+    source_kind = source_understanding.response_mode if source_understanding else "missing"
+    return _ConfirmationSourceContext(
+        source_request_message=source_request_message,
+        source_understanding=source_understanding,
+        latest_assistant_message=latest_message,
+        source_kind=source_kind or "missing",
+    )
 
 
 def _load_active_confirmation_prompt_message(
@@ -1381,15 +1688,17 @@ def create_message(
     message_understanding: MessageUnderstanding | None = None
     response_decision: ResponseDecision | None = None
     active_revision = None
+    conversation_context = None
 
     if is_task_confirmation_message(payload.content):
-        confirmation_prompt_message = _load_active_confirmation_prompt_message(
+        confirmation_source = _resolve_confirmation_source_context(
             db,
             session_id=payload.session_id,
             current_message_id=message.id,
             limit=settings.intent_history_limit,
         )
-        if confirmation_prompt_message is None:
+        source_request_message = confirmation_source.source_request_message
+        if source_request_message is None:
             response = _create_chat_mode_response(
                 db,
                 user_message_id=message.id,
@@ -1409,20 +1718,27 @@ def create_message(
                 include_payload=include_understanding_payload,
             )
 
-        session_file_ids = _load_recent_session_file_ids(
-            db,
-            session_id=payload.session_id,
-            limit=settings.intent_history_limit,
-        )
-        source_request_message = _find_latest_executable_request_message(
-            db,
-            session_id=payload.session_id,
-            current_message_id=message.id,
-            confirmation_prompt_message=confirmation_prompt_message,
-            has_recent_uploads=bool(session_file_ids),
-            limit=settings.intent_history_limit,
-        )
-        if source_request_message is None:
+        if confirmation_source.source_kind in {"ask_missing_fields", "show_revision"}:
+            response = _create_chat_mode_response(
+                db,
+                user_message_id=message.id,
+                session_id=payload.session_id,
+                assistant_message=TASK_CONFIRMATION_REQUIRES_REVISION_PROMPT,
+                intent=intent_result.intent,
+                intent_confidence=intent_result.confidence,
+            )
+            return _finalize_response_with_understanding(
+                db,
+                response,
+                message_id=message.id,
+                session_id=payload.session_id,
+                understanding=message_understanding,
+                response_decision=response_decision,
+                active_revision=active_revision,
+                include_payload=include_understanding_payload,
+            )
+
+        if confirmation_source.source_kind not in {"legacy_prompt", "confirm_understanding"}:
             response = _create_chat_mode_response(
                 db,
                 user_message_id=message.id,
@@ -1463,10 +1779,23 @@ def create_message(
             task_request_content=source_request_message.content,
         )
         source_request_message.linked_task_id = task_response.task_id
-        db.commit()
         task_response.intent = intent_result.intent
         task_response.intent_confidence = intent_result.confidence
         task_response.awaiting_task_confirmation = False
+        if task_response.task_id is not None:
+            active_revision = get_active_revision(db, task_response.task_id)
+        message_understanding = _build_confirmation_understanding(
+            confirmation_message=payload.content,
+            intent_confidence=intent_result.confidence,
+            source_request_message=source_request_message,
+            source_kind=confirmation_source.source_kind,
+            active_revision=active_revision,
+        )
+        response_decision = _build_confirmation_response_decision(
+            task_response=task_response,
+            understanding=message_understanding,
+            active_revision=active_revision,
+        )
         return _finalize_response_with_understanding(
             db,
             task_response,
@@ -1531,36 +1860,66 @@ def create_message(
             include_payload=include_understanding_payload,
         )
 
+    if (
+        message_understanding is not None
+        and active_revision is None
+        and message_understanding.intent in {"task_correction", "task_followup", "task_confirmation"}
+    ):
+        fallback_task = _load_latest_session_task(db, payload.session_id)
+        if fallback_task is not None:
+            active_revision = get_active_revision(db, fallback_task.id)
+            if conversation_context is not None and conversation_context.latest_active_task_id is None:
+                conversation_context.latest_active_task_id = fallback_task.id
+
+    if (
+        message_understanding is not None
+        and response_decision is not None
+        and response_decision.requires_revision_creation
+        and conversation_context is not None
+        and conversation_context.latest_active_task_id is not None
+        and active_revision is not None
+    ):
+        active_task = db.get(TaskRunRecord, conversation_context.latest_active_task_id)
+        if active_task is not None:
+            active_task, active_revision, response_decision = _apply_correction_revision(
+                db,
+                task=active_task,
+                source_message=message,
+                understanding=message_understanding,
+                response_decision=response_decision,
+                active_revision=active_revision,
+                uploaded_files=chat_upload_files,
+            )
+
     if response_decision is not None and response_decision.mode in {
         "confirm_understanding",
         "ask_missing_fields",
         "show_revision",
     }:
-        should_preserve_legacy_confirmation_prompt = (
-            settings.intent_task_confirmation_required
-            and intent_result.intent == "task"
-            and intent_result.confidence >= settings.intent_task_confidence_threshold
-            and response_decision.mode != "confirm_understanding"
+        response = _create_chat_mode_response(
+            db,
+            user_message_id=message.id,
+            session_id=payload.session_id,
+            assistant_message=response_decision.assistant_message,
+            intent=intent_result.intent,
+            intent_confidence=intent_result.confidence,
         )
-        if not should_preserve_legacy_confirmation_prompt:
-            response = _create_chat_mode_response(
-                db,
-                user_message_id=message.id,
-                session_id=payload.session_id,
-                assistant_message=response_decision.assistant_message,
-                intent=intent_result.intent,
-                intent_confidence=intent_result.confidence,
-            )
-            return _finalize_response_with_understanding(
-                db,
-                response,
-                message_id=message.id,
-                session_id=payload.session_id,
-                understanding=message_understanding,
-                response_decision=response_decision,
-                active_revision=active_revision,
-                include_payload=include_understanding_payload,
-            )
+        if active_revision is not None:
+            response.task_id = getattr(active_revision, "task_id", None)
+            task_status = getattr(getattr(active_revision, "task", None), "status", None)
+            if isinstance(task_status, str):
+                response.task_status = task_status
+        return _finalize_response_with_understanding(
+            db,
+            response,
+            message_id=message.id,
+            session_id=payload.session_id,
+            understanding=message_understanding,
+            response_decision=response_decision,
+            active_revision=active_revision,
+            include_payload=include_understanding_payload,
+            task_id=getattr(active_revision, "task_id", None),
+        )
 
     if (
         intent_result.intent == "task"
