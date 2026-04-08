@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from copy import deepcopy
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 import re
@@ -48,6 +49,11 @@ from packages.domain.services.storage import (
     write_upload_file,
 )
 from packages.domain.services.task_events import append_task_event, list_task_events
+from packages.domain.services.task_revisions import (
+    activate_revision,
+    create_initial_revision,
+    ensure_initial_revision_for_task,
+)
 from packages.domain.services.task_state import (
     TASK_STATUS_APPROVED,
     TASK_STATUS_AWAITING_APPROVAL,
@@ -98,6 +104,19 @@ UPLOAD_ACCESS_QUESTION_PATTERN = re.compile(
     r"(?:能|可以|是否|可不可以|可否).*(?:读到|读取|访问|识别|看到).*(?:上传|文件)|(?:读到|读取|访问|识别|看到).*(?:上传|文件)|can\s+you\s+(?:read|access).*(?:upload|file)",
     re.IGNORECASE,
 )
+
+
+@dataclass(slots=True)
+class _ParsedTaskUnderstanding:
+    intent: str
+    understanding_summary: str | None
+    parsed_spec: ParsedTaskSpec | None
+    ranked_candidates: dict[str, list[dict[str, object]]] = field(default_factory=dict)
+    trace: dict[str, object] = field(default_factory=dict)
+    _field_confidences: dict[str, object] = field(default_factory=dict)
+
+    def field_confidences_dump(self) -> dict[str, object]:
+        return dict(self._field_confidences)
 
 
 def _require_named_aoi_clarification(parsed: ParsedTaskSpec) -> ParsedTaskSpec:
@@ -763,7 +782,7 @@ def _build_initial_operation_plan(
 
 
 def _load_latest_session_task(db: Session, session_id: str) -> TaskRunRecord | None:
-    return (
+    task = (
         db.query(TaskRunRecord)
         .join(TaskSpecRecord, TaskSpecRecord.task_id == TaskRunRecord.id)
         .options(
@@ -774,6 +793,9 @@ def _load_latest_session_task(db: Session, session_id: str) -> TaskRunRecord | N
         .order_by(TaskRunRecord.created_at.desc())
         .first()
     )
+    if task is not None and task.task_spec is not None:
+        ensure_initial_revision_for_task(db, task)
+    return task
 
 
 def _merge_task_spec(base_spec: dict, override: dict[str, object]) -> ParsedTaskSpec:
@@ -937,6 +959,24 @@ def _build_task(
         }
         task.status = TASK_STATUS_AWAITING_APPROVAL
         task.current_step = "awaiting_approval"
+
+    understanding = _ParsedTaskUnderstanding(
+        intent="new_task" if parent_task_id is None else "revise_task",
+        understanding_summary=None,
+        parsed_spec=ParsedTaskSpec(**dict(task_spec.raw_spec_json or {})),
+    )
+    revision = create_initial_revision(
+        db,
+        task=task,
+        understanding=understanding,
+        source_message_id=user_message_id,
+    )
+    revision.response_mode = (
+        "ask_missing_fields"
+        if task_spec.need_confirmation
+        else "confirm_understanding"
+    )
+    activate_revision(db, task=task, revision=revision)
 
     append_task_event(
         db,
@@ -1307,6 +1347,8 @@ def _load_task(db: Session, task_id: str) -> TaskRunRecord:
             message="Task not found.",
             detail={"task_id": task_id},
         )
+    if task.task_spec is not None:
+        ensure_initial_revision_for_task(db, task)
     return task
 
 
