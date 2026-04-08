@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 import hashlib
 import json
 import time
@@ -289,3 +290,233 @@ class LLMClient:
                 latency_ms=latency_ms,
                 raw_payload=data,
             )
+
+    def chat_text_stream(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        model: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        phase: str = "unknown",
+        task_id: str | None = None,
+        db_session: Session | None = None,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> str:
+        resolved_model = model or self.settings.llm_model
+        resolved_temperature = (
+            self.settings.llm_temperature if temperature is None else temperature
+        )
+        prompt_hash = build_prompt_hash(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            model=resolved_model,
+        )
+        payload: dict[str, Any] = {
+            "model": resolved_model,
+            "temperature": resolved_temperature,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+
+        endpoint = f"{self.base_url}/chat/completions"
+        attempt = 0
+        max_retries = max(0, self.settings.llm_max_retries)
+
+        def _write_log(
+            *,
+            status: str,
+            latency_ms: int,
+            request_id: str | None = None,
+            input_tokens: int | None = None,
+            output_tokens: int | None = None,
+            total_tokens: int | None = None,
+            error_message: str | None = None,
+        ) -> None:
+            write_llm_call_log(
+                task_id=task_id,
+                phase=phase,
+                model_name=resolved_model,
+                request_id=request_id,
+                prompt_hash=prompt_hash,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=total_tokens,
+                latency_ms=latency_ms,
+                status=status,
+                error_message=error_message,
+                db_session=db_session,
+            )
+
+        try:
+            headers = self._headers()
+        except LLMClientError as exc:
+            _write_log(
+                status="failed",
+                latency_ms=0,
+                error_message=str(exc),
+            )
+            raise
+
+        while True:
+            started = perf_counter()
+            usage = LLMUsage()
+            request_id: str | None = None
+            emitted_chunks: list[str] = []
+            try:
+                with httpx.Client(timeout=self.settings.llm_timeout_seconds) as client:
+                    with client.stream(
+                        "POST",
+                        endpoint,
+                        headers=headers,
+                        json=payload,
+                    ) as response:
+                        request_id = response.headers.get("x-request-id")
+                        if response.status_code >= 400:
+                            retryable = (
+                                response.status_code in {408, 409, 429}
+                                or response.status_code >= 500
+                            )
+                            if retryable and attempt < max_retries:
+                                attempt += 1
+                                time.sleep(min(0.8 * attempt, 2.0))
+                                continue
+                            message = f"LLM request returned status {response.status_code}."
+                            body = response.text
+                            latency_ms = int((perf_counter() - started) * 1000)
+                            _write_log(
+                                status="failed",
+                                latency_ms=latency_ms,
+                                request_id=request_id,
+                                error_message=f"{message} body={body[:800]}",
+                            )
+                            raise LLMClientError(
+                                "LLM request returned an error response.",
+                                status_code=response.status_code,
+                                retryable=False,
+                                detail={"body": body[:800], "attempt": attempt + 1},
+                            )
+
+                        for raw_line in response.iter_lines():
+                            if not raw_line:
+                                continue
+                            line = (
+                                raw_line.decode("utf-8")
+                                if isinstance(raw_line, bytes)
+                                else raw_line
+                            )
+                            if not line.startswith("data:"):
+                                continue
+                            payload_line = line.removeprefix("data:").strip()
+                            if not payload_line or payload_line == "[DONE]":
+                                continue
+
+                            try:
+                                chunk = json.loads(payload_line)
+                            except ValueError:
+                                continue
+                            if not isinstance(chunk, dict):
+                                continue
+
+                            if request_id is None and isinstance(chunk, dict):
+                                chunk_id = chunk.get("id")
+                                if isinstance(chunk_id, str) and chunk_id:
+                                    request_id = chunk_id
+
+                            usage_payload = chunk.get("usage") or {}
+                            if usage_payload:
+                                usage = LLMUsage(
+                                    input_tokens=usage_payload.get("prompt_tokens"),
+                                    output_tokens=usage_payload.get("completion_tokens"),
+                                    total_tokens=usage_payload.get("total_tokens"),
+                                )
+
+                            choices = chunk.get("choices") or []
+                            if not choices:
+                                continue
+                            delta = choices[0].get("delta") or {}
+                            content = delta.get("content")
+                            if not isinstance(content, str) or not content:
+                                continue
+                            emitted_chunks.append(content)
+                            if on_delta is not None:
+                                on_delta(content)
+            except httpx.TimeoutException as exc:
+                retryable = attempt < max_retries
+                if retryable:
+                    attempt += 1
+                    time.sleep(min(0.8 * attempt, 2.0))
+                    continue
+                latency_ms = int((perf_counter() - started) * 1000)
+                message = "LLM request timed out."
+                _write_log(
+                    status="failed",
+                    latency_ms=latency_ms,
+                    request_id=request_id,
+                    error_message=message,
+                )
+                raise LLMClientError(
+                    message,
+                    retryable=False,
+                    detail={"attempt": attempt + 1, "timeout_seconds": self.settings.llm_timeout_seconds},
+                ) from exc
+            except httpx.HTTPError as exc:
+                retryable = attempt < max_retries
+                if retryable:
+                    attempt += 1
+                    time.sleep(min(0.8 * attempt, 2.0))
+                    continue
+                latency_ms = int((perf_counter() - started) * 1000)
+                message = "LLM request failed due to network error."
+                _write_log(
+                    status="failed",
+                    latency_ms=latency_ms,
+                    request_id=request_id,
+                    error_message=message,
+                )
+                raise LLMClientError(
+                    message,
+                    retryable=False,
+                    detail={"attempt": attempt + 1},
+                ) from exc
+
+            latency_ms = int((perf_counter() - started) * 1000)
+            content_text = "".join(emitted_chunks).strip()
+            if not content_text:
+                message = "LLM response is empty."
+                _write_log(
+                    status="failed",
+                    latency_ms=latency_ms,
+                    request_id=request_id,
+                    error_message=message,
+                )
+                raise LLMClientError(
+                    message,
+                    retryable=False,
+                    detail={"attempt": attempt + 1},
+                )
+
+            _write_log(
+                status="success",
+                latency_ms=latency_ms,
+                request_id=request_id,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                total_tokens=usage.total_tokens,
+                error_message=None,
+            )
+            logger.info(
+                "llm.chat_text_stream.ok model=%s latency_ms=%s prompt_tokens=%s completion_tokens=%s",
+                resolved_model,
+                latency_ms,
+                usage.input_tokens,
+                usage.output_tokens,
+            )
+            return content_text

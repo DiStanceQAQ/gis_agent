@@ -26,8 +26,11 @@ def _parse_sse(raw: str) -> list[tuple[str, dict[str, object]]]:
 
 
 def test_message_stream_chat_mode_emits_delta_and_final_payload(monkeypatch) -> None:
-    def _fake_create_message(*, db, payload):  # noqa: ANN001
+    def _fake_create_message(*, db, payload, chat_stream_handler=None):  # noqa: ANN001
         del db, payload
+        if chat_stream_handler is not None:
+            chat_stream_handler("你好，")
+            chat_stream_handler("流式输出")
         return MessageCreateResponse(
             message_id="msg_stream_chat",
             mode="chat",
@@ -58,15 +61,18 @@ def test_message_stream_chat_mode_emits_delta_and_final_payload(monkeypatch) -> 
     parsed = _parse_sse(raw)
     event_names = [name for name, _ in parsed]
     assert "ready" in event_names
-    assert "delta" in event_names
+    assert event_names.count("delta") >= 1
+    delta_text = "".join(item["text"] for name, item in parsed if name == "delta")
+    assert delta_text == "你好，流式输出"
     assert parsed[-2][0] == "message"
     assert parsed[-2][1]["mode"] == "chat"
     assert parsed[-1][0] == "done"
 
 
 def test_message_stream_task_mode_emits_final_payload_without_delta(monkeypatch) -> None:
-    def _fake_create_message(*, db, payload):  # noqa: ANN001
+    def _fake_create_message(*, db, payload, chat_stream_handler=None):  # noqa: ANN001
         del db, payload
+        assert chat_stream_handler is not None
         return MessageCreateResponse(
             message_id="msg_stream_task",
             mode="task",

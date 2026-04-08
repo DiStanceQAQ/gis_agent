@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import queue
+import threading
 from collections.abc import Generator
 
 from fastapi import APIRouter, Depends, Query
@@ -8,6 +10,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from apps.api.deps import get_db
+from packages.domain.database import SessionLocal
 from packages.domain.errors import AppError, ErrorCode
 from packages.domain.services.orchestrator import create_message
 from packages.schemas.common import ErrorResponse
@@ -22,7 +25,6 @@ def _sse_event(event: str, payload: dict[str, object]) -> str:
 
 def _stream_message_response(
     *,
-    db: Session,
     payload: MessageCreateRequest,
 ) -> Generator[str, None, None]:
     # Immediate acknowledgement so the client can render an in-progress state
@@ -30,38 +32,82 @@ def _stream_message_response(
     yield ": connected\n\n"
     yield _sse_event("ready", {"accepted": True})
 
-    try:
-        response = create_message(db=db, payload=payload)
-    except AppError as exc:
-        db.rollback()
-        yield _sse_event(
-            "error",
-            {
-                "code": exc.error_code,
-                "message": exc.message,
-                "detail": exc.detail,
-            },
-        )
-        yield _sse_event("done", {"ok": False})
-        return
-    except Exception:
-        db.rollback()
-        yield _sse_event(
-            "error",
-            {
-                "code": ErrorCode.INTERNAL_ERROR,
-                "message": "Internal server error.",
-            },
-        )
-        yield _sse_event("done", {"ok": False})
-        return
+    event_queue: queue.Queue[tuple[str, dict[str, object]]] = queue.Queue()
 
-    # Keep delta event for forward compatibility. We no longer synthesize
-    # fake chunked output from a completed response.
-    if response.assistant_message:
-        yield _sse_event("delta", {"text": response.assistant_message})
-    yield _sse_event("message", response.model_dump(mode="json"))
-    yield _sse_event("done", {"ok": True})
+    def _worker() -> None:
+        emitted_delta = False
+
+        def _on_delta(text: str) -> None:
+            nonlocal emitted_delta
+            if not text:
+                return
+            emitted_delta = True
+            event_queue.put(("delta", {"text": text}))
+
+        try:
+            with SessionLocal() as worker_db:
+                response = create_message(
+                    db=worker_db,
+                    payload=payload,
+                    chat_stream_handler=_on_delta,
+                )
+        except AppError as exc:
+            event_queue.put(
+                (
+                    "error",
+                    {
+                        "code": exc.error_code,
+                        "message": exc.message,
+                        "detail": exc.detail,
+                    },
+                )
+            )
+            event_queue.put(("done", {"ok": False}))
+            return
+        except Exception:
+            event_queue.put(
+                (
+                    "error",
+                    {
+                        "code": ErrorCode.INTERNAL_ERROR,
+                        "message": "Internal server error.",
+                    },
+                )
+            )
+            event_queue.put(("done", {"ok": False}))
+            return
+
+        # Backward compatibility: if no live delta was emitted, still provide
+        # one assistant delta for chat consumers.
+        if response.assistant_message and not emitted_delta:
+            event_queue.put(("delta", {"text": response.assistant_message}))
+        event_queue.put(("message", response.model_dump(mode="json")))
+        event_queue.put(("done", {"ok": True}))
+
+    worker_thread = threading.Thread(target=_worker, daemon=True)
+    worker_thread.start()
+
+    while True:
+        try:
+            event_name, event_payload = event_queue.get(timeout=0.5)
+        except queue.Empty:
+            # Keep stream active through long-running task/planning phases.
+            yield ": keep-alive\n\n"
+            if not worker_thread.is_alive() and event_queue.empty():
+                yield _sse_event(
+                    "error",
+                    {
+                        "code": ErrorCode.INTERNAL_ERROR,
+                        "message": "Message stream ended unexpectedly.",
+                    },
+                )
+                yield _sse_event("done", {"ok": False})
+                return
+            continue
+
+        yield _sse_event(event_name, event_payload)
+        if event_name == "done":
+            return
 
 
 @router.post(
@@ -78,7 +124,7 @@ def create_message_endpoint(
         return create_message(db=db, payload=payload)
 
     return StreamingResponse(
-        _stream_message_response(db=db, payload=payload),
+        _stream_message_response(payload=payload),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

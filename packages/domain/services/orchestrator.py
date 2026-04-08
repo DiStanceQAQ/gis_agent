@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,7 +29,7 @@ from packages.domain.services.aoi import (
     upsert_task_aoi,
 )
 from packages.domain.services.agent_runtime import run_task_runtime
-from packages.domain.services.chat import generate_chat_reply
+from packages.domain.services.chat import generate_chat_reply, generate_chat_reply_stream
 from packages.domain.services.input_slots import classify_uploaded_inputs
 from packages.domain.services.intent import classify_message_intent, is_task_confirmation_message
 from packages.domain.services.operation_plan_builder import build_operation_plan_from_registry
@@ -1110,7 +1111,12 @@ def create_message_and_task(
     )
 
 
-def create_message(db: Session, payload: MessageCreateRequest) -> MessageCreateResponse:
+def create_message(
+    db: Session,
+    payload: MessageCreateRequest,
+    *,
+    chat_stream_handler: Callable[[str], None] | None = None,
+) -> MessageCreateResponse:
     settings = get_settings()
     if not settings.intent_router_enabled:
         return create_message_and_task(db=db, payload=payload)
@@ -1257,12 +1263,21 @@ def create_message(db: Session, payload: MessageCreateRequest) -> MessageCreateR
         task_response.awaiting_task_confirmation = False
         return task_response
 
-    assistant_message = generate_chat_reply(
-        user_message=payload.content,
-        history=history,
-        uploaded_files=_serialize_uploaded_files_for_chat(chat_upload_files),
-        db_session=db,
-    )
+    if chat_stream_handler is None:
+        assistant_message = generate_chat_reply(
+            user_message=payload.content,
+            history=history,
+            uploaded_files=_serialize_uploaded_files_for_chat(chat_upload_files),
+            db_session=db,
+        )
+    else:
+        assistant_message = generate_chat_reply_stream(
+            user_message=payload.content,
+            history=history,
+            uploaded_files=_serialize_uploaded_files_for_chat(chat_upload_files),
+            db_session=db,
+            on_delta=chat_stream_handler,
+        )
     return _create_chat_mode_response(
         db,
         user_message_id=message.id,
