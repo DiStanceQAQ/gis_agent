@@ -38,3 +38,25 @@ def test_local_files_only_mode_defaults_to_enabled(monkeypatch: pytest.MonkeyPat
     settings = Settings(_env_file=None)
 
     assert settings.local_files_only_mode is True
+
+
+def test_conversation_understanding_feature_flags_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("GIS_AGENT_CONVERSATION_CONTEXT_ENABLED", raising=False)
+    monkeypatch.delenv("GIS_AGENT_UNDERSTANDING_ENGINE_ENABLED", raising=False)
+    monkeypatch.delenv("GIS_AGENT_TASK_REVISIONS_ENABLED", raising=False)
+    monkeypatch.delenv("GIS_AGENT_RESPONSE_MODE_ENABLED", raising=False)
+    monkeypatch.delenv("GIS_AGENT_MESSAGE_UNDERSTANDING_PAYLOAD_ENABLED", raising=False)
+    monkeypatch.delenv("GIS_AGENT_REVISION_BACKFILL_LAZY_ENABLED", raising=False)
+
+    settings = Settings(_env_file=None)
+
+    assert settings.conversation_context_enabled is True
+    assert settings.understanding_engine_enabled is True
+    assert settings.task_revisions_enabled is True
+    assert settings.response_mode_enabled is True
+    assert settings.message_understanding_payload_enabled is True
+    assert settings.revision_backfill_lazy_enabled is True
+    assert settings.understanding_intent_medium_threshold == 0.60
+    assert settings.understanding_intent_high_threshold == 0.85

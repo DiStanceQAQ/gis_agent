@@ -2,6 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from packages.schemas.message import MessageCreateResponse
+from packages.schemas.task import TaskDetailResponse
 
 
 def test_message_create_response_defaults_to_task_mode() -> None:
@@ -62,3 +63,60 @@ def test_message_create_response_allows_chat_mode_without_task_fields() -> None:
     assert response.intent == "greeting"
     assert response.intent_confidence == 0.91
     assert response.awaiting_task_confirmation is False
+
+
+def test_message_create_response_accepts_understanding_payload() -> None:
+    payload = MessageCreateResponse(
+        message_id="msg_1",
+        mode="task",
+        task_id="task_1",
+        task_status="waiting_clarification",
+        response_mode="show_revision",
+        understanding={
+            "intent": "task_correction",
+            "intent_confidence": 0.91,
+            "understanding_summary": "把 AOI 来源切换为上传 shp。",
+            "editable_fields": ["aoi_input", "aoi_source_type"],
+            "field_confidences": {
+                "aoi_input": {
+                    "score": 0.84,
+                    "level": "high",
+                    "evidence": [
+                        {
+                            "source": "current_message",
+                            "weight": 0.70,
+                            "detail": "命中 shp 提示",
+                        }
+                    ],
+                }
+            },
+        },
+        response_payload={"execution_blocked": False},
+    )
+
+    assert payload.response_mode == "show_revision"
+    assert payload.understanding is not None
+    assert payload.understanding.intent == "task_correction"
+
+
+def test_task_detail_response_accepts_active_revision_summary() -> None:
+    detail = TaskDetailResponse(
+        task_id="task_1",
+        status="waiting_clarification",
+        analysis_type="WORKFLOW",
+        interaction_state="execution_blocked",
+        last_response_mode="ask_missing_fields",
+        active_revision={
+            "revision_id": "rev_2",
+            "revision_number": 2,
+            "change_type": "correction",
+            "understanding_summary": "上传 shp 中的江西作为 AOI。",
+            "execution_blocked": True,
+            "execution_blocked_reason": "AOI normalization failed",
+            "field_confidences": {},
+            "ranked_candidates": {},
+        },
+    )
+
+    assert detail.active_revision is not None
+    assert detail.active_revision.execution_blocked is True

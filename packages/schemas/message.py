@@ -2,6 +2,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from packages.schemas.understanding import ResponseMode, UnderstandingResponse
+
 
 class MessageCreateRequest(BaseModel):
     session_id: str
@@ -17,6 +19,9 @@ class MessageCreateResponse(BaseModel):
     assistant_message: str | None = None
     intent: str | None = None
     intent_confidence: float | None = None
+    response_mode: ResponseMode | None = None
+    understanding: UnderstandingResponse | None = None
+    response_payload: dict[str, object] | None = None
     awaiting_task_confirmation: bool = False
     need_clarification: bool = False
     need_approval: bool = False

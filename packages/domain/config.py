@@ -37,6 +37,17 @@ class Settings(BaseSettings):
     real_pipeline_enabled: bool = True
     real_pipeline_max_items: int = 2
     real_pipeline_max_dimension: int = 256
+    conversation_context_enabled: bool = True
+    understanding_engine_enabled: bool = True
+    task_revisions_enabled: bool = True
+    response_mode_enabled: bool = True
+    message_understanding_payload_enabled: bool = True
+    revision_backfill_lazy_enabled: bool = True
+    understanding_intent_medium_threshold: float = 0.60
+    understanding_intent_high_threshold: float = 0.85
+    understanding_field_medium_threshold: float = 0.60
+    understanding_field_high_threshold: float = 0.80
+    understanding_shadow_mode_enabled: bool = False
     llm_provider: str = "openai_compatible"
     llm_base_url: str = "https://api.openai.com/v1"
     llm_api_key: str | None = None

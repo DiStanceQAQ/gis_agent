@@ -11,6 +11,7 @@ from packages.schemas.analysis import (
     normalize_operation_params,
 )
 from packages.schemas.operation_plan import OperationPlan
+from packages.schemas.understanding import RevisionSummary
 
 
 class ParsedTaskSpec(BaseModel):
@@ -143,6 +144,8 @@ class TaskDetailResponse(BaseModel):
     candidates: list[CandidateResponse] = Field(default_factory=list)
     steps: list[TaskStepResponse] = Field(default_factory=list)
     artifacts: list[ArtifactResponse] = Field(default_factory=list)
+    active_revision: RevisionSummary | None = None
+    revisions: list[RevisionSummary] = Field(default_factory=list)
     summary_text: str | None = None
     methods_text: str | None = None
     png_preview_url: str | None = None
