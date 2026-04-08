@@ -18,18 +18,50 @@ export type SessionTasksResponse = {
   tasks: SessionTask[];
 };
 
+export type SessionMessage = {
+  message_id: string;
+  role: string;
+  content: string;
+  linked_task_id?: string | null;
+  created_at?: string | null;
+};
+
+export type SessionMessagesResponse = {
+  session_id: string;
+  next_cursor?: string | null;
+  messages: SessionMessage[];
+};
+
 export type UploadResponse = {
   file_id: string;
   file_type: string;
   storage_key: string;
   original_name: string;
+  size_bytes: number;
+};
+
+export type UploadedFilePreviewResponse = {
+  file_id: string;
+  file_type: string;
+  preview_type: "vector_geojson" | "raster_image" | "unsupported";
+  bbox_bounds?: number[] | null;
+  feature_count?: number | null;
+  geojson?: Record<string, unknown> | null;
+  image_url?: string | null;
+  message?: string | null;
 };
 
 export type MessageCreateResponse = {
   message_id: string;
-  task_id: string;
-  task_status: string;
+  mode: "chat" | "task";
+  task_id?: string | null;
+  task_status?: string | null;
+  assistant_message?: string | null;
+  intent?: string | null;
+  intent_confidence?: number | null;
+  awaiting_task_confirmation?: boolean;
   need_clarification: boolean;
+  need_approval?: boolean;
   missing_fields: string[];
   clarification_message?: string | null;
 };
@@ -177,4 +209,6 @@ export type TaskDetail = {
   error_code?: string | null;
   error_message?: string | null;
   clarification_message?: string | null;
+  rejected_reason?: string | null;
+  rejected_at?: string | null;
 };

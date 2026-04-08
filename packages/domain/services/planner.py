@@ -16,7 +16,11 @@ from packages.domain.services.llm_client import LLMClient, LLMClientError
 from packages.domain.services.operation_registry import list_operation_specs
 from packages.domain.services.plan_guard import validate_operation_plan
 from packages.domain.services.tool_registry import list_tool_definitions
-from packages.domain.services.task_state import STEP_SEQUENCE, STEP_STATUS_FAILED, STEP_STATUS_PENDING
+from packages.domain.services.task_state import (
+    STEP_SEQUENCE,
+    STEP_STATUS_FAILED,
+    STEP_STATUS_PENDING,
+)
 from packages.schemas.operation_plan import OperationNode, OperationPlan
 from packages.schemas.agent import LLMTaskPlan
 from packages.schemas.task import ParsedTaskSpec
@@ -28,6 +32,7 @@ PLAN_STATUS_NEEDS_CLARIFICATION = "needs_clarification"
 PLAN_STATUS_RUNNING = "running"
 PLAN_STATUS_SUCCESS = "success"
 PLAN_STATUS_FAILED = "failed"
+
 
 class TaskPlanStep(BaseModel):
     step_name: str
@@ -58,7 +63,6 @@ def _required_step_sequence(parsed: ParsedTaskSpec) -> list[str]:
     if settings.local_files_only_mode:
         return [
             "plan_task",
-            "normalize_aoi",
             "run_processing_pipeline",
             "generate_outputs",
         ]
@@ -82,6 +86,13 @@ def _format_time_range(time_range: dict[str, str] | None) -> str:
 
 def _build_objective(parsed: ParsedTaskSpec) -> str:
     settings = get_settings()
+    if parsed.analysis_type == "WORKFLOW":
+        op_names = parsed.operation_params.get("operations") or []
+        op_text = " -> ".join(str(name) for name in op_names) if op_names else "待补充处理步骤"
+        if settings.local_files_only_mode:
+            return f"基于本地上传数据按操作链 {op_text} 执行 GIS 处理，并发布可下载结果。"
+        return f"按用户给定操作链 {op_text} 执行通用 GIS 处理，并发布结果。"
+
     if settings.local_files_only_mode:
         if parsed.analysis_type == "CLIP":
             source_path = str(parsed.operation_params.get("source_path") or "输入栅格")
@@ -105,6 +116,15 @@ def _build_objective(parsed: ParsedTaskSpec) -> str:
 
 def _build_reasoning_summary(parsed: ParsedTaskSpec) -> str:
     settings = get_settings()
+    if parsed.analysis_type == "WORKFLOW":
+        summary_parts = [
+            "按操作注册表执行通用 GIS 能力链路，不套用固定分析模板",
+            "优先复用已上传本地数据作为输入",
+        ]
+        if parsed.need_confirmation:
+            summary_parts.append("当前缺少可执行操作步骤，计划会先停在待澄清状态")
+        return "；".join(summary_parts) + "。"
+
     if settings.local_files_only_mode:
         summary_parts = [
             "本模式只处理本地文件，不执行远程目录候选搜索",
@@ -149,7 +169,9 @@ def _build_steps_legacy(parsed: ParsedTaskSpec) -> list[TaskPlanStep]:
         if step_name == "recommend_dataset":
             purpose = f"综合用户偏好和候选质量，对 {requested_dataset} 请求进行主备方案排序。"
 
-        depends_on = [dep for dep in definition.depends_on if dep in {step.step_name for step in steps}]
+        depends_on = [
+            dep for dep in definition.depends_on if dep in {step.step_name for step in steps}
+        ]
         if not depends_on and steps:
             depends_on = [steps[-1].step_name]
 
@@ -223,7 +245,9 @@ def _normalize_llm_steps(steps: list[Any], parsed: ParsedTaskSpec) -> list[TaskP
             raise ValueError(f"Duplicated step after alias normalization: {normalized_name}")
         llm_steps_by_name[normalized_name] = step
 
-    missing_steps = [step_name for step_name in required_step_names if step_name not in llm_steps_by_name]
+    missing_steps = [
+        step_name for step_name in required_step_names if step_name not in llm_steps_by_name
+    ]
     if missing_steps:
         raise ValueError(f"LLM task plan missing required steps: {missing_steps}")
 
@@ -234,11 +258,15 @@ def _normalize_llm_steps(steps: list[Any], parsed: ParsedTaskSpec) -> list[TaskP
 
         depends_on = [
             normalized_dep
-            for normalized_dep in (_normalize_step_name(dep_step) for dep_step in llm_step.depends_on)
+            for normalized_dep in (
+                _normalize_step_name(dep_step) for dep_step in llm_step.depends_on
+            )
             if normalized_dep in required_step_names and normalized_dep != step_name
         ]
         if not depends_on:
-            depends_on = [dep_step for dep_step in definition.depends_on if dep_step in required_step_names]
+            depends_on = [
+                dep_step for dep_step in definition.depends_on if dep_step in required_step_names
+            ]
         if not depends_on and normalized_steps:
             depends_on = [normalized_steps[-1].step_name]
 
@@ -257,7 +285,9 @@ def _normalize_llm_steps(steps: list[Any], parsed: ParsedTaskSpec) -> list[TaskP
 
 
 def _sanitize_missing_fields(parsed: ParsedTaskSpec, missing_fields: list[str]) -> list[str]:
-    deduped = list(dict.fromkeys(str(field).strip() for field in missing_fields if str(field).strip()))
+    deduped = list(
+        dict.fromkeys(str(field).strip() for field in missing_fields if str(field).strip())
+    )
     if parsed.analysis_type != "CLIP":
         return deduped
 
@@ -292,7 +322,11 @@ def _normalize_llm_task_plan(payload: LLMTaskPlan, parsed: ParsedTaskSpec) -> Ta
         parsed,
         [*parsed.missing_fields, *payload.missing_fields],
     )
-    status = PLAN_STATUS_NEEDS_CLARIFICATION if parsed.need_confirmation or missing_fields else PLAN_STATUS_READY
+    status = (
+        PLAN_STATUS_NEEDS_CLARIFICATION
+        if parsed.need_confirmation or missing_fields
+        else PLAN_STATUS_READY
+    )
     objective = payload.objective.strip() or _build_objective(parsed)
     reasoning_summary = payload.reasoning_summary.strip() or _build_reasoning_summary(parsed)
     normalized_steps = _normalize_llm_steps(payload.steps, parsed)
@@ -303,7 +337,10 @@ def _normalize_llm_task_plan(payload: LLMTaskPlan, parsed: ParsedTaskSpec) -> Ta
                 version=1,
                 status="draft",
                 missing_fields=missing_fields,
-                nodes=[OperationNode.model_validate(node.model_dump()) for node in payload.operation_plan_nodes],
+                nodes=[
+                    OperationNode.model_validate(node.model_dump())
+                    for node in payload.operation_plan_nodes
+                ],
             )
             validated = validate_operation_plan(candidate)
             normalized_operation_plan_nodes = [node.model_dump() for node in validated.nodes]
@@ -314,7 +351,9 @@ def _normalize_llm_task_plan(payload: LLMTaskPlan, parsed: ParsedTaskSpec) -> Ta
                 "message": exc.message,
                 "detail": exc.detail,
             }
-            raise ValueError(f"invalid_operation_plan_nodes::{json.dumps(error_payload, ensure_ascii=False)}") from exc
+            raise ValueError(
+                f"invalid_operation_plan_nodes::{json.dumps(error_payload, ensure_ascii=False)}"
+            ) from exc
 
     return TaskPlan(
         version=payload.version or "agent-v2",
@@ -500,7 +539,11 @@ def ensure_task_plan(
 
 
 def set_task_plan_status(plan_payload: dict | None, status: str) -> dict[str, object]:
-    plan = deepcopy(plan_payload) if plan_payload else _build_task_plan_legacy(ParsedTaskSpec()).model_dump()
+    plan = (
+        deepcopy(plan_payload)
+        if plan_payload
+        else _build_task_plan_legacy(ParsedTaskSpec()).model_dump()
+    )
     plan["status"] = status
     return plan
 

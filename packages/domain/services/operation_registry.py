@@ -58,8 +58,9 @@ OPERATION_SPECS: dict[str, OperationSpec] = {
         op_name="raster.band_math",
         input_types={"raster": "raster"},
         output_types={"raster": "raster"},
-        default_params={"expression": "(nir-red)/(nir+red)"},
+        default_params={},
         executor_name="_op_raster_band_math",
+        required_params=("expression",),
     ),
     "raster.zonal_stats": OperationSpec(
         op_name="raster.zonal_stats",

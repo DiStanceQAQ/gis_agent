@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -42,13 +43,28 @@ LEGACY_SAMPLE_FILES = {
 }
 
 
+def _live_llm_mode() -> bool:
+    return os.getenv("GIS_AGENT_TEST_USE_REAL_LLM", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 @pytest.fixture(autouse=True)
 def _default_parser_mode_for_task_samples(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GIS_AGENT_LLM_PARSER_ENABLED", "true")
-    monkeypatch.setenv("GIS_AGENT_LLM_PARSER_LEGACY_FALLBACK", "true")
+    monkeypatch.setenv(
+        "GIS_AGENT_LLM_PARSER_LEGACY_FALLBACK", "false" if _live_llm_mode() else "true"
+    )
     monkeypatch.setenv("GIS_AGENT_LLM_PLANNER_ENABLED", "true")
-    monkeypatch.setenv("GIS_AGENT_LLM_PLANNER_LEGACY_FALLBACK", "true")
-    monkeypatch.delenv("GIS_AGENT_LLM_API_KEY", raising=False)
+    monkeypatch.setenv(
+        "GIS_AGENT_LLM_PLANNER_LEGACY_FALLBACK", "false" if _live_llm_mode() else "true"
+    )
+    if not _live_llm_mode():
+        monkeypatch.setenv("GIS_AGENT_LLM_API_KEY", "")
+    monkeypatch.setenv("GIS_AGENT_LOCAL_FILES_ONLY_MODE", "false")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -97,7 +113,9 @@ def _cleanup_session(session_id: str) -> None:
     with SessionLocal() as db:
         task_ids = [
             task_id
-            for (task_id,) in db.query(TaskRunRecord.id).filter(TaskRunRecord.session_id == session_id).all()
+            for (task_id,) in db.query(TaskRunRecord.id)
+            .filter(TaskRunRecord.session_id == session_id)
+            .all()
         ]
 
         if task_ids:
@@ -110,20 +128,28 @@ def _cleanup_session(session_id: str) -> None:
             db.query(TaskStepRecord).filter(TaskStepRecord.task_id.in_(task_ids)).delete(
                 synchronize_session=False
             )
-            db.query(DatasetCandidateRecord).filter(DatasetCandidateRecord.task_id.in_(task_ids)).delete(
+            db.query(DatasetCandidateRecord).filter(
+                DatasetCandidateRecord.task_id.in_(task_ids)
+            ).delete(synchronize_session=False)
+            db.query(AOIRecord).filter(AOIRecord.task_id.in_(task_ids)).delete(
                 synchronize_session=False
             )
-            db.query(AOIRecord).filter(AOIRecord.task_id.in_(task_ids)).delete(synchronize_session=False)
             db.query(TaskSpecRecord).filter(TaskSpecRecord.task_id.in_(task_ids)).delete(
                 synchronize_session=False
             )
-            db.query(TaskRunRecord).filter(TaskRunRecord.id.in_(task_ids)).delete(synchronize_session=False)
+            db.query(TaskRunRecord).filter(TaskRunRecord.id.in_(task_ids)).delete(
+                synchronize_session=False
+            )
 
-        db.query(MessageRecord).filter(MessageRecord.session_id == session_id).delete(synchronize_session=False)
+        db.query(MessageRecord).filter(MessageRecord.session_id == session_id).delete(
+            synchronize_session=False
+        )
         db.query(UploadedFileRecord).filter(UploadedFileRecord.session_id == session_id).delete(
             synchronize_session=False
         )
-        db.query(SessionRecord).filter(SessionRecord.id == session_id).delete(synchronize_session=False)
+        db.query(SessionRecord).filter(SessionRecord.id == session_id).delete(
+            synchronize_session=False
+        )
         db.commit()
 
 
@@ -194,7 +220,8 @@ def _capture_task_state(task_id: str) -> dict[str, Any]:
             "step_status": {step.step_name: step.status for step in task.steps},
             "event_types": [event.event_type for event in sorted(events, key=lambda item: item.id)],
             "event_detail": {
-                event.event_type: event.detail_json for event in sorted(events, key=lambda item: item.id)
+                event.event_type: event.detail_json
+                for event in sorted(events, key=lambda item: item.id)
             },
             "artifact_types": [artifact.artifact_type for artifact in detail.artifacts],
         }
@@ -205,13 +232,17 @@ def _query_task_audit_view(task_id: str) -> dict[str, Any]:
         detail = orchestrator.get_task_detail(db, task_id)
         _, events = orchestrator.list_task_events(db, task_id=task_id, since_id=0)
         ordered_events = sorted(events, key=lambda item: item.id)
-        task_failed_event = next((event for event in ordered_events if event.event_type == "task_failed"), None)
+        task_failed_event = next(
+            (event for event in ordered_events if event.event_type == "task_failed"), None
+        )
         return {
             "status": detail.status,
             "error_code": detail.error_code,
             "rejected_reason": detail.rejected_reason,
             "event_types": [event.event_type for event in ordered_events],
-            "task_failed_detail": task_failed_event.detail_json if task_failed_event is not None else None,
+            "task_failed_detail": task_failed_event.detail_json
+            if task_failed_event is not None
+            else None,
         }
 
 
@@ -314,9 +345,7 @@ def _assert_expected(result: dict[str, Any]) -> None:
             assert event_type in after_approve["event_types"]
         for key, value in expected.get("after_approve_first_node_params", {}).items():
             assert after_approve["detail"].operation_plan is not None
-            assert (
-                after_approve["detail"].operation_plan.nodes[0].params.get(key) == value
-            )
+            assert after_approve["detail"].operation_plan.nodes[0].params.get(key) == value
 
     after_reject_status = expected.get("after_reject_status")
     if after_reject_status:
@@ -358,7 +387,12 @@ def sample_task_runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
             created_session_ids.append(session.session_id)
             session_id = session.session_id
 
-            if sample["scenario"] in {"create_only", "create_and_run", "real_pipeline_to_baseline_fallback", "generate_outputs_failure"}:
+            if sample["scenario"] in {
+                "create_only",
+                "create_and_run",
+                "real_pipeline_to_baseline_fallback",
+                "generate_outputs_failure",
+            }:
                 response = _create_task(db, session_id, sample["message"])
                 if response.need_approval and not manual_approval:
                     detail = orchestrator.get_task_detail(db, response.task_id)
@@ -392,7 +426,8 @@ def sample_task_runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 
         should_run_pipeline = sample.get(
             "run_pipeline",
-            sample["scenario"] in {"real_pipeline_to_baseline_fallback", "generate_outputs_failure"},
+            sample["scenario"]
+            in {"real_pipeline_to_baseline_fallback", "generate_outputs_failure"},
         )
         if should_run_pipeline:
             run_task_graph(target_task_id)
@@ -526,7 +561,9 @@ def test_task_detail_exposes_candidate_compare_fields(sample_task_runner) -> Non
 
 
 def test_runtime_skips_clarification_tasks_without_failing(sample_task_runner) -> None:
-    sample = next(sample for sample in _load_task_suite() if sample["id"] == "clarification_missing_time")
+    sample = next(
+        sample for sample in _load_task_suite() if sample["id"] == "clarification_missing_time"
+    )
     sample = {**sample, "run_pipeline": True}
 
     result = sample_task_runner(sample)
@@ -639,12 +676,16 @@ def test_runtime_writes_back_recommendation_schema_error_code(
     result = sample_task_runner(sample)
 
     assert result["detail"].status == "failed"
-    assert result["task"]["error_code"] == ErrorCode.TASK_LLM_RECOMMENDATION_SCHEMA_VALIDATION_FAILED
+    assert (
+        result["task"]["error_code"] == ErrorCode.TASK_LLM_RECOMMENDATION_SCHEMA_VALIDATION_FAILED
+    )
     assert "task_failed" in result["event_types"]
 
 
 def test_audit_query_includes_approval_react_and_function_call_events(sample_task_runner) -> None:
-    sample = next(sample for sample in _load_task_suite() if sample["id"] == "approval_edit_plan_then_execute")
+    sample = next(
+        sample for sample in _load_task_suite() if sample["id"] == "approval_edit_plan_then_execute"
+    )
 
     result = sample_task_runner(sample)
     task_id = result["task"]["task_id"]
@@ -658,7 +699,9 @@ def test_audit_query_includes_approval_react_and_function_call_events(sample_tas
 
 
 def test_audit_query_includes_reject_reason(sample_task_runner) -> None:
-    sample = next(sample for sample in _load_task_suite() if sample["id"] == "approval_reject_then_cancelled")
+    sample = next(
+        sample for sample in _load_task_suite() if sample["id"] == "approval_reject_then_cancelled"
+    )
 
     result = sample_task_runner(sample)
     task_id = result["task"]["task_id"]
@@ -684,7 +727,9 @@ def test_audit_query_includes_failed_step_and_error_code(sample_task_runner) -> 
 
 
 def test_main_flow_persists_llm_phase_logs_with_task_binding(sample_task_runner) -> None:
-    sample = next(sample for sample in _load_task_suite() if sample["id"] == "approval_edit_plan_then_execute")
+    sample = next(
+        sample for sample in _load_task_suite() if sample["id"] == "approval_edit_plan_then_execute"
+    )
     result = sample_task_runner(sample)
     task_id = result["task"]["task_id"]
 

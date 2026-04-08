@@ -22,3 +22,17 @@ class SessionTaskItemResponse(ORMModel):
 class SessionTasksResponse(ORMModel):
     session_id: str
     tasks: list[SessionTaskItemResponse]
+
+
+class SessionMessageItemResponse(ORMModel):
+    message_id: str
+    role: str
+    content: str
+    linked_task_id: str | None = None
+    created_at: datetime | None = None
+
+
+class SessionMessagesResponse(ORMModel):
+    session_id: str
+    next_cursor: str | None = None
+    messages: list[SessionMessageItemResponse]

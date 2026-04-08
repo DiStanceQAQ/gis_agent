@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -27,6 +28,25 @@ from packages.domain.errors import ErrorCode
 from packages.schemas.agent import LLMReactStepDecision
 
 
+def _live_llm_mode() -> bool:
+    return os.getenv("GIS_AGENT_TEST_USE_REAL_LLM", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+@pytest.fixture(autouse=True)
+def _runtime_defaults_for_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GIS_AGENT_LOCAL_FILES_ONLY_MODE", "false")
+    if not _live_llm_mode():
+        monkeypatch.setenv("GIS_AGENT_LLM_API_KEY", "")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
 @pytest.fixture
 def db_session():
     with SessionLocal() as db:
@@ -42,7 +62,11 @@ def seeded_task_id() -> str:
     with SessionLocal() as db:
         db.add(SessionRecord(id=session_id, title="events", status="active"))
         db.add(MessageRecord(id=message_id, session_id=session_id, role="user", content="hello"))
-        db.add(TaskRunRecord(id=task_id, session_id=session_id, user_message_id=message_id, status="queued"))
+        db.add(
+            TaskRunRecord(
+                id=task_id, session_id=session_id, user_message_id=message_id, status="queued"
+            )
+        )
         db.flush()
 
         db.add(TaskEventRecord(task_id=task_id, event_type="task_created", status="queued"))
@@ -53,10 +77,18 @@ def seeded_task_id() -> str:
     yield task_id
 
     with SessionLocal() as db:
-        db.query(TaskEventRecord).filter(TaskEventRecord.task_id == task_id).delete(synchronize_session=False)
-        db.query(TaskRunRecord).filter(TaskRunRecord.id == task_id).delete(synchronize_session=False)
-        db.query(MessageRecord).filter(MessageRecord.id == message_id).delete(synchronize_session=False)
-        db.query(SessionRecord).filter(SessionRecord.id == session_id).delete(synchronize_session=False)
+        db.query(TaskEventRecord).filter(TaskEventRecord.task_id == task_id).delete(
+            synchronize_session=False
+        )
+        db.query(TaskRunRecord).filter(TaskRunRecord.id == task_id).delete(
+            synchronize_session=False
+        )
+        db.query(MessageRecord).filter(MessageRecord.id == message_id).delete(
+            synchronize_session=False
+        )
+        db.query(SessionRecord).filter(SessionRecord.id == session_id).delete(
+            synchronize_session=False
+        )
         db.commit()
 
 
@@ -111,7 +143,11 @@ def _seed_runtime_task() -> tuple[str, str]:
         "analysis_type": "NDVI",
         "preferred_output": ["png_map", "geotiff"],
         "user_priority": "balanced",
-        "operation_params": {},
+        "operation_params": {
+            "operations": ["raster.band_math"],
+            "expression": "(nir-red)/(nir+red)",
+            "source_path": "/tmp/source.tif",
+        },
         "need_confirmation": False,
         "missing_fields": [],
         "clarification_message": None,
@@ -120,7 +156,9 @@ def _seed_runtime_task() -> tuple[str, str]:
 
     with SessionLocal() as db:
         db.add(SessionRecord(id=session_id, title="runtime-events", status="active"))
-        db.add(MessageRecord(id=message_id, session_id=session_id, role="user", content="run runtime"))
+        db.add(
+            MessageRecord(id=message_id, session_id=session_id, role="user", content="run runtime")
+        )
         db.add(
             TaskRunRecord(
                 id=task_id,
@@ -162,26 +200,40 @@ def _cleanup_session(session_id: str) -> None:
     with SessionLocal() as db:
         task_ids = [
             task_id
-            for (task_id,) in db.query(TaskRunRecord.id).filter(TaskRunRecord.session_id == session_id).all()
+            for (task_id,) in db.query(TaskRunRecord.id)
+            .filter(TaskRunRecord.session_id == session_id)
+            .all()
         ]
 
         if task_ids:
-            db.query(ArtifactRecord).filter(ArtifactRecord.task_id.in_(task_ids)).delete(synchronize_session=False)
+            db.query(ArtifactRecord).filter(ArtifactRecord.task_id.in_(task_ids)).delete(
+                synchronize_session=False
+            )
             db.query(TaskEventRecord).filter(TaskEventRecord.task_id.in_(task_ids)).delete(
                 synchronize_session=False
             )
-            db.query(TaskStepRecord).filter(TaskStepRecord.task_id.in_(task_ids)).delete(synchronize_session=False)
-            db.query(DatasetCandidateRecord).filter(DatasetCandidateRecord.task_id.in_(task_ids)).delete(
+            db.query(TaskStepRecord).filter(TaskStepRecord.task_id.in_(task_ids)).delete(
                 synchronize_session=False
             )
-            db.query(AOIRecord).filter(AOIRecord.task_id.in_(task_ids)).delete(synchronize_session=False)
+            db.query(DatasetCandidateRecord).filter(
+                DatasetCandidateRecord.task_id.in_(task_ids)
+            ).delete(synchronize_session=False)
+            db.query(AOIRecord).filter(AOIRecord.task_id.in_(task_ids)).delete(
+                synchronize_session=False
+            )
             db.query(TaskSpecRecord).filter(TaskSpecRecord.task_id.in_(task_ids)).delete(
                 synchronize_session=False
             )
-            db.query(TaskRunRecord).filter(TaskRunRecord.id.in_(task_ids)).delete(synchronize_session=False)
+            db.query(TaskRunRecord).filter(TaskRunRecord.id.in_(task_ids)).delete(
+                synchronize_session=False
+            )
 
-        db.query(MessageRecord).filter(MessageRecord.session_id == session_id).delete(synchronize_session=False)
-        db.query(SessionRecord).filter(SessionRecord.id == session_id).delete(synchronize_session=False)
+        db.query(MessageRecord).filter(MessageRecord.session_id == session_id).delete(
+            synchronize_session=False
+        )
+        db.query(SessionRecord).filter(SessionRecord.id == session_id).delete(
+            synchronize_session=False
+        )
         db.commit()
 
 
@@ -191,12 +243,50 @@ def test_langgraph_runtime_success_event_sequence_is_ordered(
 ) -> None:
     monkeypatch.setenv("GIS_AGENT_LLM_PLANNER_ENABLED", "false")
     monkeypatch.setenv("GIS_AGENT_LLM_RECOMMENDATION_ENABLED", "false")
+    monkeypatch.setenv("GIS_AGENT_LOCAL_FILES_ONLY_MODE", "false")
     get_settings.cache_clear()
 
     session_id, task_id = _seed_runtime_task()
 
     try:
-        monkeypatch.setattr(runtime_helpers, "search_candidates", lambda spec, aoi: _fake_candidates())
+        fake_tif = tmp_path / "runtime_success.tif"
+        fake_png = tmp_path / "runtime_success.png"
+        fake_tif.write_bytes(b"FAKE_TIFF")
+        fake_png.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+        monkeypatch.setattr(
+            runtime_helpers,
+            "run_processing_pipeline",
+            lambda **kwargs: {
+                "mode": "operation_plan",
+                "artifacts": [
+                    {
+                        "artifact_type": "geotiff",
+                        "path": str(fake_tif),
+                        "source_step": "run_processing_pipeline",
+                    },
+                    {
+                        "artifact_type": "png_map",
+                        "path": str(fake_png),
+                        "source_step": "run_processing_pipeline",
+                    },
+                ],
+                "actual_time_range": {"start": "2024-06-01", "end": "2024-06-30"},
+                "selected_item_ids": ["item_1"],
+                "valid_pixel_ratio": 0.91,
+                "ndvi_min": 0.12,
+                "ndvi_max": 0.88,
+                "ndvi_mean": 0.47,
+                "output_width": 10,
+                "output_height": 10,
+                "output_crs": "EPSG:4326",
+                "tif_path": str(fake_tif),
+                "png_path": str(fake_png),
+            },
+        )
+        monkeypatch.setattr(
+            runtime_helpers, "search_candidates", lambda spec, aoi: _fake_candidates()
+        )
         monkeypatch.setattr(
             runtime_helpers,
             "build_artifact_path",
@@ -206,6 +296,11 @@ def test_langgraph_runtime_success_event_sequence_is_ordered(
             runtime_helpers,
             "get_settings",
             lambda: SimpleNamespace(real_pipeline_enabled=False),
+        )
+        monkeypatch.setattr(
+            runtime_helpers,
+            "collect_artifact_metadata",
+            lambda *args, **kwargs: {},
         )
 
         run_task_graph(task_id)
@@ -228,7 +323,9 @@ def test_langgraph_runtime_success_event_sequence_is_ordered(
         completed_index = event_types.index("task_completed")
         assert started_index < completed_index
 
-        catalog_event = next(event for event in events if event.event_type == "task_catalog_candidates_ready")
+        catalog_event = next(
+            event for event in events if event.event_type == "task_catalog_candidates_ready"
+        )
         assert catalog_event.step_name == "search_candidates"
         assert isinstance(catalog_event.detail_json, dict)
         assert "candidate_summaries" in catalog_event.detail_json
@@ -237,7 +334,12 @@ def test_langgraph_runtime_success_event_sequence_is_ordered(
         assert first_summary.get("quality") is not None
         assert first_summary["quality"]["cloud_metric_summary"]["median"] >= 0
         assert first_summary["quality"]["coverage_ratio"] >= 0
-        assert first_summary["quality"]["temporal_density_note"] in {"none", "low", "medium", "high"}
+        assert first_summary["quality"]["temporal_density_note"] in {
+            "none",
+            "low",
+            "medium",
+            "high",
+        }
 
         assert search_step_detail == catalog_event.detail_json
 
@@ -248,8 +350,12 @@ def test_langgraph_runtime_success_event_sequence_is_ordered(
             "run_processing_pipeline",
             "generate_outputs",
         ]
-        react_decision_events = [event for event in events if event.event_type == "step_react_decision"]
-        react_observation_events = [event for event in events if event.event_type == "step_react_observation"]
+        react_decision_events = [
+            event for event in events if event.event_type == "step_react_decision"
+        ]
+        react_observation_events = [
+            event for event in events if event.event_type == "step_react_observation"
+        ]
         function_call_requested_events = [
             event for event in events if event.event_type == "function_call_requested"
         ]
@@ -308,6 +414,7 @@ def test_langgraph_runtime_fails_on_illegal_function_call(
 ) -> None:
     monkeypatch.setenv("GIS_AGENT_LLM_PLANNER_ENABLED", "false")
     monkeypatch.setenv("GIS_AGENT_LLM_RECOMMENDATION_ENABLED", "false")
+    monkeypatch.setenv("GIS_AGENT_LOCAL_FILES_ONLY_MODE", "false")
     get_settings.cache_clear()
 
     session_id, task_id = _seed_runtime_task()

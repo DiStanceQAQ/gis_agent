@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from packages.domain.config import get_settings
@@ -7,6 +9,30 @@ from packages.domain.errors import ErrorCode
 from packages.domain.services.catalog import CatalogCandidate
 from packages.domain.services.llm_client import LLMClientError, LLMResponse, LLMUsage
 from packages.domain.services.recommendation import build_recommendation
+
+
+def _live_llm_mode() -> bool:
+    return os.getenv("GIS_AGENT_TEST_USE_REAL_LLM", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+@pytest.fixture(autouse=True)
+def _default_recommendation_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    if not _live_llm_mode():
+        monkeypatch.setenv("GIS_AGENT_LLM_API_KEY", "")
+    monkeypatch.setenv(
+        "GIS_AGENT_LLM_RECOMMENDATION_ENABLED", "true" if _live_llm_mode() else "false"
+    )
+    monkeypatch.setenv(
+        "GIS_AGENT_LLM_RECOMMENDATION_LEGACY_FALLBACK", "false" if _live_llm_mode() else "true"
+    )
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 def _candidate(
@@ -322,7 +348,9 @@ def test_build_recommendation_returns_error_code_when_llm_schema_validation_exha
         del self, kwargs
         return _mock_llm_recommendation_response(invalid_payload)
 
-    monkeypatch.setattr("packages.domain.services.recommendation.LLMClient.chat_json", _fake_chat_json)
+    monkeypatch.setattr(
+        "packages.domain.services.recommendation.LLMClient.chat_json", _fake_chat_json
+    )
     recommendation = build_recommendation(
         [
             _candidate(
@@ -346,7 +374,9 @@ def test_build_recommendation_returns_error_code_when_llm_schema_validation_exha
     )
 
     assert recommendation["primary_dataset"] == "unknown"
-    assert recommendation["error_code"] == ErrorCode.TASK_LLM_RECOMMENDATION_SCHEMA_VALIDATION_FAILED
+    assert (
+        recommendation["error_code"] == ErrorCode.TASK_LLM_RECOMMENDATION_SCHEMA_VALIDATION_FAILED
+    )
     assert recommendation["error_message"] is not None
     get_settings.cache_clear()
 
@@ -373,7 +403,9 @@ def test_build_recommendation_normalizes_llm_payload_to_stable_structure(
         del self, kwargs
         return _mock_llm_recommendation_response(llm_payload)
 
-    monkeypatch.setattr("packages.domain.services.recommendation.LLMClient.chat_json", _fake_chat_json)
+    monkeypatch.setattr(
+        "packages.domain.services.recommendation.LLMClient.chat_json", _fake_chat_json
+    )
     recommendation = build_recommendation(
         [
             _candidate(

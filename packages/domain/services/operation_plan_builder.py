@@ -12,29 +12,6 @@ _VECTOR_EXPORT_FORMATS = {"geojson", "json", "gpkg", "shapefile", "shp"}
 _TABLE_EXPORT_FORMATS = {"csv"}
 
 
-def _default_operations_for_analysis(parsed: ParsedTaskSpec) -> list[str]:
-    analysis_type = parsed.analysis_type
-    params = parsed.operation_params
-    if analysis_type == "NDVI":
-        return ["raster.band_math"]
-    if analysis_type == "NDWI":
-        return ["raster.band_math"]
-    if analysis_type == "BAND_MATH":
-        return ["raster.band_math"]
-    if analysis_type == "FILTER":
-        return ["raster.resample"]
-    if analysis_type == "SLOPE_ASPECT":
-        product = str(params.get("product") or "slope_aspect").lower()
-        if product == "aspect":
-            return ["raster.terrain_aspect"]
-        return ["raster.terrain_slope"]
-    if analysis_type == "BUFFER":
-        return ["vector.buffer"]
-    if analysis_type == "CLIP":
-        return ["raster.clip"]
-    return ["raster.clip"]
-
-
 def _normalize_requested_operations(raw_value: Any) -> list[str]:
     if not isinstance(raw_value, list):
         return []
@@ -50,10 +27,7 @@ def _normalize_requested_operations(raw_value: Any) -> list[str]:
 
 
 def _pick_operation_sequence(parsed: ParsedTaskSpec) -> list[str]:
-    requested = _normalize_requested_operations(parsed.operation_params.get("operations"))
-    if requested:
-        return requested
-    return _default_operations_for_analysis(parsed)
+    return _normalize_requested_operations(parsed.operation_params.get("operations"))
 
 
 def _extract_op_override_params(parsed: ParsedTaskSpec, op_name: str) -> dict[str, Any]:
@@ -67,10 +41,6 @@ def _extract_op_override_params(parsed: ParsedTaskSpec, op_name: str) -> dict[st
             overrides.update(scoped)
 
     if op_name == "raster.band_math":
-        if parsed.analysis_type == "NDWI":
-            overrides.setdefault("expression", "(green-nir)/(green+nir)")
-        elif parsed.analysis_type == "NDVI":
-            overrides.setdefault("expression", "(nir-red)/(nir+red)")
         if "expression" in params:
             overrides["expression"] = params["expression"]
         if "source_path" in params:
@@ -191,7 +161,9 @@ def _build_operation_nodes(parsed: ParsedTaskSpec, op_sequence: list[str]) -> li
         inputs: dict[str, Any] = {}
         depends_on: list[str] = []
         for input_key, input_type in spec.input_types.items():
-            matched_refs = _pick_refs_for_input_type(input_type=input_type, refs_by_type=refs_by_type)
+            matched_refs = _pick_refs_for_input_type(
+                input_type=input_type, refs_by_type=refs_by_type
+            )
             if not matched_refs:
                 continue
             inputs[input_key] = matched_refs[-1]
@@ -275,10 +247,13 @@ def build_operation_plan_from_registry(
     nodes = _build_operation_nodes(parsed, sequence)
 
     if not nodes:
-        fallback_parsed = parsed.model_copy(
-            update={"analysis_type": "CLIP", "operation_params": parsed.operation_params}
+        missing = [str(field) for field in dict.fromkeys([*(missing_fields or []), "operations"])]
+        return OperationPlan(
+            version=version,
+            status=status,
+            missing_fields=missing,
+            nodes=[],
         )
-        nodes = _build_operation_nodes(fallback_parsed, ["raster.clip"])
 
     return OperationPlan(
         version=version,

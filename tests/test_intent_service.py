@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -65,7 +66,9 @@ def test_is_task_confirmation_message_rejects_non_confirmations(message: str) ->
     assert is_task_confirmation_message(message) is False
 
 
-def test_classify_message_intent_falls_back_to_ambiguous_on_llm_error(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_classify_message_intent_falls_back_to_ambiguous_on_llm_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr("packages.domain.services.intent.LLMClient", _FakeLLMClient)
     _FakeLLMClient.error = RuntimeError("boom")
 
@@ -151,7 +154,9 @@ def test_classify_message_intent_returns_task_for_explicit_confirmation_with_non
     assert _FakeLLMClient.calls[0]["task_id"] == "task_confirmed_nondict"
 
 
-def test_classify_message_intent_passes_through_valid_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_classify_message_intent_passes_through_valid_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr("packages.domain.services.intent.LLMClient", _FakeLLMClient)
     _FakeLLMClient.response = _FakeIntentResponse(
         {
@@ -234,6 +239,33 @@ def test_generate_chat_reply_extracts_reply_field(monkeypatch: pytest.MonkeyPatc
     assert reply == "当然，我可以帮你。"
     assert _FakeLLMClient.calls[0]["phase"] == "chat"
     assert _FakeLLMClient.calls[0]["task_id"] == "task_012"
+
+
+def test_generate_chat_reply_includes_uploaded_files_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("packages.domain.services.chat.LLMClient", _FakeLLMClient)
+    _FakeLLMClient.response = _FakeIntentResponse({"reply": "已看到上传文件。"})
+
+    reply = generate_chat_reply(
+        user_message="你能读到我上传的文件吗？",
+        history=[{"role": "assistant", "content": "上一轮"}],
+        uploaded_files=[
+            {
+                "file_id": "file_001",
+                "original_name": "xinjiang.tif",
+                "file_type": "raster_tiff",
+                "size_bytes": 1024,
+            }
+        ],
+        task_id="task_upload_chat",
+        db_session=object(),  # type: ignore[arg-type]
+    )
+
+    assert reply == "已看到上传文件。"
+    prompt_payload = json.loads(_FakeLLMClient.calls[0]["user_prompt"])
+    assert prompt_payload["uploaded_files"][0]["original_name"] == "xinjiang.tif"
+    assert prompt_payload["uploaded_files"][0]["file_type"] == "raster_tiff"
 
 
 @pytest.mark.parametrize(

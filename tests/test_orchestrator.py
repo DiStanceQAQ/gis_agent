@@ -236,3 +236,58 @@ def test_build_initial_operation_plan_injects_uploaded_source_paths() -> None:
     assert nodes[0]["params"]["source_path"] == "/tmp/source.tif"
     assert nodes[1]["params"]["source_path"] == "/tmp/clip.geojson"
     assert nodes[2]["params"]["aoi_path"] == "/tmp/clip.geojson"
+
+
+def test_build_initial_operation_plan_injects_clip_paths_without_uploads() -> None:
+    task_plan = TaskPlanResponse(
+        version="agent-v2",
+        mode="llm_plan_execute_gis_workspace",
+        status="ready",
+        objective="clip",
+        reasoning_summary="clip",
+        missing_fields=[],
+        steps=[],
+        operation_plan_nodes=[
+            {
+                "step_id": "step_1_upload_raster",
+                "op_name": "input.upload_raster",
+                "depends_on": [],
+                "inputs": {"upload_id": "external_raster"},
+                "params": {},
+                "outputs": {"raster": "r_src"},
+                "retry_policy": {"max_retries": 0},
+            },
+            {
+                "step_id": "step_2_upload_vector",
+                "op_name": "input.upload_vector",
+                "depends_on": [],
+                "inputs": {"upload_id": "external_vector"},
+                "params": {},
+                "outputs": {"vector": "v_clip"},
+                "retry_policy": {"max_retries": 0},
+            },
+            {
+                "step_id": "step_3_clip",
+                "op_name": "raster.clip",
+                "depends_on": ["step_1_upload_raster", "step_2_upload_vector"],
+                "inputs": {"raster": "r_src"},
+                "params": {"crop": True},
+                "outputs": {"raster": "r_out"},
+                "retry_policy": {"max_retries": 0},
+            },
+        ],
+    )
+    parsed = ParsedTaskSpec(
+        analysis_type="CLIP",
+        operation_params={
+            "source_path": "/Users/ljn/gis_data/CACD-2020.tif",
+            "clip_path": "/Users/ljn/gis_data/区划/xinjiang.geojson",
+        },
+    )
+
+    operation_plan = _build_initial_operation_plan(task_plan, parsed, uploaded_files=None)
+    nodes = operation_plan.model_dump()["nodes"]
+
+    assert nodes[0]["params"]["source_path"].endswith("CACD-2020.tif")
+    assert nodes[1]["params"]["source_path"].endswith("xinjiang.geojson")
+    assert nodes[2]["params"]["aoi_path"].endswith("xinjiang.geojson")

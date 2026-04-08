@@ -4,32 +4,26 @@ export default function TopNavBar({
   theme,
   onToggleTheme,
   sessionId,
-  taskId,
-  statusTone,
   statusLabel,
-  datasetLabel,
-  statusText,
 }: TopNavBarProps) {
+  const compactSessionId = sessionId ? sessionId.slice(-4).toUpperCase() : "----";
+
   return (
     <header className="wb-topbar">
-      <div className="wb-brand-zone">
-        <h1>GEOINT 空间智能</h1>
-        <p>Digital Meridian Workbench</p>
+      <div className="wb-topbar-left">
+        <h1 className="wb-brand-title">GEOINT 空间智能</h1>
+        <nav className="wb-topbar-nav">
+          <span className="wb-session-id">会话 ID: #{compactSessionId}</span>
+          <span className="wb-system-state">
+            <span className="wb-system-dot" />
+            系统状态: {statusLabel}
+          </span>
+        </nav>
       </div>
 
-      <div className="wb-status-zone">
-        <div className="wb-status-row">
-          <span className={`wb-badge wb-badge-${statusTone}`}>{statusLabel}</span>
-          <span className="wb-chip">Task {taskId ?? "--"}</span>
-          <span className="wb-chip">Session {sessionId ?? "初始化中"}</span>
-          <span className="wb-chip">{datasetLabel}</span>
-        </div>
-        <p>{statusText}</p>
-      </div>
-
-      <div className="wb-topbar-actions">
-        <button className="wb-ghost-btn" type="button" onClick={onToggleTheme}>
-          {theme === "dark" ? "浅色模式" : "深色模式"}
+      <div className="wb-topbar-right">
+        <button className="wb-avatar-btn" type="button" onClick={onToggleTheme} aria-label="切换主题">
+          <span className="material-symbols-outlined">{theme === "dark" ? "light_mode" : "dark_mode"}</span>
         </button>
       </div>
     </header>

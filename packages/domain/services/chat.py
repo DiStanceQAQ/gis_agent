@@ -18,10 +18,15 @@ def _load_chat_system_prompt() -> str:
     return prompt_path.read_text(encoding="utf-8")
 
 
-def _build_chat_user_prompt(user_message: str, history: list[dict[str, str]]) -> str:
+def _build_chat_user_prompt(
+    user_message: str,
+    history: list[dict[str, str]],
+    uploaded_files: list[dict[str, object]] | None = None,
+) -> str:
     payload = {
         "user_message": user_message,
         "history": history,
+        "uploaded_files": uploaded_files or [],
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
@@ -38,11 +43,16 @@ def generate_chat_reply(
     *,
     user_message: str,
     history: list[dict[str, str]],
+    uploaded_files: list[dict[str, object]] | None = None,
     task_id: str | None = None,
     db_session: Session | None = None,
 ) -> str:
     system_prompt = _load_chat_system_prompt()
-    user_prompt = _build_chat_user_prompt(user_message, history)
+    user_prompt = _build_chat_user_prompt(
+        user_message,
+        history,
+        uploaded_files=uploaded_files,
+    )
 
     try:
         response = LLMClient().chat_json(

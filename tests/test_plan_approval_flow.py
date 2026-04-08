@@ -29,7 +29,9 @@ from packages.schemas.task import ParsedTaskSpec
 def _patched_plan_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(orchestrator, "_queue_or_run", lambda task_id: None)
     monkeypatch.setattr(orchestrator, "preflight_processing_pipeline_inputs", lambda **kwargs: None)
-    monkeypatch.setattr(orchestrator, "generate_chat_reply", lambda **kwargs: "请确认是否开始执行任务。")
+    monkeypatch.setattr(
+        orchestrator, "generate_chat_reply", lambda **kwargs: "请确认是否开始执行任务。"
+    )
 
     def _classify_intent(message: str, **kwargs) -> IntentResult:  # noqa: ANN003
         del kwargs
@@ -49,7 +51,10 @@ def _patched_plan_flow(monkeypatch: pytest.MonkeyPatch) -> None:
             analysis_type="NDVI",
             preferred_output=["png_map", "methods_text"],
             user_priority="balanced",
-            operation_params={},
+            operation_params={
+                "operations": ["raster.band_math"],
+                "expression": "(nir-red)/(nir+red)",
+            },
             need_confirmation=False,
             missing_fields=[],
             clarification_message=None,
@@ -89,7 +94,9 @@ def _cleanup_session(session_id: str) -> None:
     with SessionLocal() as db:
         task_ids = [
             task_id
-            for (task_id,) in db.query(TaskRunRecord.id).filter(TaskRunRecord.session_id == session_id).all()
+            for (task_id,) in db.query(TaskRunRecord.id)
+            .filter(TaskRunRecord.session_id == session_id)
+            .all()
         ]
 
         if task_ids:
@@ -102,20 +109,28 @@ def _cleanup_session(session_id: str) -> None:
             db.query(TaskStepRecord).filter(TaskStepRecord.task_id.in_(task_ids)).delete(
                 synchronize_session=False
             )
-            db.query(DatasetCandidateRecord).filter(DatasetCandidateRecord.task_id.in_(task_ids)).delete(
+            db.query(DatasetCandidateRecord).filter(
+                DatasetCandidateRecord.task_id.in_(task_ids)
+            ).delete(synchronize_session=False)
+            db.query(AOIRecord).filter(AOIRecord.task_id.in_(task_ids)).delete(
                 synchronize_session=False
             )
-            db.query(AOIRecord).filter(AOIRecord.task_id.in_(task_ids)).delete(synchronize_session=False)
             db.query(TaskSpecRecord).filter(TaskSpecRecord.task_id.in_(task_ids)).delete(
                 synchronize_session=False
             )
-            db.query(TaskRunRecord).filter(TaskRunRecord.id.in_(task_ids)).delete(synchronize_session=False)
+            db.query(TaskRunRecord).filter(TaskRunRecord.id.in_(task_ids)).delete(
+                synchronize_session=False
+            )
 
-        db.query(MessageRecord).filter(MessageRecord.session_id == session_id).delete(synchronize_session=False)
+        db.query(MessageRecord).filter(MessageRecord.session_id == session_id).delete(
+            synchronize_session=False
+        )
         db.query(UploadedFileRecord).filter(UploadedFileRecord.session_id == session_id).delete(
             synchronize_session=False
         )
-        db.query(SessionRecord).filter(SessionRecord.id == session_id).delete(synchronize_session=False)
+        db.query(SessionRecord).filter(SessionRecord.id == session_id).delete(
+            synchronize_session=False
+        )
         db.commit()
 
 
@@ -268,7 +283,9 @@ def test_approve_task_plan_queues_execution(client: TestClient) -> None:
         _cleanup_session(session_id)
 
 
-def test_approve_task_plan_response_includes_execution_submission_metadata(client: TestClient) -> None:
+def test_approve_task_plan_response_includes_execution_submission_metadata(
+    client: TestClient,
+) -> None:
     session_id = _create_session()
     queued: list[str] = []
     try:
@@ -293,7 +310,9 @@ def test_approve_task_plan_response_includes_execution_submission_metadata(clien
         _cleanup_session(session_id)
 
 
-def test_approve_task_plan_rejects_version_mismatch_with_plan_edit_invalid(client: TestClient) -> None:
+def test_approve_task_plan_rejects_version_mismatch_with_plan_edit_invalid(
+    client: TestClient,
+) -> None:
     session_id = _create_session()
     try:
         payload = _create_message(client, session_id)
@@ -425,7 +444,9 @@ def test_approve_after_reject_is_blocked(client: TestClient) -> None:
         _cleanup_session(session_id)
 
 
-def test_patch_task_plan_rejects_unknown_dependency_with_plan_edit_invalid(client: TestClient) -> None:
+def test_patch_task_plan_rejects_unknown_dependency_with_plan_edit_invalid(
+    client: TestClient,
+) -> None:
     session_id = _create_session()
     try:
         payload = _create_message(client, session_id)

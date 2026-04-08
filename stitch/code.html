@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+
+<html class="light" lang="zh-CN"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>GEOINT 空间智能 - 智能工作台</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            "colors": {
+                    "error": "#ba1a1a",
+                    "on-secondary-container": "#394c84",
+                    "tertiary-container": "#bc4800",
+                    "on-tertiary-fixed": "#360f00",
+                    "on-error": "#ffffff",
+                    "on-tertiary": "#ffffff",
+                    "tertiary-fixed": "#ffdbcd",
+                    "on-error-container": "#93000a",
+                    "secondary-fixed-dim": "#b4c5ff",
+                    "secondary": "#495c95",
+                    "primary": "#004ac6",
+                    "surface-container-high": "#e6e8ea",
+                    "secondary-fixed": "#dbe1ff",
+                    "on-primary": "#ffffff",
+                    "inverse-on-surface": "#eff1f3",
+                    "surface-bright": "#f7f9fb",
+                    "primary-fixed-dim": "#b4c5ff",
+                    "surface-container-low": "#f2f4f6",
+                    "on-surface": "#191c1e",
+                    "inverse-primary": "#b4c5ff",
+                    "on-primary-container": "#eeefff",
+                    "background": "#f7f9fb",
+                    "tertiary-fixed-dim": "#ffb596",
+                    "outline": "#737686",
+                    "surface-container-highest": "#e0e3e5",
+                    "surface-container": "#eceef0",
+                    "primary-container": "#2563eb",
+                    "surface": "#f7f9fb",
+                    "error-container": "#ffdad6",
+                    "on-secondary": "#ffffff",
+                    "tertiary": "#943700",
+                    "on-tertiary-container": "#ffede6",
+                    "surface-dim": "#d8dadc",
+                    "outline-variant": "#c3c6d7",
+                    "secondary-container": "#acbfff",
+                    "on-primary-fixed": "#00174b",
+                    "on-background": "#191c1e",
+                    "surface-variant": "#e0e3e5",
+                    "primary-fixed": "#dbe1ff",
+                    "on-secondary-fixed": "#00174b",
+                    "surface-tint": "#0053db",
+                    "surface-container-lowest": "#ffffff",
+                    "on-secondary-fixed-variant": "#31447b",
+                    "on-surface-variant": "#434655",
+                    "inverse-surface": "#2d3133",
+                    "on-primary-fixed-variant": "#003ea8",
+                    "on-tertiary-fixed-variant": "#7d2d00"
+            },
+            "borderRadius": {
+                    "DEFAULT": "0.125rem",
+                    "lg": "0.25rem",
+                    "xl": "0.5rem",
+                    "full": "0.75rem"
+            },
+            "fontFamily": {
+                    "headline": ["Inter", "sans-serif"],
+                    "body": ["Inter", "sans-serif"],
+                    "label": ["Inter", "sans-serif"],
+                    "mono": ["JetBrains Mono", "monospace"]
+            }
+          },
+        },
+      }
+    </script>
+<style>
+        body { font-family: 'Inter', sans-serif; }
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+            vertical-align: middle;
+        }
+        .mono-text { font-family: 'JetBrains Mono', monospace; }
+        ::-webkit-scrollbar { width: 4px; height: 4px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #e0e3e5; border-radius: 2px; }
+    </style>
+</head>
+<body class="bg-background text-on-surface overflow-hidden h-screen w-screen">
+<!-- TopNavBar (Shared Component) -->
+<header class="fixed top-0 left-0 w-full flex justify-between items-center px-6 h-14 bg-[#f7f9fb]/80 dark:bg-[#191c1e]/80 backdrop-blur-xl border-b border-[#191c1e]/15 z-[100] font-['Inter','JetBrains_Mono'] antialiased tracking-tight shadow-sm">
+<div class="flex items-center gap-6">
+<h1 class="text-lg font-bold tracking-widest text-[#191c1e] dark:text-[#f7f9fb]">GEOINT 空间智能</h1>
+<nav class="hidden md:flex gap-4">
+<span class="text-[#004ac6] font-semibold">会话 ID: #8821</span>
+<span class="flex items-center gap-1.5 text-[#191c1e]/60">
+<span class="w-2 h-2 rounded-full bg-green-500"></span>
+                    系统状态: 运行中
+                </span>
+</nav>
+</div>
+<div class="flex items-center gap-4">
+<button class="p-2 hover:bg-[#004ac6]/5 transition-colors rounded-sm">
+<span class="material-symbols-outlined text-on-surface-variant">notifications</span>
+</button>
+<button class="p-2 hover:bg-[#004ac6]/5 transition-colors rounded-sm">
+<span class="material-symbols-outlined text-on-surface-variant">help</span>
+</button>
+<div class="w-8 h-8 rounded-sm bg-primary-container flex items-center justify-center text-on-primary-container text-xs font-bold overflow-hidden">
+<img alt="用户头像" src="https://lh3.googleusercontent.com/aida-public/AB6AXuCukQmTsLSrw0hDrUYqM7hRIwZkv9MxqopZPST__X_kiquT6tYkFpneqS1dtfTXLi9krfEv3fSh-sHixpRxozaop8sbL7fL54OvxC4iAVXXGvsSM6jmX8vTE1Qt6lIdPjaFCpk__R0Xv7uM3qemt9I83EkzND_I_ee5t3YUJxIvIGIla5BBwTKzDpyJ7XAQ920AuCyCuD1bLofzVqMjqVyGNmd_Uhl_4k4VxqfC3SFvLCvVYSht0mg2n-5QjXsKQmJtiNB3Sp7yAN3_"/>
+</div>
+</div>
+</header>
+<!-- Main Map Area -->
+<main class="absolute inset-0 z-0">
+<div class="w-full h-full relative">
+<img alt="Satellite Map View" class="w-full h-full object-cover grayscale-[0.2]" data-location="Shenzhen" src="https://lh3.googleusercontent.com/aida-public/AB6AXuDGEY8jDJQ0QCxnQz_Lu1fJdT-kabzjlp_pRDqdd4aiz4Ja9SNVkyGlw1EPt08Dm4pTT1GikiOwe9uP9xc9hgT-j2xseAHU9B8BBu2tN0hFr71F-BtOMPrm1NwF4OkxZJXSM-IGhAl9qhKqK8jfuYlJhsa2theuuAZbru99s9tA5SxNI-kmZcbBA5pfq2R4YAUN2BlsifL8yDvlUL5k2pBkx9CZ5d5uh7rDcRme_eJMk0WoUEQsp8eeD8u9tcLW5gRwhadvIeL0qmkV"/>
+<!-- Simulated AOI Overlay -->
+<div class="absolute inset-0 flex items-center justify-center pointer-events-none">
+<div class="w-64 h-48 border-2 border-green-500 bg-green-500/10 backdrop-blur-[1px] relative">
+<span class="absolute -top-6 left-0 bg-green-500 text-white text-[10px] px-1 font-mono">AOI_412 | 12.4km²</span>
+</div>
+</div>
+<!-- Map Controls -->
+<div class="absolute bottom-6 right-[408px] z-20 flex flex-col gap-2">
+<button class="w-10 h-10 bg-white/90 backdrop-blur-md shadow-lg flex items-center justify-center hover:bg-white border border-outline-variant/15 rounded-sm">
+<span class="material-symbols-outlined">add</span>
+</button>
+<button class="w-10 h-10 bg-white/90 backdrop-blur-md shadow-lg flex items-center justify-center hover:bg-white border border-outline-variant/15 rounded-sm">
+<span class="material-symbols-outlined">remove</span>
+</button>
+<button class="w-10 h-10 bg-white/90 backdrop-blur-md shadow-lg flex items-center justify-center hover:bg-white border border-outline-variant/15 rounded-sm">
+<span class="material-symbols-outlined">fullscreen</span>
+</button>
+</div>
+<!-- Bottom Left Info -->
+<div class="absolute bottom-6 left-6 z-20 flex items-center gap-4 bg-white/80 backdrop-blur-md px-3 py-1 text-[10px] mono-text border border-outline-variant/15 rounded-sm">
+<span class="opacity-70">1:25,000</span>
+<span class="w-px h-3 bg-outline-variant/30"></span>
+<span>22°32'48"N 114°03'21"E</span>
+<span class="w-px h-3 bg-outline-variant/30"></span>
+<span>WGS 84 / UTM zone 50N</span>
+</div>
+</div>
+</main>
+<!-- Floating Left Content Panel -->
+<div class="fixed left-6 top-20 z-40 w-80">
+<!-- Layer Manager Card -->
+<section class="bg-white/90 backdrop-blur-md shadow-sm border border-outline-variant/10 rounded-sm p-4">
+<h3 class="text-xs font-bold uppercase tracking-wider text-on-surface-variant mb-4 flex items-center justify-between">
+                图层管理
+                <span class="material-symbols-outlined text-sm">filter_list</span>
+</h3>
+<div class="space-y-4">
+<div class="space-y-2">
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-primary text-sm">visibility</span>
+<span class="text-xs font-medium">Sentinel-2 Imagery</span>
+</div>
+<span class="text-[10px] mono-text opacity-60">BASE</span>
+</div>
+<input class="w-full h-1 bg-surface-container-highest appearance-none cursor-pointer accent-primary" type="range" value="85"/>
+</div>
+<div class="space-y-2 opacity-80">
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-on-surface-variant text-sm">visibility_off</span>
+<span class="text-xs font-medium">Land Use Classification</span>
+</div>
+</div>
+<input class="w-full h-1 bg-surface-container-highest appearance-none cursor-not-allowed" type="range" value="0"/>
+</div>
+<div class="space-y-2">
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-primary text-sm">visibility</span>
+<span class="text-xs font-medium">Administrative Boundaries</span>
+</div>
+</div>
+<input class="w-full h-1 bg-surface-container-highest appearance-none cursor-pointer accent-primary" type="range" value="40"/>
+</div>
+</div>
+</section>
+</div>
+<!-- Right Anchor Workbench Panel -->
+<aside class="fixed right-4 top-20 bottom-4 w-96 z-50 flex flex-col bg-[#ffffff]/80 dark:bg-[#191c1e]/90 backdrop-blur-md rounded-sm shadow-2xl shadow-[#191c1e]/5 font-['JetBrains_Mono'] text-xs border border-outline-variant/15">
+<!-- Workbench Header -->
+<div class="p-4 border-b border-outline-variant/15 flex items-center gap-3">
+<div class="w-8 h-8 bg-surface-container-highest rounded-sm flex items-center justify-center">
+<span class="material-symbols-outlined text-primary" data-icon="terminal">terminal</span>
+</div>
+<div>
+<h2 class="text-xs font-bold text-[#004ac6]">Agent Workbench</h2>
+<p class="text-[10px] opacity-60">实时逻辑解算中</p>
+</div>
+<div class="ml-auto flex gap-2">
+<span class="w-2 h-2 rounded-full bg-primary animate-pulse"></span>
+</div>
+</div>
+<!-- Scrollable Workspace Content -->
+<div class="flex-1 overflow-y-auto p-4 space-y-6">
+<!-- IDE Style Input -->
+<div class="space-y-2">
+<div class="flex items-center justify-between px-2 py-1 bg-surface-container-high rounded-t-sm">
+<span class="text-[9px] opacity-60">main_query.py</span>
+<span class="material-symbols-outlined text-[14px]">close</span>
+</div>
+<div class="bg-surface-container-lowest border border-outline-variant/15 p-3 rounded-b-sm min-h-[100px] shadow-inner">
+<div class="flex gap-3">
+<span class="opacity-20 text-right w-4 select-none">1</span>
+<code class="text-primary-container font-medium">// 输入命令</code>
+</div>
+<div class="flex gap-3 mt-1">
+<span class="opacity-20 text-right w-4 select-none">2</span>
+<code class="text-on-surface">分析 <span class="text-tertiary">AOI_412</span> 在 <span class="text-secondary">2024 年 Q3</span> 的土地覆盖变化</code>
+</div>
+<div class="flex gap-3 mt-1">
+<span class="opacity-20 text-right w-4 select-none">3</span>
+<code class="text-on-surface animate-pulse">|</code>
+</div>
+</div>
+<button class="w-full h-9 flex items-center justify-center gap-2 bg-surface-container border border-outline-variant/15 hover:bg-surface-container-high transition-colors">
+<span class="material-symbols-outlined text-sm">upload_file</span>
+                    上传 AOI 几何数据
+                </button>
+</div>
+<!-- Parameters Card -->
+<div class="p-4 bg-surface-container-low rounded-sm space-y-3">
+<h4 class="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant flex items-center gap-2">
+<span class="material-symbols-outlined text-[14px]">tune</span> 参数解析
+                </h4>
+<div class="grid grid-cols-2 gap-x-4 gap-y-2">
+<div>
+<span class="block text-[9px] opacity-50 uppercase">Identity</span>
+<span class="font-bold">AOI #412</span>
+</div>
+<div>
+<span class="block text-[9px] opacity-50 uppercase">Source</span>
+<span class="font-bold">Sentinel-2</span>
+</div>
+<div class="col-span-2">
+<span class="block text-[9px] opacity-50 uppercase">Time Range</span>
+<span class="font-bold">2024-07-01 → 2024-09-30</span>
+</div>
+</div>
+</div>
+<!-- Execution Pipeline -->
+<div class="space-y-4">
+<h4 class="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant flex items-center gap-2">
+<span class="material-symbols-outlined text-[14px]">timeline</span> 执行流水线
+                </h4>
+<div class="relative pl-6 space-y-6 before:absolute before:left-[11px] before:top-2 before:bottom-2 before:w-px before:bg-outline-variant/20">
+<div class="relative">
+<span class="absolute -left-[19px] top-0 w-4 h-4 rounded-full bg-green-500 flex items-center justify-center text-[10px] text-white">
+<span class="material-symbols-outlined text-[12px]">check</span>
+</span>
+<div class="flex justify-between items-center">
+<span class="font-medium">1. 数据获取</span>
+<span class="text-[9px] px-1 bg-green-100 text-green-700">SUCCESS</span>
+</div>
+</div>
+<div class="relative">
+<span class="absolute -left-[19px] top-0 w-4 h-4 rounded-full bg-primary flex items-center justify-center">
+<span class="w-1.5 h-1.5 rounded-full bg-white animate-ping"></span>
+</span>
+<div class="space-y-2">
+<div class="flex justify-between items-center">
+<span class="font-medium text-primary">2. 去云处理</span>
+<span class="text-[9px] px-1 bg-primary-container text-white">RUNNING 64%</span>
+</div>
+<div class="w-full h-1 bg-surface-container-high overflow-hidden">
+<div class="h-full bg-primary" style="width: 64%"></div>
+</div>
+</div>
+</div>
+<div class="relative opacity-40">
+<span class="absolute -left-[19px] top-0 w-4 h-4 rounded-full bg-surface-container-highest flex items-center justify-center text-[10px]">3</span>
+<span class="font-medium">3. 特征提取</span>
+</div>
+</div>
+</div>
+<!-- Logic DAG -->
+<div class="p-3 bg-[#191c1e] text-[#f7f9fb] rounded-sm text-[9px] mono-text leading-relaxed">
+<span class="text-green-400">fetch_data</span> <span class="text-white/40">-&gt;</span>
+<span class="text-blue-400">cloud_mask</span> <span class="text-white/40">-&gt;</span>
+<span class="text-yellow-400">ndvi_calc</span> <span class="text-white/40">-&gt;</span>
+<span class="text-purple-400">change_detect</span> <span class="text-white/40">-&gt;</span>
+<span class="text-red-400">gen_report</span>
+</div>
+</div>
+<!-- Actions -->
+<div class="p-4 bg-surface-container-high border-t border-outline-variant/15 flex flex-col gap-2">
+<div class="grid grid-cols-2 gap-2">
+<button class="h-10 border border-outline-variant text-on-surface hover:bg-white transition-all rounded-sm flex items-center justify-center gap-2">
+                    更新计划
+                </button>
+<button class="h-10 border border-error/30 text-error hover:bg-error-container/20 transition-all rounded-sm flex items-center justify-center gap-2">
+                    拒绝
+                </button>
+</div>
+<button class="h-12 bg-primary text-white hover:bg-primary-container active:scale-[0.98] transition-all rounded-sm flex items-center justify-center gap-2 text-sm font-bold">
+<span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">play_arrow</span>
+                批准并执行
+            </button>
+</div>
+</aside>
+</body></html>

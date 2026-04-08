@@ -1,4 +1,8 @@
+import json
+import time
+
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from apps.api.deps import get_db
@@ -43,6 +47,51 @@ def get_task_events_endpoint(
     db: Session = Depends(get_db),
 ) -> TaskEventsResponse:
     return get_task_events(db=db, task_id=task_id, since_id=since_id)
+
+
+def _encode_sse(*, event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+@router.get(
+    "/tasks/{task_id}/events/stream",
+    responses={400: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
+)
+def stream_task_events_endpoint(
+    task_id: str,
+    since_id: int = Query(default=0, ge=0),
+    poll_interval_ms: int = Query(default=800, ge=100, le=10000),
+    max_events: int | None = Query(default=None, ge=1, le=1000),
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    # Validate task existence and cursor before opening stream.
+    get_task_events(db=db, task_id=task_id, since_id=since_id)
+    local_since = since_id
+
+    def _event_iter():
+        nonlocal local_since
+        emitted = 0
+        while True:
+            payload = get_task_events(db=db, task_id=task_id, since_id=local_since)
+            if payload.events:
+                for event in payload.events:
+                    yield _encode_sse(event="task_event", data=event.model_dump(mode="json"))
+                    emitted += 1
+                    if max_events is not None and emitted >= max_events:
+                        return
+                local_since = payload.next_cursor
+            else:
+                yield ": keep-alive\n\n"
+
+            if max_events is not None and emitted >= max_events:
+                return
+            time.sleep(poll_interval_ms / 1000)
+
+    return StreamingResponse(
+        _event_iter(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
 
 
 @router.post(

@@ -25,7 +25,10 @@ from packages.domain.services import chat as chat_service
 from packages.domain.services.intent import IntentResult, is_task_confirmation_message
 from packages.domain.services.llm_client import LLMResponse, LLMUsage
 from packages.domain.services.planner import TaskPlan, TaskPlanStep
-from packages.domain.services.task_state import TASK_STATUS_AWAITING_APPROVAL, TASK_STATUS_WAITING_CLARIFICATION
+from packages.domain.services.task_state import (
+    TASK_STATUS_AWAITING_APPROVAL,
+    TASK_STATUS_WAITING_CLARIFICATION,
+)
 from packages.schemas.task import ParsedTaskSpec
 
 
@@ -38,7 +41,9 @@ CLIP_TASK_REQUEST = "请把 /Users/ljn/gis_data/CACD-2020.tif 裁剪到新疆范
 @pytest.fixture(autouse=True)
 def _patched_message_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(orchestrator, "_queue_or_run", lambda task_id: None)
-    monkeypatch.setattr(orchestrator, "generate_chat_reply", lambda **kwargs: "当然可以，我们先聊聊。")
+    monkeypatch.setattr(
+        orchestrator, "generate_chat_reply", lambda **kwargs: "当然可以，我们先聊聊。"
+    )
     monkeypatch.setattr(orchestrator, "normalize_task_aoi", lambda **kwargs: None)
 
     def _classify_intent(message: str, **kwargs) -> IntentResult:  # noqa: ANN003
@@ -60,7 +65,10 @@ def _patched_message_flow(monkeypatch: pytest.MonkeyPatch) -> None:
                 analysis_type="NDVI",
                 preferred_output=["png_map", "methods_text"],
                 user_priority="balanced",
-                operation_params={},
+                operation_params={
+                    "operations": ["raster.band_math"],
+                    "expression": "(nir-red)/(nir+red)",
+                },
                 need_confirmation=False,
                 missing_fields=[],
                 clarification_message=None,
@@ -76,7 +84,10 @@ def _patched_message_flow(monkeypatch: pytest.MonkeyPatch) -> None:
                 analysis_type="NDVI",
                 preferred_output=["png_map", "methods_text"],
                 user_priority="balanced",
-                operation_params={},
+                operation_params={
+                    "operations": ["raster.band_math"],
+                    "expression": "(nir-red)/(nir+red)",
+                },
                 need_confirmation=True,
                 missing_fields=["aoi"],
                 clarification_message="请补充 AOI。",
@@ -92,7 +103,10 @@ def _patched_message_flow(monkeypatch: pytest.MonkeyPatch) -> None:
                 analysis_type="NDVI",
                 preferred_output=["png_map", "methods_text"],
                 user_priority="balanced",
-                operation_params={},
+                operation_params={
+                    "operations": ["raster.band_math"],
+                    "expression": "(nir-red)/(nir+red)",
+                },
                 need_confirmation=True,
                 missing_fields=["aoi", "time_range"],
                 clarification_message="请补充 AOI 和时间范围。",
@@ -108,7 +122,10 @@ def _patched_message_flow(monkeypatch: pytest.MonkeyPatch) -> None:
             analysis_type="NDVI",
             preferred_output=["png_map", "methods_text"],
             user_priority="balanced",
-            operation_params={},
+            operation_params={
+                "operations": ["raster.band_math"],
+                "expression": "(nir-red)/(nir+red)",
+            },
             need_confirmation=False,
             missing_fields=[],
             clarification_message=None,
@@ -150,7 +167,9 @@ def _cleanup_session(session_id: str) -> None:
     with SessionLocal() as db:
         task_ids = [
             task_id
-            for (task_id,) in db.query(TaskRunRecord.id).filter(TaskRunRecord.session_id == session_id).all()
+            for (task_id,) in db.query(TaskRunRecord.id)
+            .filter(TaskRunRecord.session_id == session_id)
+            .all()
         ]
 
         if task_ids:
@@ -163,20 +182,28 @@ def _cleanup_session(session_id: str) -> None:
             db.query(TaskStepRecord).filter(TaskStepRecord.task_id.in_(task_ids)).delete(
                 synchronize_session=False
             )
-            db.query(DatasetCandidateRecord).filter(DatasetCandidateRecord.task_id.in_(task_ids)).delete(
+            db.query(DatasetCandidateRecord).filter(
+                DatasetCandidateRecord.task_id.in_(task_ids)
+            ).delete(synchronize_session=False)
+            db.query(AOIRecord).filter(AOIRecord.task_id.in_(task_ids)).delete(
                 synchronize_session=False
             )
-            db.query(AOIRecord).filter(AOIRecord.task_id.in_(task_ids)).delete(synchronize_session=False)
             db.query(TaskSpecRecord).filter(TaskSpecRecord.task_id.in_(task_ids)).delete(
                 synchronize_session=False
             )
-            db.query(TaskRunRecord).filter(TaskRunRecord.id.in_(task_ids)).delete(synchronize_session=False)
+            db.query(TaskRunRecord).filter(TaskRunRecord.id.in_(task_ids)).delete(
+                synchronize_session=False
+            )
 
-        db.query(MessageRecord).filter(MessageRecord.session_id == session_id).delete(synchronize_session=False)
+        db.query(MessageRecord).filter(MessageRecord.session_id == session_id).delete(
+            synchronize_session=False
+        )
         db.query(UploadedFileRecord).filter(UploadedFileRecord.session_id == session_id).delete(
             synchronize_session=False
         )
-        db.query(SessionRecord).filter(SessionRecord.id == session_id).delete(synchronize_session=False)
+        db.query(SessionRecord).filter(SessionRecord.id == session_id).delete(
+            synchronize_session=False
+        )
         db.commit()
 
 
@@ -218,7 +245,11 @@ def _post_message(
 ) -> dict[str, object]:
     response = client.post(
         "/api/v1/messages",
-        json={"session_id": session_id, "content": content, "file_ids": file_ids or []},
+        json={
+            "session_id": session_id,
+            "content": content,
+            "file_ids": file_ids or [],
+        },
     )
     assert response.status_code == 200
     return response.json()
@@ -278,7 +309,9 @@ def test_second_chat_turn_replays_prior_assistant_message_into_generation_histor
         _cleanup_session(session_id)
 
 
-def test_high_confidence_task_request_prompts_confirmation_without_creating_task(client: TestClient) -> None:
+def test_high_confidence_task_request_prompts_confirmation_without_creating_task(
+    client: TestClient,
+) -> None:
     session_id = _create_session()
     try:
         payload = _post_message(client, session_id, TASK_REQUEST)
@@ -291,7 +324,38 @@ def test_high_confidence_task_request_prompts_confirmation_without_creating_task
         assert payload["assistant_message"]
 
         with SessionLocal() as db:
-            assert db.query(TaskRunRecord).filter(TaskRunRecord.session_id == session_id).count() == 0
+            assert (
+                db.query(TaskRunRecord).filter(TaskRunRecord.session_id == session_id).count() == 0
+            )
+    finally:
+        _cleanup_session(session_id)
+
+
+def test_chat_with_uploaded_files_keeps_chat_mode_until_user_confirms_execution(
+    client: TestClient,
+) -> None:
+    session_id = _create_session()
+    try:
+        file_id = _create_uploaded_vector_file(session_id)
+        payload = _post_message(
+            client,
+            session_id,
+            "你能读到我上传的文件吗？",
+            file_ids=[file_id],
+        )
+
+        assert payload["mode"] == "chat"
+        assert payload["task_id"] is None
+        assert payload["awaiting_task_confirmation"] is False
+        assistant_message = str(payload["assistant_message"] or "")
+        assert assistant_message
+        assert "可以" in assistant_message
+        assert "file_test_vector.geojson" in assistant_message
+
+        with SessionLocal() as db:
+            assert (
+                db.query(TaskRunRecord).filter(TaskRunRecord.session_id == session_id).count() == 0
+            )
     finally:
         _cleanup_session(session_id)
 
@@ -347,7 +411,9 @@ def test_confirmation_without_prior_context_returns_chat_guidance(client: TestCl
         assert payload["assistant_message"]
 
         with SessionLocal() as db:
-            assert db.query(TaskRunRecord).filter(TaskRunRecord.session_id == session_id).count() == 0
+            assert (
+                db.query(TaskRunRecord).filter(TaskRunRecord.session_id == session_id).count() == 0
+            )
             assistant_messages = (
                 db.query(MessageRecord)
                 .filter(MessageRecord.session_id == session_id, MessageRecord.role == "assistant")
@@ -376,10 +442,14 @@ def test_stale_confirmation_after_successful_confirmation_does_not_create_second
         assert stale_confirmation_payload["task_id"] is None
 
         with SessionLocal() as db:
-            assert db.query(TaskRunRecord).filter(TaskRunRecord.session_id == session_id).count() == 1
+            assert (
+                db.query(TaskRunRecord).filter(TaskRunRecord.session_id == session_id).count() == 1
+            )
             source_message = (
                 db.query(MessageRecord)
-                .filter(MessageRecord.session_id == session_id, MessageRecord.content == TASK_REQUEST)
+                .filter(
+                    MessageRecord.session_id == session_id, MessageRecord.content == TASK_REQUEST
+                )
                 .one()
             )
             assert source_message.linked_task_id == task_payload["task_id"]
@@ -458,7 +528,9 @@ def test_create_message_uses_single_shot_task_flow_when_intent_router_is_disable
         assert payload["awaiting_task_confirmation"] is False
 
         with SessionLocal() as db:
-            assert db.query(TaskRunRecord).filter(TaskRunRecord.session_id == session_id).count() == 1
+            assert (
+                db.query(TaskRunRecord).filter(TaskRunRecord.session_id == session_id).count() == 1
+            )
     finally:
         _cleanup_session(session_id)
 
@@ -482,7 +554,9 @@ def test_delayed_confirmation_after_unrelated_chat_does_not_execute_old_request(
         assert delayed_confirmation_payload["awaiting_task_confirmation"] is False
 
         with SessionLocal() as db:
-            assert db.query(TaskRunRecord).filter(TaskRunRecord.session_id == session_id).count() == 0
+            assert (
+                db.query(TaskRunRecord).filter(TaskRunRecord.session_id == session_id).count() == 0
+            )
     finally:
         _cleanup_session(session_id)
 

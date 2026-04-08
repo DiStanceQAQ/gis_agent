@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 from packages.domain.config import get_settings
@@ -14,11 +16,24 @@ from packages.domain.services.task_state import STEP_STATUS_RUNNING, STEP_STATUS
 from packages.schemas.task import ParsedTaskSpec
 
 
-@pytest.fixture
+def _live_llm_mode() -> bool:
+    return os.getenv("GIS_AGENT_TEST_USE_REAL_LLM", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+@pytest.fixture(autouse=True)
 def _legacy_planner_mode_for_tests(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("GIS_AGENT_LLM_API_KEY", raising=False)
+    if not _live_llm_mode():
+        monkeypatch.setenv("GIS_AGENT_LLM_API_KEY", "")
     monkeypatch.setenv("GIS_AGENT_LLM_PLANNER_ENABLED", "true")
-    monkeypatch.setenv("GIS_AGENT_LLM_PLANNER_LEGACY_FALLBACK", "true")
+    monkeypatch.setenv(
+        "GIS_AGENT_LLM_PLANNER_LEGACY_FALLBACK", "false" if _live_llm_mode() else "true"
+    )
+    monkeypatch.setenv("GIS_AGENT_LOCAL_FILES_ONLY_MODE", "false")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -40,6 +55,12 @@ def test_build_task_plan_for_ready_request(
         aoi_source_type="bbox",
         time_range={"start": "2024-06-01", "end": "2024-06-30"},
         requested_dataset="landsat89",
+        analysis_type="WORKFLOW",
+        operation_params={
+            "operations": ["raster.reproject"],
+            "source_path": "/tmp/local_source.tif",
+            "target_crs": "EPSG:3857",
+        },
     )
 
     plan = build_task_plan(parsed)
@@ -49,7 +70,7 @@ def test_build_task_plan_for_ready_request(
     assert plan.steps[0].step_name == "plan_task"
     assert plan.steps[0].tool_name == "planner.build"
     assert plan.steps[-1].step_name == "generate_outputs"
-    assert "landsat89" in plan.objective
+    assert "raster.reproject" in plan.objective
 
 
 def test_build_task_plan_skips_catalog_steps_in_local_files_only_mode(
@@ -71,7 +92,6 @@ def test_build_task_plan_skips_catalog_steps_in_local_files_only_mode(
 
     assert [step.step_name for step in plan.steps] == [
         "plan_task",
-        "normalize_aoi",
         "run_processing_pipeline",
         "generate_outputs",
     ]
@@ -225,7 +245,9 @@ def test_build_task_plan_uses_llm_main_chain(monkeypatch: pytest.MonkeyPatch) ->
     get_settings.cache_clear()
 
 
-def test_build_task_plan_retries_on_schema_validation_error(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_build_task_plan_retries_on_schema_validation_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("GIS_AGENT_LLM_API_KEY", "test_key")
     monkeypatch.setenv("GIS_AGENT_LLM_PLANNER_ENABLED", "true")
     monkeypatch.setenv("GIS_AGENT_LLM_PLANNER_LEGACY_FALLBACK", "false")

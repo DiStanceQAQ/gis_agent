@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import zipfile
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -20,7 +21,11 @@ from packages.domain.services.catalog import (
     persist_candidates,
     search_candidates,
 )
-from packages.domain.services.explanation import ExplanationContext, build_methods_text, build_summary_text
+from packages.domain.services.explanation import (
+    ExplanationContext,
+    build_methods_text,
+    build_summary_text,
+)
 from packages.domain.services.llm_call_logs import write_llm_call_log
 from packages.domain.services.processing_pipeline import run_processing_pipeline
 from packages.domain.services.planner import (
@@ -76,14 +81,65 @@ class PipelineExecutionContext:
     pipeline_outputs: dict[str, object] | None = None
 
 
+_SHAPEFILE_COMPONENT_SUFFIXES = (
+    ".shp",
+    ".shx",
+    ".dbf",
+    ".prj",
+    ".cpg",
+    ".sbn",
+    ".sbx",
+    ".qix",
+    ".ain",
+    ".aih",
+    ".ixs",
+    ".mxs",
+)
+
+
+def _prepare_artifact_for_storage(
+    *,
+    artifact_type: str,
+    source_path: str,
+    mime_type: str,
+) -> tuple[str, str, str, dict[str, object]]:
+    path = Path(source_path)
+    if artifact_type != "shapefile" or path.suffix.lower() != ".shp":
+        return source_path, mime_type, source_path, {}
+
+    components = [path.with_suffix(suffix) for suffix in _SHAPEFILE_COMPONENT_SUFFIXES]
+    existing = [item for item in components if item.exists()]
+    if not existing:
+        return source_path, mime_type, source_path, {}
+
+    zip_path = path.with_suffix(".zip")
+    with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for item in existing:
+            archive.write(item, arcname=item.name)
+
+    component_names = [item.name for item in existing]
+    extra_metadata = {
+        "packaged_format": "shapefile_zip",
+        "packaged_components": component_names,
+        "metadata_source": path.name,
+    }
+    return str(zip_path), "application/zip", str(path), extra_metadata
+
+
 def _require_task_bbox(task: TaskRunRecord) -> list[float]:
     if task.aoi and task.aoi.bbox_bounds_json:
         return [float(value) for value in task.aoi.bbox_bounds_json]
-    raise ValueError("Task AOI was not normalized; refusing to run pipeline without a normalized AOI bbox.")
+    raise ValueError(
+        "Task AOI was not normalized; refusing to run pipeline without a normalized AOI bbox."
+    )
 
 
-def _tool_plan_task(db: Session, task: TaskRunRecord, context: PipelineExecutionContext) -> dict[str, object]:
-    task.plan_json = ensure_task_plan(task.plan_json, context.parsed_spec, task_id=task.id).model_dump()
+def _tool_plan_task(
+    db: Session, task: TaskRunRecord, context: PipelineExecutionContext
+) -> dict[str, object]:
+    task.plan_json = ensure_task_plan(
+        task.plan_json, context.parsed_spec, task_id=task.id
+    ).model_dump()
     db.flush()
     return {
         "plan_status": (task.plan_json or {}).get("status"),
@@ -92,7 +148,9 @@ def _tool_plan_task(db: Session, task: TaskRunRecord, context: PipelineExecution
     }
 
 
-def _tool_normalize_aoi(db: Session, task: TaskRunRecord, context: PipelineExecutionContext) -> dict[str, object]:
+def _tool_normalize_aoi(
+    db: Session, task: TaskRunRecord, context: PipelineExecutionContext
+) -> dict[str, object]:
     del db
     bbox = _require_task_bbox(task)
     context.bbox = bbox
@@ -103,7 +161,34 @@ def _tool_normalize_aoi(db: Session, task: TaskRunRecord, context: PipelineExecu
     }
 
 
-def _tool_search_candidates(db: Session, task: TaskRunRecord, context: PipelineExecutionContext) -> dict[str, object]:
+def _tool_search_candidates(
+    db: Session, task: TaskRunRecord, context: PipelineExecutionContext
+) -> dict[str, object]:
+    settings = get_settings()
+    if bool(getattr(settings, "local_files_only_mode", False)):
+        context.candidates = []
+        context.candidate_qc = None
+        detail = {
+            "candidate_count": 0,
+            "collections": [],
+            "qc": {
+                "status": "skipped",
+                "issues": [],
+                "reason": "local_files_only_mode",
+            },
+            "candidate_summaries": [],
+            "local_files_only_mode": True,
+        }
+        append_task_event(
+            db,
+            task_id=task.id,
+            event_type="task_catalog_candidates_skipped",
+            step_name="search_candidates",
+            status=task.status,
+            detail=detail,
+        )
+        return detail
+
     candidates = search_candidates(context.parsed_spec, task.aoi)
     candidate_qc = evaluate_candidate_qc(candidates)
     persist_candidates(db, task=task, candidates=candidates)
@@ -141,7 +226,25 @@ def _tool_search_candidates(db: Session, task: TaskRunRecord, context: PipelineE
     return detail
 
 
-def _tool_recommend_dataset(db: Session, task: TaskRunRecord, context: PipelineExecutionContext) -> dict[str, object]:
+def _tool_recommend_dataset(
+    db: Session, task: TaskRunRecord, context: PipelineExecutionContext
+) -> dict[str, object]:
+    settings = get_settings()
+    if bool(getattr(settings, "local_files_only_mode", False)):
+        recommendation = {
+            "primary_dataset": "local_file",
+            "backup_dataset": None,
+            "scores": {"local_file": 1.0},
+            "reason": "本地文件模式下直接使用用户指定或上传的文件，不执行目录推荐。",
+            "risk_note": None,
+            "confidence": 1.0,
+        }
+        context.recommendation = recommendation
+        task.selected_dataset = recommendation["primary_dataset"]
+        task.recommendation_json = recommendation
+        db.flush()
+        return recommendation
+
     recommendation = build_recommendation(
         context.candidates,
         user_priority=context.parsed_spec.user_priority,
@@ -154,7 +257,11 @@ def _tool_recommend_dataset(db: Session, task: TaskRunRecord, context: PipelineE
         db.flush()
         raise AgentRuntimeError(
             error_code=str(recommendation["error_code"]),
-            message=str(recommendation.get("error_message") or recommendation.get("reason") or "recommendation failed"),
+            message=str(
+                recommendation.get("error_message")
+                or recommendation.get("reason")
+                or "recommendation failed"
+            ),
             detail={
                 "stage": "recommend_dataset",
                 "recommendation_reason": recommendation.get("reason"),
@@ -174,7 +281,7 @@ def _tool_run_processing_pipeline(
     del db
     if not task.selected_dataset:
         task.selected_dataset = "local_file"
-    operation_plan = ((task.plan_json or {}).get("operation_plan") or {})
+    operation_plan = (task.plan_json or {}).get("operation_plan") or {}
     plan_nodes = list(operation_plan.get("nodes") or [])
 
     working_dir = Path(build_artifact_path(task.id, "pipeline_tmp")).parent
@@ -227,7 +334,8 @@ def _tool_generate_outputs(
                 "artifact_type": artifact_type,
                 "path": str(path),
                 "source_step": source_step,
-                "mime_type": mime_type or infer_artifact_mime_type(path, artifact_type=artifact_type),
+                "mime_type": mime_type
+                or infer_artifact_mime_type(path, artifact_type=artifact_type),
             }
         )
 
@@ -286,9 +394,15 @@ def _tool_generate_outputs(
             if pipeline_outputs["valid_pixel_ratio"] is not None
             else None
         ),
-        ndvi_min=float(pipeline_outputs["ndvi_min"]) if pipeline_outputs.get("ndvi_min") is not None else None,
-        ndvi_max=float(pipeline_outputs["ndvi_max"]) if pipeline_outputs.get("ndvi_max") is not None else None,
-        ndvi_mean=float(pipeline_outputs["ndvi_mean"]) if pipeline_outputs.get("ndvi_mean") is not None else None,
+        ndvi_min=float(pipeline_outputs["ndvi_min"])
+        if pipeline_outputs.get("ndvi_min") is not None
+        else None,
+        ndvi_max=float(pipeline_outputs["ndvi_max"])
+        if pipeline_outputs.get("ndvi_max") is not None
+        else None,
+        ndvi_mean=float(pipeline_outputs["ndvi_mean"])
+        if pipeline_outputs.get("ndvi_mean") is not None
+        else None,
         output_width=(
             int(pipeline_outputs["output_width"])
             if pipeline_outputs.get("output_width") is not None
@@ -299,7 +413,9 @@ def _tool_generate_outputs(
             if pipeline_outputs.get("output_height") is not None
             else None
         ),
-        output_crs=str(pipeline_outputs["output_crs"]) if pipeline_outputs.get("output_crs") else None,
+        output_crs=str(pipeline_outputs["output_crs"])
+        if pipeline_outputs.get("output_crs")
+        else None,
         recommendation_reason=(task.recommendation_json or {}).get("reason"),
         recommendation_risk_note=(task.recommendation_json or {}).get("risk_note"),
         fallback_used=task.fallback_used,
@@ -318,17 +434,27 @@ def _tool_generate_outputs(
         path = str(item["path"])
         mime = str(item["mime_type"])
         source_step = str(item["source_step"]) if item["source_step"] else None
+
+        publish_path, publish_mime, metadata_source_path, extra_metadata = (
+            _prepare_artifact_for_storage(
+                artifact_type=artifact_type,
+                source_path=path,
+                mime_type=mime,
+            )
+        )
         storage_key, size_bytes, checksum = persist_artifact_file(
             task.id,
-            Path(path).name,
-            path,
-            content_type=mime,
+            Path(publish_path).name,
+            publish_path,
+            content_type=publish_mime,
         )
         metadata = collect_artifact_metadata(
-            path,
+            metadata_source_path,
             artifact_type=artifact_type,
             source_step=source_step,
         )
+        if extra_metadata:
+            metadata.update(extra_metadata)
         metadata["mode"] = pipeline_outputs["mode"]
         db.add(
             ArtifactRecord(
@@ -336,7 +462,7 @@ def _tool_generate_outputs(
                 task_id=task.id,
                 artifact_type=artifact_type,
                 storage_key=storage_key,
-                mime_type=mime,
+                mime_type=publish_mime,
                 size_bytes=size_bytes,
                 checksum=checksum,
                 metadata_json=metadata,
@@ -741,7 +867,10 @@ def execute_tool_step(
     step_react_max_rounds = max(1, int(getattr(settings, "agent_step_react_max_rounds", 1)))
     step_react_timeout_seconds = int(getattr(settings, "agent_step_react_timeout_seconds", 30))
     for step_react_round in range(1, step_react_max_rounds + 1):
-        if step_react_timeout_seconds > 0 and (perf_counter() - step_react_started) > step_react_timeout_seconds:
+        if (
+            step_react_timeout_seconds > 0
+            and (perf_counter() - step_react_started) > step_react_timeout_seconds
+        ):
             raise AgentRuntimeError(
                 error_code=ErrorCode.TASK_RUNTIME_TIMEOUT,
                 message=f"Step ReAct timed out before tool execution: {step_name}",

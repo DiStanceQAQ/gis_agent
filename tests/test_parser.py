@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 from packages.domain.config import get_settings
@@ -11,11 +13,24 @@ from packages.domain.services.parser import (
 )
 
 
+def _live_llm_mode() -> bool:
+    return os.getenv("GIS_AGENT_TEST_USE_REAL_LLM", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 @pytest.fixture(autouse=True)
 def _default_parser_mode_for_tests(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GIS_AGENT_LLM_PARSER_ENABLED", "true")
-    monkeypatch.setenv("GIS_AGENT_LLM_PARSER_LEGACY_FALLBACK", "true")
-    monkeypatch.delenv("GIS_AGENT_LLM_API_KEY", raising=False)
+    monkeypatch.setenv(
+        "GIS_AGENT_LLM_PARSER_LEGACY_FALLBACK", "false" if _live_llm_mode() else "true"
+    )
+    if not _live_llm_mode():
+        monkeypatch.setenv("GIS_AGENT_LLM_API_KEY", "")
+    monkeypatch.setenv("GIS_AGENT_LOCAL_FILES_ONLY_MODE", "false")
     monkeypatch.delenv("GIS_AGENT_LLM_PARSER_SCHEMA_RETRIES", raising=False)
     get_settings.cache_clear()
     yield
@@ -86,6 +101,83 @@ def test_parse_missing_time_requires_clarification() -> None:
     assert "time_range" in parsed.missing_fields
 
 
+def test_parse_workflow_request_with_upload_detects_operations_without_template_defaults() -> None:
+    parsed = parse_task_message("基于已上传文件做重投影并重采样。", has_upload=True)
+
+    assert parsed.analysis_type == "WORKFLOW"
+    assert parsed.need_confirmation is False
+    assert parsed.operation_params["operations"] == ["raster.reproject", "raster.resample"]
+
+
+def test_parse_workflow_request_without_operations_requires_clarification() -> None:
+    parsed = parse_task_message("基于上传文件做通用 GIS 处理，不预设模板。", has_upload=True)
+
+    assert parsed.analysis_type == "WORKFLOW"
+    assert parsed.need_confirmation is True
+    assert "operations" in parsed.missing_fields
+
+
+def test_parse_workflow_request_without_upload_requires_source_path_in_local_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GIS_AGENT_LOCAL_FILES_ONLY_MODE", "true")
+    get_settings.cache_clear()
+
+    parsed = parse_task_message("执行重投影和重采样。", has_upload=False)
+
+    assert parsed.analysis_type == "WORKFLOW"
+    assert parsed.need_confirmation is True
+    assert "source_path" in parsed.missing_fields
+    get_settings.cache_clear()
+
+
+def test_parse_local_mode_requires_local_raster_source_when_no_upload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GIS_AGENT_LOCAL_FILES_ONLY_MODE", "true")
+    get_settings.cache_clear()
+
+    parsed = parse_task_message("帮我分析 2024年6月 北京西山 NDVI。", has_upload=False)
+
+    assert parsed.need_confirmation is True
+    assert "source_path" in parsed.missing_fields
+    get_settings.cache_clear()
+
+
+def test_parse_local_mode_accepts_explicit_raster_source_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GIS_AGENT_LOCAL_FILES_ONLY_MODE", "true")
+    get_settings.cache_clear()
+
+    parsed = parse_task_message(
+        "请对 /Users/ljn/gis_data/CACD-2020.tif 做 2024年6月 北京西山 NDVI 分析。",
+        has_upload=False,
+    )
+
+    assert parsed.need_confirmation is False
+    assert parsed.operation_params["source_path"].endswith("CACD-2020.tif")
+    get_settings.cache_clear()
+
+
+def test_parse_local_mode_ndwi_request_translates_to_explicit_band_math_operation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GIS_AGENT_LOCAL_FILES_ONLY_MODE", "true")
+    get_settings.cache_clear()
+
+    parsed = parse_task_message(
+        "请对 /Users/ljn/gis_data/CACD-2020.tif 做 NDWI 分析并导出结果。",
+        has_upload=False,
+    )
+
+    assert parsed.need_confirmation is False
+    assert parsed.operation_params["operations"] == ["raster.band_math"]
+    assert parsed.operation_params["expression"] == "(green-nir)/(green+nir)"
+    assert parsed.operation_params["source_path"].endswith("CACD-2020.tif")
+    get_settings.cache_clear()
+
+
 def test_parse_iso_date_range_with_bbox() -> None:
     parsed = parse_task_message(
         "帮我分析 bbox(116.1,39.8,116.5,40.1) 在 2024-06-01 到 2024-06-30 的 NDVI。",
@@ -125,8 +217,14 @@ def test_parse_chinese_day_range_without_repeated_year() -> None:
 @pytest.mark.parametrize(
     ("message", "expected_range"),
     [
-        ("请看 2024/06/01 至 2024/06/15 北京西山 NDVI。", {"start": "2024-06-01", "end": "2024-06-15"}),
-        ("请看 2024.06.01 至 2024.06.15 北京西山 NDVI。", {"start": "2024-06-01", "end": "2024-06-15"}),
+        (
+            "请看 2024/06/01 至 2024/06/15 北京西山 NDVI。",
+            {"start": "2024-06-01", "end": "2024-06-15"},
+        ),
+        (
+            "请看 2024.06.01 至 2024.06.15 北京西山 NDVI。",
+            {"start": "2024-06-01", "end": "2024-06-15"},
+        ),
         ("请看 2024年6月 北京西山 NDVI。", {"start": "2024-06-01", "end": "2024-06-30"}),
         ("请看 2024年夏季 北京西山 NDVI。", {"start": "2024-06-01", "end": "2024-08-31"}),
     ],
@@ -225,7 +323,9 @@ def test_parse_winter_season_handles_cross_year_leap_february() -> None:
         ("换成 2023 年 6 月，做跨多年连续性对比", "temporal"),
     ],
 )
-def test_parse_followup_override_updates_user_priority(message: str, expected_priority: str) -> None:
+def test_parse_followup_override_updates_user_priority(
+    message: str, expected_priority: str
+) -> None:
     override = parse_followup_override_message(message, has_upload=False)
 
     assert override["user_priority"] == expected_priority
@@ -284,7 +384,9 @@ def test_parse_task_message_uses_llm_main_chain(monkeypatch: pytest.MonkeyPatch)
         )
 
     monkeypatch.setattr("packages.domain.services.parser.LLMClient.chat_json", _fake_chat_json)
-    parsed = parse_task_message("请帮我分析 2024年6月 bbox(116.1,39.8,116.5,40.1) NDVI。", has_upload=False)
+    parsed = parse_task_message(
+        "请帮我分析 2024年6月 bbox(116.1,39.8,116.5,40.1) NDVI。", has_upload=False
+    )
 
     assert called["count"] == 1
     assert parsed.need_confirmation is False
@@ -337,7 +439,53 @@ def test_parse_task_message_accepts_llm_clip_payload_without_time_range(
     get_settings.cache_clear()
 
 
-def test_parse_task_message_retries_on_schema_validation_error(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_parse_task_message_llm_clip_payload_empty_paths_falls_back_to_message_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GIS_AGENT_LLM_API_KEY", "test_key")
+    monkeypatch.setenv("GIS_AGENT_LLM_PARSER_ENABLED", "true")
+    monkeypatch.setenv("GIS_AGENT_LLM_PARSER_LEGACY_FALLBACK", "false")
+    get_settings.cache_clear()
+
+    def _fake_chat_json(self, **kwargs):  # noqa: ANN001
+        del self, kwargs
+        return _mock_llm_response(
+            {
+                "aoi_input": None,
+                "aoi_source_type": None,
+                "time_range": None,
+                "requested_dataset": None,
+                "analysis_type": "clip",
+                "preferred_output": "geotiff",
+                "user_priority": "balanced",
+                "need_confirmation": False,
+                "missing_fields": [],
+                "clarification_message": None,
+                "operation_params": {
+                    "source_path": "   ",
+                    "clip_path": "",
+                    "output_path": "",
+                },
+            }
+        )
+
+    monkeypatch.setattr("packages.domain.services.parser.LLMClient.chat_json", _fake_chat_json)
+    parsed = parse_task_message(
+        "请把 /Users/ljn/gis_data/CACD-2020.tif 按 /Users/ljn/gis_data/区划/xinjiang.geojson 裁剪。",
+        has_upload=False,
+    )
+
+    assert parsed.analysis_type == "CLIP"
+    assert parsed.need_confirmation is False
+    assert parsed.missing_fields == []
+    assert parsed.operation_params["source_path"].endswith("CACD-2020.tif")
+    assert parsed.operation_params["clip_path"].endswith("xinjiang.geojson")
+    get_settings.cache_clear()
+
+
+def test_parse_task_message_retries_on_schema_validation_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("GIS_AGENT_LLM_API_KEY", "test_key")
     monkeypatch.setenv("GIS_AGENT_LLM_PARSER_ENABLED", "true")
     monkeypatch.setenv("GIS_AGENT_LLM_PARSER_LEGACY_FALLBACK", "false")
@@ -382,7 +530,9 @@ def test_parse_task_message_retries_on_schema_validation_error(monkeypatch: pyte
         return responses.pop(0)
 
     monkeypatch.setattr("packages.domain.services.parser.LLMClient.chat_json", _fake_chat_json)
-    parsed = parse_task_message("请帮我分析 2024年6月 bbox(116.1,39.8,116.5,40.1) NDVI。", has_upload=False)
+    parsed = parse_task_message(
+        "请帮我分析 2024年6月 bbox(116.1,39.8,116.5,40.1) NDVI。", has_upload=False
+    )
 
     assert parsed.need_confirmation is False
     assert len(prompts) == 2
@@ -402,14 +552,14 @@ def test_parse_task_message_repair_prompt_handles_non_serializable_validation_ct
     prompts: list[str] = []
     responses = [
         _mock_llm_response(
-                {
-                    "aoi_input": "bbox(116.1,39.8,116.5,40.1)",
-                    "aoi_source_type": "bbox",
-                    "time_range": {"start": "2024-06-01", "end": "2024-06-30"},
-                    "analysis_type": "clip_invalid",
-                    "preferred_output": "geotiff",
-                    "user_priority": None,
-                    "need_confirmation": False,
+            {
+                "aoi_input": "bbox(116.1,39.8,116.5,40.1)",
+                "aoi_source_type": "bbox",
+                "time_range": {"start": "2024-06-01", "end": "2024-06-30"},
+                "analysis_type": "clip_invalid",
+                "preferred_output": "geotiff",
+                "user_priority": None,
+                "need_confirmation": False,
                 "missing_fields": [],
                 "clarification_message": None,
                 "operation_params": {},
@@ -437,7 +587,9 @@ def test_parse_task_message_repair_prompt_handles_non_serializable_validation_ct
         return responses.pop(0)
 
     monkeypatch.setattr("packages.domain.services.parser.LLMClient.chat_json", _fake_chat_json)
-    parsed = parse_task_message("请帮我分析 2024年6月 bbox(116.1,39.8,116.5,40.1) NDVI。", has_upload=False)
+    parsed = parse_task_message(
+        "请帮我分析 2024年6月 bbox(116.1,39.8,116.5,40.1) NDVI。", has_upload=False
+    )
 
     assert parsed.need_confirmation is False
     assert len(prompts) == 2

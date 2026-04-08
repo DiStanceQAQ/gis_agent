@@ -138,7 +138,9 @@ def _collect_gpkg_metadata(path: Path) -> dict[str, object]:
         ).fetchone()
         projection = None
         if srs_info:
-            projection = f"{srs_info[1]}:{srs_info[2]}" if srs_info[1] and srs_info[2] else srs_info[0]
+            projection = (
+                f"{srs_info[1]}:{srs_info[2]}" if srs_info[1] and srs_info[2] else srs_info[0]
+            )
 
     return {
         "projection": projection,
@@ -236,7 +238,9 @@ class LocalStorageBackend:
             return candidate
         return Path(self.settings.storage_root) / storage_key
 
-    def save_bytes(self, storage_key: str, content: bytes, *, content_type: str | None = None) -> StoredObject:
+    def save_bytes(
+        self, storage_key: str, content: bytes, *, content_type: str | None = None
+    ) -> StoredObject:
         del content_type
         path = self._path_for_key(storage_key)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -247,7 +251,9 @@ class LocalStorageBackend:
             checksum=_checksum_bytes(content),
         )
 
-    def save_file(self, storage_key: str, source_path: str, *, content_type: str | None = None) -> StoredObject:
+    def save_file(
+        self, storage_key: str, source_path: str, *, content_type: str | None = None
+    ) -> StoredObject:
         del content_type
         source = Path(source_path)
         destination = self._path_for_key(storage_key)
@@ -304,7 +310,9 @@ class S3StorageBackend:
             self.client.create_bucket(Bucket=self.bucket)
         self._ready = True
 
-    def save_bytes(self, storage_key: str, content: bytes, *, content_type: str | None = None) -> StoredObject:
+    def save_bytes(
+        self, storage_key: str, content: bytes, *, content_type: str | None = None
+    ) -> StoredObject:
         self.ensure_ready()
         extra: dict[str, object] = {}
         if content_type:
@@ -316,7 +324,9 @@ class S3StorageBackend:
             checksum=_checksum_bytes(content),
         )
 
-    def save_file(self, storage_key: str, source_path: str, *, content_type: str | None = None) -> StoredObject:
+    def save_file(
+        self, storage_key: str, source_path: str, *, content_type: str | None = None
+    ) -> StoredObject:
         content = Path(source_path).read_bytes()
         guessed_type = content_type or mimetypes.guess_type(source_path)[0]
         return self.save_bytes(storage_key, content, content_type=guessed_type)
@@ -404,6 +414,10 @@ def detect_file_type(filename: str) -> str:
         return "geojson"
     if lower_name.endswith(".shp"):
         return "shp"
+    if lower_name.endswith(".kml"):
+        return "vector_kml"
+    if lower_name.endswith(".kmz"):
+        return "vector_kmz"
     if lower_name.endswith(".zip"):
         return "shp_zip"
     if lower_name.endswith(".tif") or lower_name.endswith(".tiff"):
@@ -413,7 +427,9 @@ def detect_file_type(filename: str) -> str:
     return "other"
 
 
-def write_upload_file(session_id: str, upload: UploadFile, settings: Settings | None = None) -> tuple[str, int, str]:
+def write_upload_file(
+    session_id: str, upload: UploadFile, settings: Settings | None = None
+) -> tuple[str, int, str]:
     content = upload.file.read()
     storage_key = build_upload_storage_key(session_id, upload.filename or "uploaded_file")
     stored = get_storage_backend(settings).save_bytes(
@@ -452,7 +468,9 @@ def read_storage_bytes(storage_key: str, settings: Settings | None = None) -> by
     return get_storage_backend(settings).read_bytes(storage_key)
 
 
-def read_storage_text(storage_key: str, *, encoding: str = "utf-8", settings: Settings | None = None) -> str:
+def read_storage_text(
+    storage_key: str, *, encoding: str = "utf-8", settings: Settings | None = None
+) -> str:
     return read_storage_bytes(storage_key, settings=settings).decode(encoding)
 
 

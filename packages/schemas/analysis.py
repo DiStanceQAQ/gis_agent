@@ -4,6 +4,7 @@ from typing import Any, Literal, TypeAlias, cast
 
 
 AnalysisType: TypeAlias = Literal[
+    "WORKFLOW",
     "NDVI",
     "NDWI",
     "BAND_MATH",
@@ -14,6 +15,10 @@ AnalysisType: TypeAlias = Literal[
 ]
 
 _ANALYSIS_TYPE_ALIASES: dict[str, AnalysisType] = {
+    "workflow": "WORKFLOW",
+    "generic": "WORKFLOW",
+    "general": "WORKFLOW",
+    "gis": "WORKFLOW",
     "ndvi": "NDVI",
     "ndwi": "NDWI",
     "band_math": "BAND_MATH",
@@ -37,10 +42,10 @@ _SLOPE_PRODUCTS = {"slope", "aspect", "slope_aspect"}
 
 def normalize_analysis_type(value: Any) -> AnalysisType:
     if value is None:
-        return "NDVI"
+        return "WORKFLOW"
     text = str(value).strip()
     if not text:
-        return "NDVI"
+        return "WORKFLOW"
 
     token = text.replace(" ", "_")
     alias_key = token.lower()
@@ -48,11 +53,20 @@ def normalize_analysis_type(value: Any) -> AnalysisType:
         return _ANALYSIS_TYPE_ALIASES[alias_key]
 
     upper_token = token.upper()
-    if upper_token in {"NDVI", "NDWI", "BAND_MATH", "FILTER", "SLOPE_ASPECT", "BUFFER", "CLIP"}:
+    if upper_token in {
+        "WORKFLOW",
+        "NDVI",
+        "NDWI",
+        "BAND_MATH",
+        "FILTER",
+        "SLOPE_ASPECT",
+        "BUFFER",
+        "CLIP",
+    }:
         return cast(AnalysisType, upper_token)
 
     raise ValueError(
-        "analysis_type must be one of ndvi/ndwi/band_math/filter/slope_aspect/buffer/clip"
+        "analysis_type must be one of workflow/ndvi/ndwi/band_math/filter/slope_aspect/buffer/clip"
     )
 
 
@@ -94,7 +108,9 @@ def normalize_operation_params(analysis_type: AnalysisType, value: Any) -> dict[
         try:
             window_size = int(raw_window_size)
         except (TypeError, ValueError) as exc:
-            raise ValueError("FILTER operation_params.window_size must be a positive odd integer") from exc
+            raise ValueError(
+                "FILTER operation_params.window_size must be a positive odd integer"
+            ) from exc
         if window_size <= 0 or window_size % 2 == 0:
             raise ValueError("FILTER operation_params.window_size must be a positive odd integer")
 
@@ -107,7 +123,9 @@ def normalize_operation_params(analysis_type: AnalysisType, value: Any) -> dict[
         raw_product = params.get("product", params.get("terrain_product", "slope_aspect"))
         product = str(raw_product).strip().lower().replace("-", "_")
         if product not in _SLOPE_PRODUCTS:
-            raise ValueError("SLOPE_ASPECT operation_params.product must be slope/aspect/slope_aspect")
+            raise ValueError(
+                "SLOPE_ASPECT operation_params.product must be slope/aspect/slope_aspect"
+            )
         params["product"] = product
         params.pop("terrain_product", None)
         return params
@@ -119,7 +137,9 @@ def normalize_operation_params(analysis_type: AnalysisType, value: Any) -> dict[
         try:
             distance_m = float(raw_distance)
         except (TypeError, ValueError) as exc:
-            raise ValueError("BUFFER operation_params.distance_m must be a positive number") from exc
+            raise ValueError(
+                "BUFFER operation_params.distance_m must be a positive number"
+            ) from exc
         if distance_m <= 0:
             raise ValueError("BUFFER operation_params.distance_m must be a positive number")
         params["distance_m"] = distance_m
@@ -136,6 +156,21 @@ def normalize_operation_params(analysis_type: AnalysisType, value: Any) -> dict[
             params["clip_crs"] = str(params["clip_crs"]).strip() or "EPSG:4326"
         if "crop" in params and params.get("crop") is not None:
             params["crop"] = bool(params["crop"])
+        return params
+
+    if analysis_type == "WORKFLOW":
+        raw_operations = params.get("operations")
+        if raw_operations is not None:
+            if isinstance(raw_operations, list):
+                operations = [str(item).strip() for item in raw_operations if str(item).strip()]
+                params["operations"] = list(dict.fromkeys(operations))
+            elif isinstance(raw_operations, str):
+                token = raw_operations.strip()
+                params["operations"] = [token] if token else []
+            else:
+                raise ValueError(
+                    "WORKFLOW operation_params.operations must be a list of operation names"
+                )
         return params
 
     return params

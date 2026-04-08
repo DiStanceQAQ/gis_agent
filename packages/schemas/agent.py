@@ -6,7 +6,11 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from packages.schemas.operation_plan import AllowedOperationName
-from packages.schemas.analysis import AnalysisType, normalize_analysis_type, normalize_operation_params
+from packages.schemas.analysis import (
+    AnalysisType,
+    normalize_analysis_type,
+    normalize_operation_params,
+)
 
 
 AllowedToolName = Literal[
@@ -49,7 +53,7 @@ class LLMParsedSpec(BaseModel):
     aoi_source_type: Literal["bbox", "file_upload", "admin_name", "place_alias"] | None = None
     time_range: LLMTimeRange | None = None
     requested_dataset: Literal["sentinel2", "landsat89"] | None = None
-    analysis_type: AnalysisType = "NDVI"
+    analysis_type: AnalysisType = "WORKFLOW"
     preferred_output: list[str] = Field(default_factory=lambda: ["png_map", "methods_text"])
     user_priority: Literal["balanced", "spatial", "temporal"] = "balanced"
     need_confirmation: bool = False
@@ -64,7 +68,9 @@ class LLMParsedSpec(BaseModel):
 
     @model_validator(mode="after")
     def validate_operation_params(self) -> "LLMParsedSpec":
-        self.operation_params = normalize_operation_params(self.analysis_type, self.operation_params)
+        self.operation_params = normalize_operation_params(
+            self.analysis_type, self.operation_params
+        )
         return self
 
 

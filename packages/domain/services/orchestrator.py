@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 
 from fastapi import UploadFile
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session, selectinload
 
 from apps.worker.tasks import run_task_async
@@ -40,7 +41,11 @@ from packages.domain.services.parser import (
     parse_task_message,
 )
 from packages.domain.services.plan_guard import validate_operation_plan
-from packages.domain.services.storage import build_artifact_path, detect_file_type, write_upload_file
+from packages.domain.services.storage import (
+    build_artifact_path,
+    detect_file_type,
+    write_upload_file,
+)
 from packages.domain.services.task_events import append_task_event, list_task_events
 from packages.domain.services.task_state import (
     TASK_STATUS_APPROVED,
@@ -55,7 +60,13 @@ from packages.domain.utils import make_id, merge_dicts
 from packages.schemas.file import UploadedFileResponse
 from packages.schemas.message import MessageCreateRequest, MessageCreateResponse
 from packages.schemas.operation_plan import OperationNode, OperationPlan
-from packages.schemas.session import SessionResponse, SessionTaskItemResponse, SessionTasksResponse
+from packages.schemas.session import (
+    SessionMessageItemResponse,
+    SessionMessagesResponse,
+    SessionResponse,
+    SessionTaskItemResponse,
+    SessionTasksResponse,
+)
 from packages.schemas.task import (
     ArtifactResponse,
     CandidateResponse,
@@ -70,12 +81,20 @@ from packages.schemas.task import (
 
 logger = get_logger(__name__)
 
-TASK_CONFIRMATION_PROMPT = "我理解你想发起一个 GIS 分析任务。请回复“好的，继续”或“开始执行”，我会为你生成计划并进入审批。"
-TASK_CONFIRMATION_MISSING_CONTEXT_PROMPT = (
-    "我收到了确认，但还没找到上一条可执行的任务请求。请先描述分析区域、时间范围和目标，再回复“好的，继续”。"
+TASK_CONFIRMATION_PROMPT = (
+    "我理解你想发起一个 GIS 分析任务。请回复“好的，继续”或“开始执行”，我会为你生成计划并进入审批。"
 )
+TASK_CONFIRMATION_MISSING_CONTEXT_PROMPT = "我收到了确认，但还没找到上一条可执行的任务请求。请先描述分析区域、时间范围和目标，再回复“好的，继续”。"
 UPLOAD_REQUEST_HINT_PATTERN = re.compile(
     r"(上传|文件|边界|geojson|shp|gpkg)",
+    re.IGNORECASE,
+)
+UPLOAD_STATUS_FOLLOWUP_PATTERN = re.compile(
+    r"(现在呢|现在怎么样|更新了吗|你没更新|刷新了吗|移除了|删除了|还剩|剩下|还有几个|变了吗|还在吗|now|updated|refresh)",
+    re.IGNORECASE,
+)
+UPLOAD_ACCESS_QUESTION_PATTERN = re.compile(
+    r"(?:能|可以|是否|可不可以|可否).*(?:读到|读取|访问|识别|看到).*(?:上传|文件)|(?:读到|读取|访问|识别|看到).*(?:上传|文件)|can\s+you\s+(?:read|access).*(?:upload|file)",
     re.IGNORECASE,
 )
 
@@ -88,7 +107,9 @@ def _require_named_aoi_clarification(parsed: ParsedTaskSpec) -> ParsedTaskSpec:
         update={
             "need_confirmation": True,
             "missing_fields": missing_fields,
-            "clarification_message": build_named_aoi_clarification_message(parsed.aoi_input or "当前研究区"),
+            "clarification_message": build_named_aoi_clarification_message(
+                parsed.aoi_input or "当前研究区"
+            ),
         }
     )
 
@@ -172,6 +193,72 @@ def list_session_tasks(db: Session, session_id: str, limit: int = 8) -> SessionT
     )
 
 
+def list_session_messages(
+    db: Session,
+    session_id: str,
+    *,
+    limit: int = 20,
+    cursor: str | None = None,
+) -> SessionMessagesResponse:
+    session = db.get(SessionRecord, session_id)
+    if session is None:
+        raise AppError.not_found(
+            error_code=ErrorCode.SESSION_NOT_FOUND,
+            message="Session not found.",
+            detail={"session_id": session_id},
+        )
+
+    query = db.query(MessageRecord).filter(MessageRecord.session_id == session_id)
+    if cursor:
+        cursor_record = (
+            db.query(MessageRecord)
+            .filter(
+                MessageRecord.session_id == session_id,
+                MessageRecord.id == cursor,
+            )
+            .first()
+        )
+        if cursor_record is None:
+            raise AppError.bad_request(
+                error_code=ErrorCode.BAD_REQUEST,
+                message="Cursor message not found in session.",
+                detail={"session_id": session_id, "cursor": cursor},
+            )
+        query = query.filter(
+            or_(
+                MessageRecord.created_at < cursor_record.created_at,
+                and_(
+                    MessageRecord.created_at == cursor_record.created_at,
+                    MessageRecord.id < cursor_record.id,
+                ),
+            )
+        )
+
+    rows_desc = (
+        query.order_by(MessageRecord.created_at.desc(), MessageRecord.id.desc())
+        .limit(limit + 1)
+        .all()
+    )
+    has_more = len(rows_desc) > limit
+    rows = list(reversed(rows_desc[:limit]))
+    next_cursor = rows[0].id if has_more and rows else None
+
+    return SessionMessagesResponse(
+        session_id=session_id,
+        next_cursor=next_cursor,
+        messages=[
+            SessionMessageItemResponse(
+                message_id=item.id,
+                role=item.role,
+                content=item.content,
+                linked_task_id=item.linked_task_id,
+                created_at=item.created_at,
+            )
+            for item in rows
+        ],
+    )
+
+
 def create_uploaded_file(db: Session, session_id: str, upload: UploadFile) -> UploadedFileResponse:
     session = db.get(SessionRecord, session_id)
     if session is None:
@@ -205,6 +292,7 @@ def create_uploaded_file(db: Session, session_id: str, upload: UploadFile) -> Up
         file_type=record.file_type,
         storage_key=record.storage_key,
         original_name=record.original_name,
+        size_bytes=record.size_bytes,
     )
 
 
@@ -248,15 +336,30 @@ def _load_message_history(
     if exclude_message_id is not None:
         query = query.filter(MessageRecord.id != exclude_message_id)
     records = (
-        query.order_by(MessageRecord.created_at.desc(), MessageRecord.id.desc())
-        .limit(limit)
-        .all()
+        query.order_by(MessageRecord.created_at.desc(), MessageRecord.id.desc()).limit(limit).all()
     )
     return [{"role": record.role, "content": record.content} for record in reversed(records)]
 
 
 def _parse_candidate_request_content(content: str, *, has_upload: bool) -> ParsedTaskSpec:
     return parse_task_message(content, has_upload=has_upload)
+
+
+def _load_recent_session_uploads(
+    db: Session,
+    *,
+    session_id: str,
+    limit: int,
+    before_created_at: datetime | None = None,
+) -> list[UploadedFileRecord]:
+    files_query = db.query(UploadedFileRecord).filter(UploadedFileRecord.session_id == session_id)
+    if before_created_at is not None:
+        files_query = files_query.filter(UploadedFileRecord.created_at <= before_created_at)
+    return (
+        files_query.order_by(UploadedFileRecord.created_at.desc(), UploadedFileRecord.id.desc())
+        .limit(limit)
+        .all()
+    )
 
 
 def _load_recent_session_file_ids(
@@ -266,15 +369,103 @@ def _load_recent_session_file_ids(
     limit: int,
     before_created_at: datetime | None = None,
 ) -> list[str]:
-    files_query = db.query(UploadedFileRecord).filter(UploadedFileRecord.session_id == session_id)
-    if before_created_at is not None:
-        files_query = files_query.filter(UploadedFileRecord.created_at <= before_created_at)
-    files = (
-        files_query.order_by(UploadedFileRecord.created_at.desc(), UploadedFileRecord.id.desc())
-        .limit(limit)
-        .all()
+    files = _load_recent_session_uploads(
+        db,
+        session_id=session_id,
+        limit=limit,
+        before_created_at=before_created_at,
     )
     return [record.id for record in files]
+
+
+def _resolve_chat_upload_files(
+    db: Session,
+    *,
+    session_id: str,
+    preferred_file_ids: list[str],
+    limit: int,
+) -> list[UploadedFileRecord]:
+    if preferred_file_ids:
+        try:
+            return _load_uploaded_files_by_payload_order(db, file_ids=preferred_file_ids)
+        except AppError:
+            logger.warning(
+                "chat.upload_files_from_payload_failed",
+                extra={"session_id": session_id, "file_ids": preferred_file_ids},
+                exc_info=True,
+            )
+
+    return _load_recent_session_uploads(
+        db,
+        session_id=session_id,
+        limit=limit,
+    )
+
+
+def _is_upload_access_question(message: str) -> bool:
+    text = message.strip()
+    if not text:
+        return False
+    if UPLOAD_ACCESS_QUESTION_PATTERN.search(text) is not None:
+        return True
+
+    normalized = text.lower().replace(" ", "")
+    mentions_upload = any(token in normalized for token in ("上传", "文件", "upload", "file"))
+    asks_access = any(
+        token in normalized for token in ("读到", "读取", "访问", "识别", "看到", "read", "access")
+    )
+    return mentions_upload and asks_access
+
+
+def _history_mentions_upload_context(history: list[dict[str, str]]) -> bool:
+    for turn in history[-6:]:
+        content = str(turn.get("content") or "")
+        if not content:
+            continue
+        if _is_upload_access_question(content):
+            return True
+        if UPLOAD_REQUEST_HINT_PATTERN.search(content):
+            return True
+    return False
+
+
+def _is_upload_status_followup(message: str, *, history: list[dict[str, str]]) -> bool:
+    text = message.strip()
+    if not text:
+        return False
+    if not UPLOAD_STATUS_FOLLOWUP_PATTERN.search(text):
+        return False
+    return _history_mentions_upload_context(history)
+
+
+def _serialize_uploaded_files_for_chat(
+    uploaded_files: list[UploadedFileRecord],
+) -> list[dict[str, object]]:
+    serialized: list[dict[str, object]] = []
+    for record in uploaded_files:
+        serialized.append(
+            {
+                "file_id": record.id,
+                "original_name": record.original_name,
+                "file_type": record.file_type,
+                "size_bytes": record.size_bytes,
+                "created_at": record.created_at.isoformat() if record.created_at else None,
+            }
+        )
+    return serialized
+
+
+def _build_upload_access_reply(uploaded_files: list[UploadedFileRecord]) -> str:
+    if not uploaded_files:
+        return "当前会话还没有可用上传文件。你可以先在左侧上传数据，再告诉我你要执行的 GIS 操作。"
+
+    preview_items = [f"{item.original_name}（{item.file_type}）" for item in uploaded_files[:3]]
+    suffix = "等" if len(uploaded_files) > 3 else ""
+    return (
+        "可以，我能识别当前会话里已上传的文件，并在进入执行阶段后将它们用于 GIS 处理。"
+        f"当前共有 {len(uploaded_files)} 个文件：{'，'.join(preview_items)}{suffix}。"
+        "如果你要开始处理，请直接描述操作并回复“好的，继续”。"
+    )
 
 
 def _is_executable_followup_request(content: str, *, latest_task: TaskRunRecord | None) -> bool:
@@ -438,9 +629,6 @@ def _inject_upload_context_into_operation_plan(
     upload_slots: dict[str, str] | None,
 ) -> OperationPlan:
     uploaded_files = uploaded_files or []
-    if not uploaded_files:
-        return plan
-
     upload_slots = upload_slots or {}
     files_by_storage_key = {item.storage_key: item for item in uploaded_files}
     raster_file = _select_uploaded_file(
@@ -487,7 +675,10 @@ def _inject_upload_context_into_operation_plan(
                     params["source_path"] = _resolve_uploaded_storage_path(vector_file.storage_key)
 
         if op_name == "raster.clip":
-            has_clip_source = any(str(params.get(key) or "").strip() for key in ("aoi_path", "clip_path", "vector_path"))
+            has_clip_source = any(
+                str(params.get(key) or "").strip()
+                for key in ("aoi_path", "clip_path", "vector_path")
+            )
             if not has_clip_source:
                 if clip_path:
                     params["aoi_path"] = clip_path
@@ -522,7 +713,9 @@ def _build_initial_operation_plan(
                 version=1,
                 status="draft",
                 missing_fields=list(task_plan.missing_fields),
-                nodes=[OperationNode.model_validate(node) for node in task_plan.operation_plan_nodes],
+                nodes=[
+                    OperationNode.model_validate(node) for node in task_plan.operation_plan_nodes
+                ],
             )
             injected = _inject_upload_context_into_operation_plan(
                 candidate,
@@ -624,7 +817,9 @@ def _build_task(
             session_id=session_id,
             parent_task_id=parent_task_id,
             user_message_id=user_message_id,
-            status=TASK_STATUS_WAITING_CLARIFICATION if safe_parsed.need_confirmation else TASK_STATUS_QUEUED,
+            status=TASK_STATUS_WAITING_CLARIFICATION
+            if safe_parsed.need_confirmation
+            else TASK_STATUS_QUEUED,
             current_step="parse_task",
             analysis_type=safe_parsed.analysis_type,
             requested_time_range=safe_parsed.time_range,
@@ -634,7 +829,11 @@ def _build_task(
     else:
         task = existing_task
         task.parent_task_id = parent_task_id
-        task.status = TASK_STATUS_WAITING_CLARIFICATION if safe_parsed.need_confirmation else TASK_STATUS_QUEUED
+        task.status = (
+            TASK_STATUS_WAITING_CLARIFICATION
+            if safe_parsed.need_confirmation
+            else TASK_STATUS_QUEUED
+        )
         task.current_step = "parse_task"
         task.analysis_type = safe_parsed.analysis_type
         task.requested_time_range = safe_parsed.time_range
@@ -688,12 +887,15 @@ def _build_task(
             error_message=task_plan.error_message,
         )
     if task_plan.status == PLAN_STATUS_NEEDS_CLARIFICATION and not safe_parsed.need_confirmation:
-        merged_missing_fields = list(dict.fromkeys([*safe_parsed.missing_fields, *task_plan.missing_fields]))
+        merged_missing_fields = list(
+            dict.fromkeys([*safe_parsed.missing_fields, *task_plan.missing_fields])
+        )
         safe_parsed = safe_parsed.model_copy(
             update={
                 "need_confirmation": True,
                 "missing_fields": merged_missing_fields,
-                "clarification_message": safe_parsed.clarification_message or "任务规划需要补充信息后重试。",
+                "clarification_message": safe_parsed.clarification_message
+                or "任务规划需要补充信息后重试。",
             }
         )
         task.status = TASK_STATUS_WAITING_CLARIFICATION
@@ -757,6 +959,7 @@ def create_message_and_task(
     *,
     existing_user_message: MessageRecord | None = None,
     task_request_content: str | None = None,
+    require_approval: bool = True,
 ) -> MessageCreateResponse:
     session = db.get(SessionRecord, payload.session_id)
     if session is None:
@@ -791,7 +994,7 @@ def create_message_and_task(
         user_message_id=message.id,
         status=TASK_STATUS_QUEUED,
         current_step="parse_task",
-        analysis_type="NDVI",
+        analysis_type="WORKFLOW",
     )
     db.add(provisional_task)
     db.flush()
@@ -821,10 +1024,11 @@ def create_message_and_task(
         parent_task_id=parent_task.id if parent_task is not None else None,
         inherited_aoi=(
             parent_task.aoi
-            if parent_task is not None and should_inherit_original_aoi(parent_task, parsed, override)
+            if parent_task is not None
+            and should_inherit_original_aoi(parent_task, parsed, override)
             else None
         ),
-        require_approval=True,
+        require_approval=require_approval,
         existing_task=provisional_task,
     )
 
@@ -840,7 +1044,25 @@ def create_message_and_task(
 
     response_spec = task.task_spec.raw_spec_json if task.task_spec else parsed.model_dump()
     need_clarification = bool(response_spec.get("need_confirmation", False))
-    need_approval = not need_clarification
+    need_approval = task.status == TASK_STATUS_AWAITING_APPROVAL
+
+    if need_clarification:
+        assistant_message = str(
+            response_spec.get("clarification_message")
+            or "我还需要补充信息，才能继续执行该 GIS 任务。"
+        )
+    elif need_approval:
+        assistant_message = "已生成执行计划，请确认后开始执行。"
+    else:
+        assistant_message = "收到，已开始执行 GIS 处理。我会持续同步进度和结果。"
+
+    _persist_message(
+        db,
+        session_id=payload.session_id,
+        role="assistant",
+        content=assistant_message,
+        linked_task_id=task.id,
+    )
 
     if need_clarification:
         append_task_event(
@@ -857,6 +1079,7 @@ def create_message_and_task(
         mode="task",
         task_id=task.id,
         task_status=task.status,
+        assistant_message=assistant_message,
         need_clarification=need_clarification,
         need_approval=need_approval,
         missing_fields=list(response_spec.get("missing_fields", [])),
@@ -965,6 +1188,26 @@ def create_message(db: Session, payload: MessageCreateRequest) -> MessageCreateR
         task_response.awaiting_task_confirmation = False
         return task_response
 
+    chat_upload_files = _resolve_chat_upload_files(
+        db,
+        session_id=payload.session_id,
+        preferred_file_ids=payload.file_ids,
+        limit=min(settings.intent_history_limit, 8),
+    )
+
+    if _is_upload_access_question(payload.content) or _is_upload_status_followup(
+        payload.content,
+        history=history,
+    ):
+        return _create_chat_mode_response(
+            db,
+            user_message_id=message.id,
+            session_id=payload.session_id,
+            assistant_message=_build_upload_access_reply(chat_upload_files),
+            intent=intent_result.intent,
+            intent_confidence=intent_result.confidence,
+        )
+
     if (
         intent_result.intent == "task"
         and intent_result.confidence >= settings.intent_task_confidence_threshold
@@ -982,6 +1225,7 @@ def create_message(db: Session, payload: MessageCreateRequest) -> MessageCreateR
     assistant_message = generate_chat_reply(
         user_message=payload.content,
         history=history,
+        uploaded_files=_serialize_uploaded_files_for_chat(chat_upload_files),
         db_session=db,
     )
     return _create_chat_mode_response(
@@ -1098,7 +1342,9 @@ def get_task_detail(db: Session, task_id: str) -> TaskDetailResponse:
         methods_text=task.methods_text,
         png_preview_url=png_preview_url,
         aoi_name=task.aoi.name if task.aoi else None,
-        aoi_bbox_bounds=list(task.aoi.bbox_bounds_json) if task.aoi and task.aoi.bbox_bounds_json else None,
+        aoi_bbox_bounds=list(task.aoi.bbox_bounds_json)
+        if task.aoi and task.aoi.bbox_bounds_json
+        else None,
         aoi_area_km2=task.aoi.area_km2 if task.aoi else None,
         requested_time_range=task.requested_time_range,
         actual_time_range=task.actual_time_range,
@@ -1124,7 +1370,11 @@ def update_task_plan_draft(db: Session, task_id: str, plan: OperationPlan) -> Ta
         raise AppError.bad_request(
             error_code=ErrorCode.PLAN_EDIT_INVALID,
             message="Patched plan version must be greater than current draft version.",
-            detail={"task_id": task_id, "latest_version": latest_version, "patched_version": plan.version},
+            detail={
+                "task_id": task_id,
+                "latest_version": latest_version,
+                "patched_version": plan.version,
+            },
         )
 
     draft_plan = _validate_operation_plan_for_edit(plan)
@@ -1346,7 +1596,9 @@ def rerun_task(db: Session, task_id: str, override: dict | None) -> TaskDetailRe
         parsed=parsed,
         uploaded_files=[],
         parent_task_id=original_task.id,
-        inherited_aoi=original_task.aoi if should_inherit_original_aoi(original_task, parsed, override) else None,
+        inherited_aoi=original_task.aoi
+        if should_inherit_original_aoi(original_task, parsed, override)
+        else None,
     )
     message.linked_task_id = task.id
     db.flush()

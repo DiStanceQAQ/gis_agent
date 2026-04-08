@@ -1,4 +1,6 @@
 import inspect
+import zipfile
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -556,3 +558,96 @@ def test_execute_tool_step_emits_tool_execution_failed_when_handler_raises(
     assert "tool_execution_started" in events
     assert "tool_execution_failed" in events
     assert "tool_execution_completed" not in events
+
+
+def test_prepare_artifact_for_storage_packages_shapefile_components(tmp_path: Path) -> None:
+    shp_path = tmp_path / "xinjiang.shp"
+    (tmp_path / "xinjiang.shp").write_bytes(b"SHP")
+    (tmp_path / "xinjiang.shx").write_bytes(b"SHX")
+    (tmp_path / "xinjiang.dbf").write_bytes(b"DBF")
+    (tmp_path / "xinjiang.prj").write_text("GEOGCS[WGS84]", encoding="utf-8")
+
+    publish_path, publish_mime, metadata_source, extra_metadata = runtime_helpers._prepare_artifact_for_storage(
+        artifact_type="shapefile",
+        source_path=str(shp_path),
+        mime_type="application/octet-stream",
+    )
+
+    assert publish_path.endswith(".zip")
+    assert publish_mime == "application/zip"
+    assert metadata_source == str(shp_path)
+    assert extra_metadata.get("packaged_format") == "shapefile_zip"
+    assert extra_metadata.get("metadata_source") == "xinjiang.shp"
+    assert {"xinjiang.shp", "xinjiang.shx", "xinjiang.dbf", "xinjiang.prj"} <= set(
+        extra_metadata.get("packaged_components") or []
+    )
+
+    with zipfile.ZipFile(publish_path, "r") as archive:
+        names = set(archive.namelist())
+    assert {"xinjiang.shp", "xinjiang.shx", "xinjiang.dbf", "xinjiang.prj"} <= names
+
+
+def test_prepare_artifact_for_storage_keeps_non_shapefile_unchanged(tmp_path: Path) -> None:
+    tif_path = tmp_path / "output.tif"
+    tif_path.write_bytes(b"TIF")
+
+    publish_path, publish_mime, metadata_source, extra_metadata = runtime_helpers._prepare_artifact_for_storage(
+        artifact_type="geotiff",
+        source_path=str(tif_path),
+        mime_type="image/tiff",
+    )
+
+    assert publish_path == str(tif_path)
+    assert publish_mime == "image/tiff"
+    assert metadata_source == str(tif_path)
+    assert extra_metadata == {}
+
+
+def test_tool_search_candidates_short_circuits_in_local_files_only_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = TaskRunRecord(id="task_local_search", session_id="ses_local_search", user_message_id="msg_local_search", status="running")
+    context = runtime_helpers.PipelineExecutionContext(parsed_spec=ParsedTaskSpec())
+    events: list[str] = []
+
+    monkeypatch.setattr(runtime_helpers, "get_settings", lambda: SimpleNamespace(local_files_only_mode=True))
+    monkeypatch.setattr(
+        runtime_helpers,
+        "search_candidates",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("search_candidates should not run in local mode")),
+    )
+    monkeypatch.setattr(
+        runtime_helpers,
+        "persist_candidates",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("persist_candidates should not run in local mode")),
+    )
+    monkeypatch.setattr(runtime_helpers, "append_task_event", lambda *args, **kwargs: events.append(kwargs["event_type"]))
+
+    detail = runtime_helpers._tool_search_candidates(_FakeDB(), task, context)
+
+    assert detail["local_files_only_mode"] is True
+    assert detail["candidate_count"] == 0
+    assert detail["collections"] == []
+    assert detail["candidate_summaries"] == []
+    assert "task_catalog_candidates_skipped" in events
+
+
+def test_tool_recommend_dataset_short_circuits_in_local_files_only_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = TaskRunRecord(id="task_local_reco", session_id="ses_local_reco", user_message_id="msg_local_reco", status="running")
+    context = runtime_helpers.PipelineExecutionContext(parsed_spec=ParsedTaskSpec())
+
+    monkeypatch.setattr(runtime_helpers, "get_settings", lambda: SimpleNamespace(local_files_only_mode=True))
+    monkeypatch.setattr(
+        runtime_helpers,
+        "build_recommendation",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("build_recommendation should not run in local mode")),
+    )
+
+    detail = runtime_helpers._tool_recommend_dataset(_FakeDB(), task, context)
+
+    assert detail["primary_dataset"] == "local_file"
+    assert detail["confidence"] == 1.0
+    assert task.selected_dataset == "local_file"
+    assert isinstance(task.recommendation_json, dict)

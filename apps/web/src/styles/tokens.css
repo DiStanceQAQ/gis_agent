@@ -67,10 +67,8 @@ body {
   margin: 0;
   font-family: var(--font-body);
   color: var(--color-text);
-  background:
-    radial-gradient(1200px 620px at -20% 108%, rgba(0, 74, 198, 0.1), transparent 58%),
-    radial-gradient(980px 560px at 118% -18%, rgba(37, 99, 235, 0.12), transparent 62%),
-    var(--color-surface);
+  background: var(--color-surface);
+  overflow: hidden;
 }
 
 a {

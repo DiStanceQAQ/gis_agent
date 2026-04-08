@@ -4,7 +4,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="GIS_AGENT_", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="GIS_AGENT_",
+        extra="ignore",
+        env_file=".env",
+        env_file_encoding="utf-8",
+    )
 
     app_name: str = "GIS Agent"
     debug: bool = True
@@ -38,7 +43,7 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-4o-mini"
     llm_timeout_seconds: int = 60
     llm_max_retries: int = 2
-    llm_temperature: float = 0.2
+    llm_temperature: float = 0.0
     llm_parser_enabled: bool = True
     llm_parser_schema_retries: int = 2
     llm_parser_legacy_fallback: bool = False
@@ -60,7 +65,7 @@ class Settings(BaseSettings):
     intent_task_confidence_threshold: float = 0.75
     intent_history_limit: int = 8
     intent_confirmation_keywords: str = "开始执行,按这个执行,确认执行,就按这个来"
-    local_files_only_mode: bool = False
+    local_files_only_mode: bool = True
 
     @property
     def allowed_origins_list(self) -> list[str]:

@@ -38,6 +38,18 @@ def test_parsed_task_spec_normalizes_analysis_type_and_operation_params() -> Non
     assert payload.operation_params["index"] == "ndwi"
 
 
+def test_parsed_task_spec_defaults_to_workflow_without_template_bias() -> None:
+    payload = ParsedTaskSpec()
+
+    assert payload.analysis_type == "WORKFLOW"
+
+
+def test_llm_parsed_spec_defaults_to_workflow_without_template_bias() -> None:
+    payload = LLMParsedSpec()
+
+    assert payload.analysis_type == "WORKFLOW"
+
+
 def test_parsed_task_spec_supports_clip_analysis_type() -> None:
     payload = ParsedTaskSpec(
         analysis_type="clip",

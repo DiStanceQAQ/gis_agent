@@ -47,14 +47,21 @@ def test_local_storage_backend_persists_upload_and_artifact(tmp_path: Path) -> N
     _clear_storage_backend_cache()
     storage.ensure_storage_dirs(settings)
 
-    upload = UploadFile(filename="aoi.geojson", file=BytesIO(b'{"type":"FeatureCollection","features":[]}'))
-    storage_key, size_bytes, checksum = storage.write_upload_file("ses_test", upload, settings=settings)
+    upload = UploadFile(
+        filename="aoi.geojson", file=BytesIO(b'{"type":"FeatureCollection","features":[]}')
+    )
+    storage_key, size_bytes, checksum = storage.write_upload_file(
+        "ses_test", upload, settings=settings
+    )
 
     assert storage_key == "uploads/ses_test/aoi.geojson"
     assert size_bytes > 0
     assert checksum
     assert storage.storage_exists(storage_key, settings=settings)
-    assert storage.read_storage_text(storage_key, settings=settings) == '{"type":"FeatureCollection","features":[]}'
+    assert (
+        storage.read_storage_text(storage_key, settings=settings)
+        == '{"type":"FeatureCollection","features":[]}'
+    )
 
     artifact_source = tmp_path / "artifact.txt"
     artifact_source.write_text("artifact-body", encoding="utf-8")
@@ -91,7 +98,9 @@ def test_s3_storage_backend_uses_object_keys_and_materializes_downloads(
     storage.ensure_storage_dirs(settings)
 
     upload = UploadFile(filename="aoi.geojson", file=BytesIO(b'{"hello":"world"}'))
-    storage_key, size_bytes, checksum = storage.write_upload_file("ses_s3", upload, settings=settings)
+    storage_key, size_bytes, checksum = storage.write_upload_file(
+        "ses_s3", upload, settings=settings
+    )
 
     assert storage_key == "uploads/ses_s3/aoi.geojson"
     assert size_bytes == len(b'{"hello":"world"}')
@@ -127,10 +136,16 @@ def test_detect_file_type_supports_upload_first_raster_vector() -> None:
     assert storage.detect_file_type("zones.geojson") == "geojson"
     assert storage.detect_file_type("zones.shp") == "shp"
     assert storage.detect_file_type("zones.shp.zip") == "shp_zip"
+    assert storage.detect_file_type("zones.gpkg") == "vector_gpkg"
+    assert storage.detect_file_type("zones.kml") == "vector_kml"
+    assert storage.detect_file_type("zones.kmz") == "vector_kmz"
 
 
 def test_infer_artifact_mime_type_uses_artifact_type_mapping() -> None:
-    assert storage.infer_artifact_mime_type("result.unknown", artifact_type="gpkg") == "application/geopackage+sqlite3"
+    assert (
+        storage.infer_artifact_mime_type("result.unknown", artifact_type="gpkg")
+        == "application/geopackage+sqlite3"
+    )
     assert storage.infer_artifact_mime_type("map.png", artifact_type="png_map") == "image/png"
 
 

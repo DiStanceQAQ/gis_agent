@@ -5,7 +5,11 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from packages.schemas.analysis import AnalysisType, normalize_analysis_type, normalize_operation_params
+from packages.schemas.analysis import (
+    AnalysisType,
+    normalize_analysis_type,
+    normalize_operation_params,
+)
 from packages.schemas.operation_plan import OperationPlan
 
 
@@ -14,7 +18,7 @@ class ParsedTaskSpec(BaseModel):
     aoi_source_type: str | None = None
     time_range: dict[str, str] | None = None
     requested_dataset: str | None = None
-    analysis_type: AnalysisType = "NDVI"
+    analysis_type: AnalysisType = "WORKFLOW"
     preferred_output: list[str] = Field(default_factory=lambda: ["png_map", "methods_text"])
     user_priority: str = "balanced"
     operation_params: dict[str, Any] = Field(default_factory=dict)
@@ -30,7 +34,9 @@ class ParsedTaskSpec(BaseModel):
 
     @model_validator(mode="after")
     def validate_operation_params(self) -> "ParsedTaskSpec":
-        self.operation_params = normalize_operation_params(self.analysis_type, self.operation_params)
+        self.operation_params = normalize_operation_params(
+            self.analysis_type, self.operation_params
+        )
         return self
 
 
