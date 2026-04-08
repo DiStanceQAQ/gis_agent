@@ -1,14 +1,109 @@
 from geoalchemy2.elements import WKTElement
+import pytest
+from sqlalchemy.orm import Session
 
-from packages.domain.models import AOIRecord, TaskRunRecord, TaskSpecRecord, UploadedFileRecord
+from packages.domain.database import SessionLocal
+from packages.domain.models import (
+    AOIRecord,
+    MessageRecord,
+    SessionRecord,
+    TaskRunRecord,
+    TaskSpecRecord,
+    TaskSpecRevisionRecord,
+    UploadedFileRecord,
+)
 from packages.domain.services.input_slots import classify_uploaded_inputs
 from packages.domain.services.orchestrator import (
     _build_initial_operation_plan,
     _build_initial_revision_understanding,
     _merge_task_spec,
+    get_task_detail,
     should_inherit_original_aoi,
 )
+from packages.domain.utils import make_id
 from packages.schemas.task import ParsedTaskSpec, TaskPlanResponse
+
+
+@pytest.fixture
+def db_session() -> Session:
+    with SessionLocal() as db:
+        yield db
+
+
+def _seed_task_with_revision_history(
+    db_session: Session,
+    *,
+    interaction_state: str = "understanding",
+    last_response_mode: str = "show_revision",
+    blocked_active_revision: bool = False,
+) -> TaskRunRecord:
+    session = SessionRecord(id=make_id("ses"), title="detail-tests", status="active")
+    first_message = MessageRecord(id=make_id("msg"), session_id=session.id, role="user", content="江西")
+    second_message = MessageRecord(
+        id=make_id("msg"),
+        session_id=session.id,
+        role="user",
+        content="改成北京",
+    )
+    task = TaskRunRecord(
+        id=make_id("task"),
+        session_id=session.id,
+        user_message_id=first_message.id,
+        interaction_state=interaction_state,
+        last_response_mode=last_response_mode,
+        status="waiting_clarification",
+        analysis_type="WORKFLOW",
+    )
+    task.task_spec = TaskSpecRecord(
+        task_id=task.id,
+        aoi_input="北京",
+        aoi_source_type="admin_name",
+        preferred_output=["png_map"],
+        user_priority="balanced",
+        need_confirmation=False,
+        raw_spec_json={"aoi_input": "北京", "aoi_source_type": "admin_name"},
+    )
+    rev1 = TaskSpecRevisionRecord(
+        id=make_id("rev"),
+        task_id=task.id,
+        revision_number=1,
+        base_revision_id=None,
+        source_message_id=first_message.id,
+        change_type="initial_parse",
+        is_active=False,
+        understanding_intent="new_task",
+        understanding_summary="江西作为 AOI。",
+        raw_spec_json={"aoi_input": "江西", "aoi_source_type": "admin_name"},
+        field_confidences_json={"aoi_input": {"score": 0.61, "level": "medium", "evidence": []}},
+        ranked_candidates_json={"aoi_input": [{"value": "江西", "score": 0.61}]},
+        response_mode="confirm_understanding",
+        understanding_trace_json={},
+    )
+    rev2 = TaskSpecRevisionRecord(
+        id=make_id("rev"),
+        task_id=task.id,
+        revision_number=2,
+        base_revision_id=rev1.id,
+        source_message_id=second_message.id,
+        change_type="user_edit",
+        is_active=True,
+        understanding_intent="task_correction",
+        understanding_summary="北京作为 AOI。",
+        raw_spec_json={"aoi_input": "北京", "aoi_source_type": "admin_name"},
+        field_confidences_json={"aoi_input": {"score": 0.97, "level": "high", "evidence": []}},
+        ranked_candidates_json={"aoi_input": [{"value": "北京", "score": 0.97}]},
+        response_mode="show_revision",
+        understanding_trace_json={},
+        execution_blocked=blocked_active_revision,
+        execution_blocked_reason=(
+            "AOI normalization failed: uploaded boundary is invalid"
+            if blocked_active_revision
+            else None
+        ),
+    )
+    db_session.add_all([session, first_message, second_message, task, rev1, rev2])
+    db_session.flush()
+    return task
 
 
 def test_should_inherit_original_aoi_when_only_time_changes() -> None:
@@ -305,3 +400,47 @@ def test_build_initial_operation_plan_injects_clip_paths_without_uploads() -> No
     assert nodes[0]["params"]["source_path"].endswith("CACD-2020.tif")
     assert nodes[1]["params"]["source_path"].endswith("xinjiang.geojson")
     assert nodes[2]["params"]["aoi_path"].endswith("xinjiang.geojson")
+
+
+def test_get_task_detail_returns_active_revision_and_revision_history(
+    db_session: Session,
+) -> None:
+    task = _seed_task_with_revision_history(db_session)
+
+    detail = get_task_detail(db_session, task.id)
+
+    assert detail.interaction_state == "understanding"
+    assert detail.last_response_mode == "show_revision"
+    assert detail.active_revision is not None
+    assert detail.active_revision.revision_id
+    assert detail.active_revision.revision_number == 2
+    assert detail.active_revision.change_type == "user_edit"
+    assert detail.active_revision.understanding_summary == "北京作为 AOI。"
+    assert detail.active_revision.execution_blocked is False
+    assert detail.active_revision.execution_blocked_reason is None
+    assert detail.active_revision.field_confidences["aoi_input"].score == pytest.approx(0.97)
+    assert detail.active_revision.ranked_candidates["aoi_input"][0]["value"] == "北京"
+    assert [revision.revision_number for revision in detail.revisions] == [1, 2]
+    assert detail.revisions[0].change_type == "initial_parse"
+    assert detail.revisions[1].revision_id == detail.active_revision.revision_id
+
+
+def test_get_task_detail_surfaces_execution_blocked_active_revision(
+    db_session: Session,
+) -> None:
+    task = _seed_task_with_revision_history(
+        db_session,
+        interaction_state="execution_blocked",
+        last_response_mode="ask_missing_fields",
+        blocked_active_revision=True,
+    )
+
+    detail = get_task_detail(db_session, task.id)
+
+    assert detail.interaction_state == "execution_blocked"
+    assert detail.last_response_mode == "ask_missing_fields"
+    assert detail.active_revision is not None
+    assert detail.active_revision.execution_blocked is True
+    assert detail.active_revision.execution_blocked_reason == (
+        "AOI normalization failed: uploaded boundary is invalid"
+    )

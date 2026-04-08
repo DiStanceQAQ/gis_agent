@@ -191,6 +191,19 @@ def _parse_iso_datetime(value: object) -> datetime | None:
         return None
 
 
+def _build_revision_summary(revision: object) -> dict[str, object]:
+    return {
+        "revision_id": getattr(revision, "id"),
+        "revision_number": getattr(revision, "revision_number"),
+        "change_type": getattr(revision, "change_type"),
+        "understanding_summary": getattr(revision, "understanding_summary", None),
+        "execution_blocked": bool(getattr(revision, "execution_blocked", False)),
+        "execution_blocked_reason": getattr(revision, "execution_blocked_reason", None),
+        "field_confidences": dict(getattr(revision, "field_confidences_json", {}) or {}),
+        "ranked_candidates": dict(getattr(revision, "ranked_candidates_json", {}) or {}),
+    }
+
+
 def create_session(db: Session) -> SessionResponse:
     record = SessionRecord(id=make_id("ses"), status="active")
     db.add(record)
@@ -1605,6 +1618,7 @@ def _load_task(db: Session, task_id: str) -> TaskRunRecord:
             selectinload(TaskRunRecord.candidates),
             selectinload(TaskRunRecord.steps),
             selectinload(TaskRunRecord.artifacts),
+            selectinload(TaskRunRecord.revisions),
         )
         .filter(TaskRunRecord.id == task_id)
         .first()
@@ -1652,11 +1666,22 @@ def get_task_detail(db: Session, task_id: str) -> TaskDetailResponse:
         (artifact.download_url for artifact in artifacts if artifact.artifact_type == "png_map"),
         None,
     )
+    revisions = sorted(task.revisions, key=lambda item: item.revision_number)
+    active_revision = next((revision for revision in revisions if revision.is_active), None)
+    if active_revision is None:
+        active_revision = get_active_revision(db, task.id)
+    if active_revision is not None and all(
+        revision.id != active_revision.id for revision in revisions
+    ):
+        revisions.append(active_revision)
+        revisions.sort(key=lambda item: item.revision_number)
 
     return TaskDetailResponse(
         task_id=task.id,
         parent_task_id=task.parent_task_id,
         status=task.status,
+        interaction_state=task.interaction_state,
+        last_response_mode=task.last_response_mode,
         approval_required=task.status == TASK_STATUS_AWAITING_APPROVAL,
         execution_mode=(task.plan_json or {}).get("execution_mode"),
         execution_submitted=bool(
@@ -1698,6 +1723,8 @@ def get_task_detail(db: Session, task_id: str) -> TaskDetailResponse:
             for step in task.steps
         ],
         artifacts=artifacts,
+        active_revision=_build_revision_summary(active_revision) if active_revision is not None else None,
+        revisions=[_build_revision_summary(revision) for revision in revisions],
         summary_text=task.result_summary_text,
         methods_text=task.methods_text,
         png_preview_url=png_preview_url,
