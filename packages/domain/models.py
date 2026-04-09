@@ -259,9 +259,10 @@ class SessionMemoryEventRecord(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id"), nullable=False)
     message_id: Mapped[str | None] = mapped_column(ForeignKey("messages.id"), nullable=True)
+    task_id: Mapped[str | None] = mapped_column(ForeignKey("task_runs.id"), nullable=True)
     revision_id: Mapped[str | None] = mapped_column(ForeignKey("task_spec_revisions.id"), nullable=True)
     event_type: Mapped[str] = mapped_column(String(64))
-    payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    event_payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -273,17 +274,18 @@ class SessionStateSnapshotRecord(Base):
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id"), nullable=False)
-    lineage_root_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    active_task_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     active_revision_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    active_summary_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    state_json: Mapped[dict] = mapped_column(JSON, default=dict)
-    history_features_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    active_revision_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    active_understanding_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    open_missing_fields_json: Mapped[list] = mapped_column(JSON, default=list)
+    blocked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    latest_summary_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    field_history_rollup_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    user_preference_profile_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    risk_profile_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    snapshot_version: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        server_default=func.now(),
-        onupdate=func.now(),
-    )
 
 
 class SessionMemorySummaryRecord(Base):
@@ -294,10 +296,10 @@ class SessionMemorySummaryRecord(Base):
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id"), nullable=False)
-    summary_type: Mapped[str] = mapped_column(String(32))
+    summary_kind: Mapped[str] = mapped_column(String(32))
     summary_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     summary_json: Mapped[dict] = mapped_column(JSON, default=dict)
-    source_event_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    source_event_range_json: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -317,6 +319,22 @@ class SessionMemoryLinkRecord(Base):
     link_type: Mapped[str] = mapped_column(String(32))
     payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
     weight: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SessionMemoryRetrievalCacheRecord(Base):
+    __tablename__ = "session_memory_retrieval_cache"
+    __table_args__ = (
+        Index("ix_session_memory_retrieval_cache_session_created", "session_id", "created_at"),
+        Index("ix_session_memory_retrieval_cache_message_id", "message_id"),
+        Index("ix_session_memory_retrieval_cache_query_fingerprint", "query_fingerprint"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id"), nullable=False)
+    message_id: Mapped[str] = mapped_column(ForeignKey("messages.id"), nullable=False)
+    query_fingerprint: Mapped[str] = mapped_column(String(128))
+    retrieval_result_json: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

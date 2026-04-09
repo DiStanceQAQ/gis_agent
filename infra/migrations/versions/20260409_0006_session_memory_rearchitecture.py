@@ -18,11 +18,13 @@ def upgrade() -> None:
         sa.Column("id", sa.String(length=32), nullable=False),
         sa.Column("session_id", sa.String(length=32), nullable=False),
         sa.Column("message_id", sa.String(length=32), nullable=True),
+        sa.Column("task_id", sa.String(length=32), nullable=True),
         sa.Column("revision_id", sa.String(length=32), nullable=True),
         sa.Column("event_type", sa.String(length=64), nullable=False),
-        sa.Column("payload_json", sa.JSON(), nullable=False, server_default=sa.text("'{}'::json")),
+        sa.Column("event_payload_json", sa.JSON(), nullable=False, server_default=sa.text("'{}'::json")),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.ForeignKeyConstraint(["message_id"], ["messages.id"]),
+        sa.ForeignKeyConstraint(["task_id"], ["task_runs.id"]),
         sa.ForeignKeyConstraint(["revision_id"], ["task_spec_revisions.id"]),
         sa.ForeignKeyConstraint(["session_id"], ["sessions.id"]),
         sa.PrimaryKeyConstraint("id"),
@@ -40,13 +42,12 @@ def upgrade() -> None:
         "session_memory_summaries",
         sa.Column("id", sa.String(length=32), nullable=False),
         sa.Column("session_id", sa.String(length=32), nullable=False),
-        sa.Column("summary_type", sa.String(length=32), nullable=False),
+        sa.Column("summary_kind", sa.String(length=32), nullable=False),
         sa.Column("summary_text", sa.Text(), nullable=True),
         sa.Column("summary_json", sa.JSON(), nullable=False, server_default=sa.text("'{}'::json")),
-        sa.Column("source_event_id", sa.String(length=32), nullable=True),
+        sa.Column("source_event_range_json", sa.JSON(), nullable=False, server_default=sa.text("'{}'::json")),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.ForeignKeyConstraint(["session_id"], ["sessions.id"]),
-        sa.ForeignKeyConstraint(["source_event_id"], ["session_memory_events.id"]),
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index(
@@ -60,13 +61,18 @@ def upgrade() -> None:
         "session_state_snapshots",
         sa.Column("id", sa.String(length=32), nullable=False),
         sa.Column("session_id", sa.String(length=32), nullable=False),
-        sa.Column("lineage_root_id", sa.String(length=32), nullable=True),
+        sa.Column("active_task_id", sa.String(length=32), nullable=True),
         sa.Column("active_revision_id", sa.String(length=32), nullable=True),
-        sa.Column("active_summary_id", sa.String(length=32), nullable=True),
-        sa.Column("state_json", sa.JSON(), nullable=False, server_default=sa.text("'{}'::json")),
-        sa.Column("history_features_json", sa.JSON(), nullable=False, server_default=sa.text("'{}'::json")),
+        sa.Column("active_revision_number", sa.Integer(), nullable=True),
+        sa.Column("active_understanding_id", sa.String(length=32), nullable=True),
+        sa.Column("open_missing_fields_json", sa.JSON(), nullable=False, server_default=sa.text("'[]'::json")),
+        sa.Column("blocked_reason", sa.Text(), nullable=True),
+        sa.Column("latest_summary_id", sa.String(length=32), nullable=True),
+        sa.Column("field_history_rollup_json", sa.JSON(), nullable=False, server_default=sa.text("'{}'::json")),
+        sa.Column("user_preference_profile_json", sa.JSON(), nullable=False, server_default=sa.text("'{}'::json")),
+        sa.Column("risk_profile_json", sa.JSON(), nullable=False, server_default=sa.text("'{}'::json")),
+        sa.Column("snapshot_version", sa.Integer(), nullable=False, server_default="1"),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.ForeignKeyConstraint(["session_id"], ["sessions.id"]),
         sa.PrimaryKeyConstraint("id"),
     )
@@ -102,6 +108,37 @@ def upgrade() -> None:
         "ix_session_memory_links_session_target",
         "session_memory_links",
         ["session_id", "target_type", "target_id"],
+        unique=False,
+    )
+
+    op.create_table(
+        "session_memory_retrieval_cache",
+        sa.Column("id", sa.String(length=32), nullable=False),
+        sa.Column("session_id", sa.String(length=32), nullable=False),
+        sa.Column("message_id", sa.String(length=32), nullable=False),
+        sa.Column("query_fingerprint", sa.String(length=128), nullable=False),
+        sa.Column("retrieval_result_json", sa.JSON(), nullable=False, server_default=sa.text("'{}'::json")),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.ForeignKeyConstraint(["session_id"], ["sessions.id"]),
+        sa.ForeignKeyConstraint(["message_id"], ["messages.id"]),
+        sa.PrimaryKeyConstraint("id"),
+    )
+    op.create_index(
+        "ix_session_memory_retrieval_cache_session_created",
+        "session_memory_retrieval_cache",
+        ["session_id", "created_at"],
+        unique=False,
+    )
+    op.create_index(
+        "ix_session_memory_retrieval_cache_message_id",
+        "session_memory_retrieval_cache",
+        ["message_id"],
+        unique=False,
+    )
+    op.create_index(
+        "ix_session_memory_retrieval_cache_query_fingerprint",
+        "session_memory_retrieval_cache",
+        ["query_fingerprint"],
         unique=False,
     )
 
@@ -191,6 +228,17 @@ def downgrade() -> None:
     op.drop_column("message_understandings", "history_features_json")
     op.drop_column("message_understandings", "summary_id")
     op.drop_column("message_understandings", "snapshot_id")
+
+    op.drop_index(
+        "ix_session_memory_retrieval_cache_query_fingerprint",
+        table_name="session_memory_retrieval_cache",
+    )
+    op.drop_index("ix_session_memory_retrieval_cache_message_id", table_name="session_memory_retrieval_cache")
+    op.drop_index(
+        "ix_session_memory_retrieval_cache_session_created",
+        table_name="session_memory_retrieval_cache",
+    )
+    op.drop_table("session_memory_retrieval_cache")
 
     op.drop_index("ix_session_memory_links_session_target", table_name="session_memory_links")
     op.drop_index("ix_session_memory_links_session_source", table_name="session_memory_links")
