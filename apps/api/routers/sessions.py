@@ -2,9 +2,19 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from apps.api.deps import get_db
-from packages.domain.services.orchestrator import create_session, list_session_messages, list_session_tasks
+from packages.domain.services.orchestrator import (
+    create_session,
+    get_session_memory,
+    list_session_messages,
+    list_session_tasks,
+)
 from packages.schemas.common import ErrorResponse
-from packages.schemas.session import SessionMessagesResponse, SessionResponse, SessionTasksResponse
+from packages.schemas.session import (
+    SessionMemoryResponse,
+    SessionMessagesResponse,
+    SessionResponse,
+    SessionTasksResponse,
+)
 
 router = APIRouter(tags=["sessions"])
 
@@ -39,3 +49,16 @@ def list_session_messages_endpoint(
     db: Session = Depends(get_db),
 ) -> SessionMessagesResponse:
     return list_session_messages(db=db, session_id=session_id, limit=limit, cursor=cursor)
+
+
+@router.get(
+    "/sessions/{session_id}/memory",
+    response_model=SessionMemoryResponse,
+    responses={404: {"model": ErrorResponse}},
+)
+def get_session_memory_endpoint(
+    session_id: str,
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+) -> SessionMemoryResponse:
+    return get_session_memory(db=db, session_id=session_id, limit=limit)

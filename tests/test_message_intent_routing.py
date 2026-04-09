@@ -194,12 +194,6 @@ def _cleanup_session(session_id: str) -> None:
         db.query(SessionMemoryRetrievalCacheRecord).filter(
             SessionMemoryRetrievalCacheRecord.session_id == session_id
         ).delete(synchronize_session=False)
-        db.query(SessionMemorySummaryRecord).filter(
-            SessionMemorySummaryRecord.session_id == session_id
-        ).delete(synchronize_session=False)
-        db.query(SessionStateSnapshotRecord).filter(
-            SessionStateSnapshotRecord.session_id == session_id
-        ).delete(synchronize_session=False)
 
         task_ids = [
             task_id
@@ -242,6 +236,12 @@ def _cleanup_session(session_id: str) -> None:
         )
         db.query(MessageUnderstandingRecord).filter(
             MessageUnderstandingRecord.session_id == session_id
+        ).delete(synchronize_session=False)
+        db.query(SessionMemorySummaryRecord).filter(
+            SessionMemorySummaryRecord.session_id == session_id
+        ).delete(synchronize_session=False)
+        db.query(SessionStateSnapshotRecord).filter(
+            SessionStateSnapshotRecord.session_id == session_id
         ).delete(synchronize_session=False)
         db.query(UploadedFileRecord).filter(UploadedFileRecord.session_id == session_id).delete(
             synchronize_session=False

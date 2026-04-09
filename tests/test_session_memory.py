@@ -11,6 +11,7 @@ from packages.domain.models import (
     MessageRecord,
     MessageUnderstandingRecord,
     SessionMemoryEventRecord,
+    SessionMemorySummaryRecord,
     SessionRecord,
     TaskRunRecord,
     TaskSpecRecord,
@@ -366,12 +367,24 @@ def test_session_memory_service_record_event_persists_event_and_snapshot(
     assert snapshot.active_understanding_id == understanding.id
     assert snapshot.open_missing_fields_json == ["time_range"]
     assert snapshot.blocked_reason == "need_time_range"
-    assert snapshot.field_history_rollup_json == {"aoi_input": {"score": 0.92}}
+    assert snapshot.field_history_rollup_json["aoi_input"]["accepted_count"] == 1
+    assert snapshot.field_history_rollup_json["aoi_input"]["latest_score"] == 0.92
+    assert snapshot.field_history_rollup_json["aoi_input"]["latest_value"] == "江西"
     assert snapshot.user_preference_profile_json == {
         "preferred_output": ["png_map"],
         "user_priority": "speed",
+        "confirmation_preference": "prefer_execute",
     }
-    assert snapshot.risk_profile_json == {"execution_blocked": True}
+    assert snapshot.risk_profile_json == {
+        "execution_blocked": True,
+        "task_risk": "high",
+        "risk_level": "high",
+    }
+    assert isinstance(snapshot.latest_summary_id, str)
+    summary = db_session.get(SessionMemorySummaryRecord, snapshot.latest_summary_id)
+    assert summary is not None
+    assert summary.summary_kind == "rolling_context"
+    assert "待补字段：time_range" in (summary.summary_text or "")
     assert snapshot.snapshot_version == 1
 
 
@@ -407,6 +420,58 @@ def test_session_memory_service_refresh_snapshot_increments_snapshot_version(
 
     assert first_version == 1
     assert second.snapshot_version == 2
+
+
+def test_session_memory_refresh_snapshot_rolls_up_field_history_across_revisions(
+    db_session: Session,
+) -> None:
+    session = SessionRecord(id=make_id("ses"), title="memory-rollup", status="active")
+    first_message = MessageRecord(id=make_id("msg"), session_id=session.id, role="user", content="江西")
+    second_message = MessageRecord(id=make_id("msg"), session_id=session.id, role="user", content="北京")
+    task = TaskRunRecord(id=make_id("task"), session_id=session.id, user_message_id=first_message.id)
+    first_revision = TaskSpecRevisionRecord(
+        id=make_id("rev"),
+        task_id=task.id,
+        revision_number=1,
+        base_revision_id=None,
+        source_message_id=first_message.id,
+        change_type="initial_parse",
+        is_active=False,
+        understanding_intent="new_task",
+        understanding_summary="江西 AOI",
+        raw_spec_json={"aoi_input": "江西", "aoi_source_type": "admin_name", "analysis_type": "NDVI"},
+        field_confidences_json={"aoi_input": {"score": 0.91, "level": "high"}},
+        ranked_candidates_json={},
+        response_mode="confirm_understanding",
+        understanding_trace_json={},
+    )
+    second_revision = TaskSpecRevisionRecord(
+        id=make_id("rev"),
+        task_id=task.id,
+        revision_number=2,
+        base_revision_id=first_revision.id,
+        source_message_id=second_message.id,
+        change_type="task_correction",
+        is_active=True,
+        understanding_intent="task_correction",
+        understanding_summary="北京 AOI",
+        raw_spec_json={"aoi_input": "北京", "aoi_source_type": "admin_name", "analysis_type": "NDVI"},
+        field_confidences_json={"aoi_input": {"score": 0.96, "level": "high"}},
+        ranked_candidates_json={},
+        response_mode="show_revision",
+        understanding_trace_json={},
+    )
+    db_session.add_all([session, first_message, second_message, task, first_revision, second_revision])
+    db_session.flush()
+
+    service = SessionMemoryService(db_session)
+    snapshot = service.refresh_snapshot(session.id, task_id=task.id, revision_id=second_revision.id)
+
+    rollup = snapshot.field_history_rollup_json["aoi_input"]
+    assert rollup["accepted_count"] == 2
+    assert rollup["correction_count"] == 1
+    assert rollup["latest_value"] == "北京"
+    assert "江西" in rollup["previous_values"]
 
 
 def test_activate_revision_records_revision_activated_session_memory_event(

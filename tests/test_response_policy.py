@@ -255,6 +255,65 @@ def test_all_high_with_approval_required_still_executes_now() -> None:
     assert decision.response_payload["require_approval"] is True
 
 
+def test_high_risk_or_always_confirm_preference_forces_confirmation() -> None:
+    understanding = _understanding(
+        intent="new_task",
+        field_scores={
+            "aoi_input": 0.92,
+            "aoi_source_type": 0.91,
+            "time_range": 0.88,
+            "analysis_type": 0.95,
+        },
+        parsed_spec=ParsedTaskSpec(
+            aoi_input="江西",
+            aoi_source_type="admin_name",
+            time_range={"start": "2024-06-01", "end": "2024-06-30"},
+            analysis_type="WORKFLOW",
+        ),
+    )
+
+    decision = decide_response(
+        understanding,
+        active_revision=None,
+        require_approval=False,
+        user_preference_profile={"confirmation_preference": "always_confirm"},
+        risk_profile={"task_risk": "high"},
+    )
+
+    assert decision.mode == "confirm_understanding"
+    assert decision.requires_execution is False
+    assert decision.response_payload["task_risk"] == "high"
+    assert decision.response_payload["confirmation_preference"] == "always_confirm"
+
+
+def test_clip_does_not_require_time_range_when_other_required_fields_are_high() -> None:
+    understanding = _understanding(
+        intent="new_task",
+        field_scores={
+            "aoi_input": 0.93,
+            "aoi_source_type": 0.92,
+            "time_range": 0.0,
+            "analysis_type": 0.95,
+        },
+        parsed_spec=ParsedTaskSpec(
+            aoi_input="uploaded_aoi",
+            aoi_source_type="file_upload",
+            analysis_type="CLIP",
+            operation_params={"source_path": "/tmp/source.tif", "clip_path": "/tmp/clip.geojson"},
+        ),
+    )
+
+    decision = decide_response(
+        understanding,
+        active_revision=None,
+        require_approval=False,
+    )
+
+    assert decision.mode == "execute_now"
+    assert "time_range" not in decision.response_payload["missing_fields"]
+    assert decision.response_payload["required_fields"] == ["aoi_input", "aoi_source_type", "analysis_type"]
+
+
 def test_blocked_active_revision_forces_non_executable_response() -> None:
     understanding = _understanding(
         intent="new_task",

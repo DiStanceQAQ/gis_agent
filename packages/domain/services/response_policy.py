@@ -37,15 +37,25 @@ def decide_response(
     *,
     active_revision: ActiveRevisionLike | None,
     require_approval: bool,
+    user_preference_profile: dict[str, object] | None = None,
+    risk_profile: dict[str, object] | None = None,
 ) -> ResponseDecision:
     settings = get_settings()
-    key_field_levels = _key_field_levels(understanding, settings)
-    low_fields = [field for field in KEY_FIELDS if key_field_levels[field] == "low"]
-    medium_fields = [field for field in KEY_FIELDS if key_field_levels[field] == "medium"]
-    all_high = all(key_field_levels[field] == "high" for field in KEY_FIELDS)
+    key_fields = _required_fields(understanding, active_revision)
+    key_field_levels = _key_field_levels(understanding, settings, key_fields=key_fields)
+    parser_missing_fields = _parser_missing_fields(understanding, key_fields)
+    low_fields = list(
+        dict.fromkeys(
+            [field for field in key_fields if key_field_levels[field] == "low"] + parser_missing_fields
+        )
+    )
+    medium_fields = [field for field in key_fields if key_field_levels[field] == "medium"]
+    all_high = all(key_field_levels[field] == "high" for field in key_fields)
+    confirmation_preference = _confirmation_preference(understanding, user_preference_profile)
+    task_risk = _task_risk(understanding, active_revision, risk_profile)
 
     if active_revision is not None and active_revision.execution_blocked:
-        editable_fields = _editable_fields_from_revision(active_revision)
+        editable_fields = _editable_fields_from_revision(active_revision, key_fields=key_fields)
         return _build_decision(
             mode="ask_missing_fields",
             understanding=understanding,
@@ -59,6 +69,9 @@ def decide_response(
             requires_revision_creation=False,
             requires_execution=False,
             assistant_message=_blocked_assistant_message(active_revision.execution_blocked_reason),
+            task_risk=task_risk,
+            confirmation_preference=confirmation_preference,
+            required_fields=key_fields,
         )
 
     if understanding.intent == "chat":
@@ -75,6 +88,9 @@ def decide_response(
             requires_revision_creation=False,
             requires_execution=False,
             assistant_message="当然，我们可以继续聊这个。",
+            task_risk=task_risk,
+            confirmation_preference=confirmation_preference,
+            required_fields=key_fields,
         )
 
     if low_fields:
@@ -91,13 +107,20 @@ def decide_response(
             requires_revision_creation=False,
             requires_execution=False,
             assistant_message=_missing_fields_assistant_message(low_fields),
+            task_risk=task_risk,
+            confirmation_preference=confirmation_preference,
+            required_fields=key_fields,
         )
 
     if understanding.intent == "task_correction" and _has_enough_correction_structure(
         understanding,
         active_revision,
     ):
-        editable_fields = _editable_fields_for_revision(understanding, active_revision)
+        editable_fields = _editable_fields_for_revision(
+            understanding,
+            active_revision,
+            key_fields=key_fields,
+        )
         return _build_decision(
             mode="show_revision",
             understanding=understanding,
@@ -111,6 +134,9 @@ def decide_response(
             requires_revision_creation=True,
             requires_execution=False,
             assistant_message=_show_revision_assistant_message(understanding),
+            task_risk=task_risk,
+            confirmation_preference=confirmation_preference,
+            required_fields=key_fields,
         )
 
     if medium_fields:
@@ -127,6 +153,31 @@ def decide_response(
             requires_revision_creation=False,
             requires_execution=False,
             assistant_message=_confirm_understanding_assistant_message(understanding),
+            task_risk=task_risk,
+            confirmation_preference=confirmation_preference,
+            required_fields=key_fields,
+        )
+
+    if all_high and _should_force_confirmation(
+        confirmation_preference=confirmation_preference,
+        task_risk=task_risk,
+    ):
+        return _build_decision(
+            mode="confirm_understanding",
+            understanding=understanding,
+            editable_fields=list(key_fields),
+            execution_blocked=False,
+            blocked_reason=None,
+            missing_fields=[],
+            active_revision=active_revision,
+            require_approval=require_approval,
+            requires_task_creation=_requires_task_creation(understanding, active_revision),
+            requires_revision_creation=False,
+            requires_execution=False,
+            assistant_message=_confirm_understanding_assistant_message(understanding),
+            task_risk=task_risk,
+            confirmation_preference=confirmation_preference,
+            required_fields=key_fields,
         )
 
     if all_high:
@@ -143,12 +194,15 @@ def decide_response(
             requires_revision_creation=False,
             requires_execution=True,
             assistant_message="关键信息齐了，我会直接开始执行。",
+            task_risk=task_risk,
+            confirmation_preference=confirmation_preference,
+            required_fields=key_fields,
         )
 
     return _build_decision(
         mode="confirm_understanding",
         understanding=understanding,
-        editable_fields=[field for field in KEY_FIELDS if key_field_levels[field] != "low"],
+        editable_fields=[field for field in key_fields if key_field_levels[field] != "low"],
         execution_blocked=False,
         blocked_reason=None,
         missing_fields=[],
@@ -158,6 +212,9 @@ def decide_response(
         requires_revision_creation=False,
         requires_execution=False,
         assistant_message=_confirm_understanding_assistant_message(understanding),
+        task_risk=task_risk,
+        confirmation_preference=confirmation_preference,
+        required_fields=key_fields,
     )
 
 
@@ -175,6 +232,9 @@ def _build_decision(
     requires_revision_creation: bool,
     requires_execution: bool,
     assistant_message: str,
+    task_risk: str,
+    confirmation_preference: str,
+    required_fields: list[str],
 ) -> ResponseDecision:
     response_payload = {
         "response_mode": mode,
@@ -192,6 +252,9 @@ def _build_decision(
         "requires_task_creation": requires_task_creation,
         "requires_revision_creation": requires_revision_creation,
         "requires_execution": requires_execution,
+        "task_risk": task_risk,
+        "confirmation_preference": confirmation_preference,
+        "required_fields": required_fields,
     }
     if active_revision is not None:
         response_payload["revision_number"] = active_revision.revision_number
@@ -214,12 +277,14 @@ def _build_decision(
 def _key_field_levels(
     understanding: MessageUnderstanding,
     settings: object,
+    *,
+    key_fields: list[str] | tuple[str, ...] = KEY_FIELDS,
 ) -> dict[str, str]:
     medium_threshold = float(getattr(settings, "understanding_field_medium_threshold"))
     high_threshold = float(getattr(settings, "understanding_field_high_threshold"))
 
     levels: dict[str, str] = {}
-    for field in KEY_FIELDS:
+    for field in key_fields:
         confidence = understanding.field_confidences.get(field)
         score = confidence.score if confidence is not None else 0.0
         if score >= high_threshold:
@@ -231,24 +296,30 @@ def _key_field_levels(
     return levels
 
 
-def _editable_fields_from_revision(active_revision: ActiveRevisionLike) -> list[str]:
+def _editable_fields_from_revision(
+    active_revision: ActiveRevisionLike,
+    *,
+    key_fields: list[str] | tuple[str, ...] = KEY_FIELDS,
+) -> list[str]:
     if not isinstance(active_revision.raw_spec_json, dict):
-        return list(KEY_FIELDS)
-    editable_fields = [field for field in KEY_FIELDS if field in active_revision.raw_spec_json]
-    return editable_fields or list(KEY_FIELDS)
+        return list(key_fields)
+    editable_fields = [field for field in key_fields if field in active_revision.raw_spec_json]
+    return editable_fields or list(key_fields)
 
 
 def _editable_fields_for_revision(
     understanding: MessageUnderstanding,
     active_revision: ActiveRevisionLike | None,
+    *,
+    key_fields: list[str] | tuple[str, ...] = KEY_FIELDS,
 ) -> list[str]:
     if active_revision is not None:
-        return _editable_fields_from_revision(active_revision)
+        return _editable_fields_from_revision(active_revision, key_fields=key_fields)
     if understanding.parsed_spec is None:
-        return list(KEY_FIELDS)
+        return list(key_fields)
     parsed = understanding.parsed_spec.model_dump()
-    editable_fields = [field for field in KEY_FIELDS if parsed.get(field) is not None]
-    return editable_fields or list(KEY_FIELDS)
+    editable_fields = [field for field in key_fields if parsed.get(field) is not None]
+    return editable_fields or list(key_fields)
 
 
 def _has_enough_correction_structure(
@@ -288,3 +359,90 @@ def _show_revision_assistant_message(understanding: MessageUnderstanding) -> str
 
 def _confirm_understanding_assistant_message(understanding: MessageUnderstanding) -> str:
     return f"我理解的是：{understanding.understanding_summary}。如果没问题，我就继续。"
+
+
+def _required_fields(
+    understanding: MessageUnderstanding,
+    active_revision: ActiveRevisionLike | None,
+) -> list[str]:
+    analysis_type = _analysis_type(understanding, active_revision)
+    if analysis_type == "CLIP":
+        return ["aoi_input", "aoi_source_type", "analysis_type"]
+    return list(KEY_FIELDS)
+
+
+def _analysis_type(
+    understanding: MessageUnderstanding,
+    active_revision: ActiveRevisionLike | None,
+) -> str:
+    if understanding.parsed_spec is not None:
+        return str(understanding.parsed_spec.analysis_type or "WORKFLOW")
+    if isinstance(active_revision, object) and isinstance(getattr(active_revision, "raw_spec_json", None), dict):
+        raw_spec = getattr(active_revision, "raw_spec_json", {}) or {}
+        raw_analysis_type = raw_spec.get("analysis_type")
+        if isinstance(raw_analysis_type, str) and raw_analysis_type.strip():
+            return raw_analysis_type.strip().upper()
+    return "WORKFLOW"
+
+
+def _parser_missing_fields(
+    understanding: MessageUnderstanding,
+    key_fields: list[str],
+) -> list[str]:
+    parsed_spec = understanding.parsed_spec
+    if parsed_spec is None:
+        return []
+    return [field for field in parsed_spec.missing_fields if field in key_fields]
+
+
+def _confirmation_preference(
+    understanding: MessageUnderstanding,
+    user_preference_profile: dict[str, object] | None,
+) -> str:
+    profile = dict(user_preference_profile or {})
+    explicit = profile.get("confirmation_preference")
+    if isinstance(explicit, str):
+        token = explicit.strip().lower()
+        if token in {"always_confirm", "balanced", "prefer_execute"}:
+            return token
+
+    user_priority = profile.get("user_priority")
+    if not isinstance(user_priority, str) and understanding.parsed_spec is not None:
+        user_priority = understanding.parsed_spec.user_priority
+    if isinstance(user_priority, str):
+        token = user_priority.strip().lower()
+        if token == "speed":
+            return "prefer_execute"
+        if token in {"quality", "careful", "safe"}:
+            return "always_confirm"
+    return "balanced"
+
+
+def _task_risk(
+    understanding: MessageUnderstanding,
+    active_revision: ActiveRevisionLike | None,
+    risk_profile: dict[str, object] | None,
+) -> str:
+    profile = dict(risk_profile or {})
+    for key in ("task_risk", "risk_level"):
+        value = profile.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip().lower()
+    if bool(profile.get("execution_blocked")):
+        return "high"
+    if active_revision is not None and active_revision.execution_blocked:
+        return "high"
+    analysis_type = _analysis_type(understanding, active_revision)
+    if analysis_type in {"WORKFLOW", "BAND_MATH"}:
+        return "medium"
+    return "low"
+
+
+def _should_force_confirmation(
+    *,
+    confirmation_preference: str,
+    task_risk: str,
+) -> bool:
+    if confirmation_preference == "always_confirm":
+        return True
+    return task_risk in {"high", "critical"}

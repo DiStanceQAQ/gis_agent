@@ -748,6 +748,8 @@ def test_persist_message_understanding_stores_history_features_and_link(
     )
 
     assert row.history_features_json["aoi_input"]["accepted_count"] == 3
+    assert row.snapshot_id is not None
+    assert row.summary_id is None
     link = (
         db_session.query(SessionMemoryLinkRecord)
         .filter(
@@ -759,6 +761,76 @@ def test_persist_message_understanding_stores_history_features_and_link(
         .one_or_none()
     )
     assert link is not None
+
+
+def test_persist_message_understanding_attaches_snapshot_summary_and_lineage_for_existing_revision(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: Session,
+) -> None:
+    session = _create_session(db_session)
+    message = _create_message(
+        db_session,
+        session_id=session.id,
+        content="改成北京。",
+    )
+    task = _create_task(db_session, session_id=session.id, user_message_id=message.id)
+    revision = _create_revision(
+        db_session,
+        task_id=task.id,
+        source_message_id=message.id,
+        understanding_summary="江西 AOI",
+    )
+
+    monkeypatch.setattr(
+        "packages.domain.services.understanding.classify_message_intent",
+        lambda *args, **kwargs: IntentResult(intent="task", confidence=0.95, reason="task-like"),
+    )
+    monkeypatch.setattr(
+        "packages.domain.services.understanding.parse_task_message",
+        lambda *args, **kwargs: ParsedTaskSpec(
+            aoi_input="北京",
+            aoi_source_type="admin_name",
+            analysis_type="NDVI",
+        ),
+    )
+
+    understanding = understand_message(
+        message.content,
+        context=_bundle(
+            session_id=session.id,
+            message_id=message.id,
+            latest_active_task_id=task.id,
+            latest_active_revision_id=revision.id,
+            latest_active_revision_summary=revision.understanding_summary,
+            explicit_signals={
+                "upload_file_hint": False,
+                "bbox_hint": False,
+                "admin_region_hint": True,
+                "confirmation_hint": False,
+                "correction_hint": True,
+                "revision_field_overlap": {
+                    "revision_id": revision.id,
+                    "fields": ["aoi_input"],
+                    "matched_signals": ["correction_hint"],
+                },
+            },
+        ),
+        task_id=task.id,
+        db_session=db_session,
+    )
+
+    row = persist_message_understanding(
+        db_session,
+        message_id=message.id,
+        session_id=session.id,
+        task_id=task.id,
+        derived_revision_id=revision.id,
+        understanding=understanding,
+    )
+
+    assert row.snapshot_id is not None
+    assert row.summary_id is not None
+    assert row.lineage_root_id == revision.id
 
 
 def test_chat_like_message_persists_without_parsed_spec(

@@ -267,8 +267,33 @@ def persist_message_understanding(
             setattr(record, key, value)
 
     db_session.flush()
+    resolved_revision = (
+        db_session.get(TaskSpecRevisionRecord, resolved_revision_id)
+        if resolved_revision_id
+        else None
+    )
+    memory = SessionMemoryService(db_session)
+    memory.record_event(
+        session_id=session_id,
+        event_type="message_understanding_created",
+        message_id=message_id,
+        task_id=resolved_task_id,
+        revision_id=resolved_revision.id if resolved_revision is not None else None,
+        event_payload={
+            "intent": understanding.intent,
+            "response_mode": resolved_response_mode,
+        },
+    )
+    snapshot = memory.get_latest_snapshot(session_id)
+    if snapshot is not None:
+        record.snapshot_id = snapshot.id
+        record.summary_id = snapshot.latest_summary_id
+        if resolved_revision_id:
+            record.lineage_root_id = resolved_revision_id
+        db_session.flush()
+
     if resolved_revision_id:
-        SessionMemoryService(db_session).link_entities(
+        memory.link_entities(
             session_id=session_id,
             source_type="understanding",
             source_id=record.id,
@@ -277,10 +302,14 @@ def persist_message_understanding(
             link_type="derived_from",
             weight=1.0,
         )
-        revision = db_session.get(TaskSpecRevisionRecord, resolved_revision_id)
+        revision = resolved_revision
         if revision is not None:
             revision.parent_message_understanding_id = record.id
             revision.history_features_json = dict(record.history_features_json or {})
+            if revision.lineage_root_id is None:
+                revision.lineage_root_id = revision.id
+            if record.lineage_root_id is None:
+                record.lineage_root_id = revision.lineage_root_id or revision.id
             db_session.flush()
     return record
 
