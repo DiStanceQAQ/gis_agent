@@ -684,7 +684,13 @@ def _load_parser_system_prompt() -> str:
     return prompt_path.read_text(encoding="utf-8")
 
 
-def _build_parser_user_prompt(message: str, has_upload: bool) -> str:
+def _build_parser_user_prompt(
+    message: str,
+    has_upload: bool,
+    *,
+    context_summary: str | None = None,
+    field_value_history: dict[str, list[dict[str, object]]] | None = None,
+) -> str:
     payload = {
         "task": "parse_gis_request",
         "language": "zh-CN",
@@ -723,6 +729,10 @@ def _build_parser_user_prompt(message: str, has_upload: bool) -> str:
             "clarification_message",
         ],
     }
+    if context_summary:
+        payload["context_summary"] = context_summary
+    if field_value_history:
+        payload["field_value_history"] = field_value_history
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
@@ -933,12 +943,19 @@ def _parse_task_message_with_llm(
     has_upload: bool,
     task_id: str | None = None,
     db_session: Session | None = None,
+    context_summary: str | None = None,
+    field_value_history: dict[str, list[dict[str, object]]] | None = None,
 ) -> ParsedTaskSpec:
     settings = get_settings()
     parser_retries = max(0, settings.llm_parser_schema_retries)
     client = LLMClient(settings)
     system_prompt = _load_parser_system_prompt()
-    base_user_prompt = _build_parser_user_prompt(message, has_upload)
+    base_user_prompt = _build_parser_user_prompt(
+        message,
+        has_upload,
+        context_summary=context_summary,
+        field_value_history=field_value_history,
+    )
     user_prompt = base_user_prompt
     attempt = 0
     last_error = "unknown"
@@ -978,6 +995,8 @@ def parse_task_message(
     *,
     task_id: str | None = None,
     db_session: Session | None = None,
+    context_summary: str | None = None,
+    field_value_history: dict[str, list[dict[str, object]]] | None = None,
 ) -> ParsedTaskSpec:
     settings = get_settings()
     if not settings.llm_parser_enabled:
@@ -989,6 +1008,8 @@ def parse_task_message(
             has_upload=has_upload,
             task_id=task_id,
             db_session=db_session,
+            context_summary=context_summary,
+            field_value_history=field_value_history,
         )
     except LLMClientError as exc:
         logger.warning("parser.llm_client_failed detail=%s", exc.detail)

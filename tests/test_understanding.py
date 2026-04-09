@@ -122,6 +122,8 @@ def _bundle(
     relevant_messages: list[dict[str, object]] | None = None,
     uploaded_files: list[dict[str, object]] | None = None,
     trace: dict[str, object] | None = None,
+    field_value_history: dict[str, list[dict[str, object]]] | None = None,
+    history_features: dict[str, object] | None = None,
 ) -> ConversationContextBundle:
     return ConversationContextBundle(
         session_id=session_id,
@@ -137,6 +139,8 @@ def _bundle(
             "session_id": session_id,
             "message_id": message_id,
         },
+        field_value_history=field_value_history or {},
+        history_features=history_features or {},
     )
 
 
@@ -429,6 +433,15 @@ def test_task_like_understanding_calls_parser_and_builds_field_confidences(
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     parser_calls: list[dict[str, object]] = []
+    field_value_history = {
+        "time_range": [
+            {
+                "revision_id": "rev_prior",
+                "revision_number": 2,
+                "value": {"start": "2024-06-01", "end": "2024-06-30"},
+            }
+        ]
+    }
 
     def _fake_classify_message_intent(*args, **kwargs) -> IntentResult:  # noqa: ANN001, ANN002
         return IntentResult(intent="task", confidence=0.9, reason="task-like")
@@ -481,6 +494,7 @@ def test_task_like_understanding_calls_parser_and_builds_field_confidences(
             relevant_messages=[
                 {"id": current_message.id, "role": "user", "content": current_message.content}
             ],
+            field_value_history=field_value_history,
         ),
         task_id=task.id,
         db_session=db_session,
@@ -490,7 +504,12 @@ def test_task_like_understanding_calls_parser_and_builds_field_confidences(
         {
             "message": current_message.content,
             "has_upload": True,
-            "kwargs": {"task_id": task.id, "db_session": db_session},
+            "kwargs": {
+                "task_id": task.id,
+                "db_session": db_session,
+                "context_summary": "uploads=clip.geojson；time_range_history=1",
+                "field_value_history": field_value_history,
+            },
         }
     ]
     assert understanding.parsed_spec is not None
@@ -498,6 +517,74 @@ def test_task_like_understanding_calls_parser_and_builds_field_confidences(
     assert understanding.field_confidences["aoi_input"].level == "high"
     assert understanding.field_confidences["time_range"].evidence
     assert "aoi_input" in understanding.parsed_candidates
+
+
+def test_understanding_applies_revision_history_to_field_confidence(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: Session,
+) -> None:
+    session = _create_session(db_session)
+    current_message = _create_message(
+        db_session,
+        session_id=session.id,
+        content="继续用上传的 AOI 分析江西。",
+    )
+
+    monkeypatch.setattr(
+        "packages.domain.services.understanding.classify_message_intent",
+        lambda *args, **kwargs: IntentResult(intent="task", confidence=0.9, reason="task-like"),
+    )
+    monkeypatch.setattr(
+        "packages.domain.services.understanding.parse_task_message",
+        lambda *args, **kwargs: ParsedTaskSpec(
+            aoi_input="江西",
+            aoi_source_type="admin_name",
+            analysis_type="NDVI",
+        ),
+    )
+
+    understanding = understand_message(
+        current_message.content,
+        context=_bundle(
+            session_id=session.id,
+            message_id=current_message.id,
+            latest_active_task_id=None,
+            latest_active_revision_id=None,
+            latest_active_revision_summary=None,
+            explicit_signals={
+                "upload_file_hint": True,
+                "bbox_hint": False,
+                "admin_region_hint": True,
+                "confirmation_hint": False,
+                "correction_hint": True,
+                "revision_field_overlap": {
+                    "revision_id": "rev_3",
+                    "fields": ["aoi_input"],
+                    "matched_signals": ["correction_hint"],
+                },
+            },
+            field_value_history={
+                "aoi_input": [
+                    {"revision_id": "rev_3", "revision_number": 3, "value": "江西"},
+                    {"revision_id": "rev_2", "revision_number": 2, "value": "江西"},
+                    {"revision_id": "rev_1", "revision_number": 1, "value": "江西"},
+                ]
+            },
+            history_features={
+                "aoi_input": {
+                    "correction_count": 2,
+                    "accepted_count": 3,
+                    "contradiction_count": 0,
+                    "last_confirmed_revision_number": 3,
+                }
+            },
+        ),
+        db_session=db_session,
+    )
+
+    aoi_confidence = understanding.field_confidences["aoi_input"]
+    assert aoi_confidence.score > 0.9
+    assert any(item.source == "revision_history" for item in aoi_confidence.evidence)
 
 
 def test_persist_message_understanding_writes_and_upserts_row(

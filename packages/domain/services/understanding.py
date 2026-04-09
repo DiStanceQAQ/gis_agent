@@ -10,6 +10,10 @@ from sqlalchemy.orm import Session
 from packages.domain.config import get_settings
 from packages.domain.models import MessageUnderstandingRecord
 from packages.domain.services.conversation_context import ConversationContextBundle
+from packages.domain.services.session_memory_confidence import (
+    build_history_features,
+    compute_field_confidence,
+)
 from packages.domain.services.intent import IntentResult, classify_message_intent
 from packages.domain.services.parser import parse_task_message
 from packages.domain.utils import make_id
@@ -133,6 +137,8 @@ def understand_message(
             has_upload=has_upload,
             task_id=resolved_task_id,
             db_session=db_session,
+            context_summary=_parser_context_summary(context),
+            field_value_history=context.field_value_history,
         )
         parser_payload = parsed_spec.model_dump()
 
@@ -350,7 +356,15 @@ def _build_field_confidences(
         "time_range": _score_time_range(parsed_spec, context, message, settings),
         "analysis_type": _score_analysis_type(parsed_spec, context, message, settings, intent),
     }
-    return fields
+    return {
+        field_name: _apply_history_confidence(
+            field_name=field_name,
+            confidence=confidence,
+            context=context,
+            settings=settings,
+        )
+        for field_name, confidence in fields.items()
+    }
 
 
 def _score_aoi_input(
@@ -699,6 +713,20 @@ def _build_understanding_summary(
     return "，".join(parts) + "。"
 
 
+def _parser_context_summary(context: ConversationContextBundle) -> str:
+    parts: list[str] = []
+    if context.latest_active_revision_summary:
+        parts.append(f"active_revision={context.latest_active_revision_summary}")
+    if context.uploaded_files:
+        upload_names = ",".join(str(item.get("original_name") or "") for item in context.uploaded_files[:3] if item.get("original_name"))
+        if upload_names:
+            parts.append(f"uploads={upload_names}")
+    for field_name, entries in sorted(context.field_value_history.items()):
+        if entries:
+            parts.append(f"{field_name}_history={len(entries)}")
+    return "；".join(parts)
+
+
 def _build_history(context: ConversationContextBundle) -> list[dict[str, str]]:
     history_with_order: list[tuple[datetime | None, int, dict[str, str]]] = []
     for item in context.relevant_messages:
@@ -734,6 +762,57 @@ def _extract_context_value(trace: dict[str, object], path: tuple[str, str]) -> s
     if isinstance(current, str) and current:
         return current
     return None
+
+
+def _apply_history_confidence(
+    *,
+    field_name: str,
+    confidence: FieldConfidence,
+    context: ConversationContextBundle,
+    settings: Any,
+) -> FieldConfidence:
+    history_features = {
+        name: features.dump()
+        for name, features in build_history_features(context.field_value_history).items()
+    }
+    for name, payload in dict(context.history_features or {}).items():
+        if isinstance(payload, dict):
+            history_features[name] = dict(payload)
+
+    parser_score = max(
+        (item.weight for item in confidence.evidence if item.source == "parser"),
+        default=confidence.score * 0.5,
+    )
+    current_signal_score = max(
+        (item.weight for item in confidence.evidence if item.source != "parser"),
+        default=confidence.score,
+    )
+    current_signal_score = max(current_signal_score, confidence.score)
+    history_confidence = compute_field_confidence(
+        field_name=field_name,
+        parser_score=parser_score,
+        history_features=history_features,
+        current_signal_score=current_signal_score,
+        high_threshold=float(settings.understanding_field_high_threshold),
+        medium_threshold=float(settings.understanding_field_medium_threshold),
+    )
+    final_score = max(confidence.score, history_confidence.score)
+    history_evidence = [
+        EvidenceItem(
+            field=field_name,
+            source=item.source,
+            weight=item.weight,
+            detail=item.detail,
+            message_ref=context.message_id,
+        )
+        for item in history_confidence.evidence
+        if item.source == "revision_history"
+    ]
+    return FieldConfidence(
+        score=final_score,
+        level=_confidence_level(final_score, settings),
+        evidence=[*confidence.evidence, *history_evidence],
+    )
 
 
 def _coerce_message_datetime(value: object) -> datetime | None:
