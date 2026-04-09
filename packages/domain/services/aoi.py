@@ -27,7 +27,6 @@ from packages.domain.utils import make_id
 
 
 COORDINATE_PATTERN = re.compile(r"-?\d+(?:\.\d+)?")
-MAX_AOI_AREA_KM2 = 2_000_000.0
 TARGET_CRS = "EPSG:4326"
 
 
@@ -190,12 +189,6 @@ def _finalize_geometry(
     bbox_bounds = _validate_bbox(list(polygonal.bounds))
     latitude_center = (bbox_bounds[1] + bbox_bounds[3]) / 2
     area_km2 = _deg2_to_km2(float(polygonal.area), latitude_center)
-    if area_km2 > MAX_AOI_AREA_KM2:
-        raise AppError.bad_request(
-            error_code=ErrorCode.AOI_AREA_TOO_LARGE,
-            message="AOI area is too large for the MVP workflow.",
-            detail={"area_km2": round(area_km2, 3), "max_area_km2": MAX_AOI_AREA_KM2},
-        )
 
     bbox_polygon = box(*bbox_bounds)
     return NormalizedAOI(

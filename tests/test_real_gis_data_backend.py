@@ -9,7 +9,6 @@ import rasterio
 from shapely.geometry import box, shape
 
 from packages.domain.config import get_settings
-from packages.domain.errors import AppError, ErrorCode
 from packages.domain.models import UploadedFileRecord
 from packages.domain.services.aoi import normalize_geojson_file, normalize_shp_file
 from packages.domain.services.processing_pipeline import run_processing_pipeline
@@ -263,7 +262,7 @@ def test_real_data_normalize_geojson_aoi(real_data_paths: dict[str, Path]) -> No
     assert len(normalized.bbox_bounds) == 4
 
 
-def test_real_data_normalize_shp_rejects_oversize_aoi(real_data_paths: dict[str, Path]) -> None:
+def test_real_data_normalize_shp_allows_large_aoi(real_data_paths: dict[str, Path]) -> None:
     shp_path = real_data_paths["province_shp"]
     uploaded_file = UploadedFileRecord(
         id="file_real_shp",
@@ -275,7 +274,9 @@ def test_real_data_normalize_shp_rejects_oversize_aoi(real_data_paths: dict[str,
         checksum="sha256-real-shp",
     )
 
-    with pytest.raises(AppError) as exc_info:
-        normalize_shp_file(uploaded_file)
+    normalized = normalize_shp_file(uploaded_file)
 
-    assert exc_info.value.error_code == ErrorCode.AOI_AREA_TOO_LARGE
+    assert normalized.source_type == "file_upload"
+    assert normalized.source_file_id == "file_real_shp"
+    assert normalized.area_km2 > 0
+    assert len(normalized.bbox_bounds) == 4
