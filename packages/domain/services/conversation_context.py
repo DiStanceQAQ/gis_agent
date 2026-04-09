@@ -9,6 +9,11 @@ from sqlalchemy.orm import Session
 from packages.domain.models import MessageRecord, TaskRunRecord, TaskSpecRevisionRecord, UploadedFileRecord
 from packages.domain.services.aoi import parse_bbox_text
 from packages.domain.services.intent import is_task_confirmation_message
+from packages.domain.services.session_memory import SessionMemoryService
+from packages.domain.services.session_memory_retrieval import (
+    SessionMemoryRetrievalResult,
+    SessionMemoryRetrievalService,
+)
 from packages.domain.services.task_revisions import ensure_initial_revision_for_task
 
 
@@ -42,6 +47,9 @@ class ConversationContextBundle:
     relevant_messages: list[dict[str, object]]
     explicit_signals: dict[str, object]
     trace: dict[str, object]
+    retrieved_revisions: list[dict[str, object]] = field(default_factory=list)
+    field_value_history: dict[str, list[dict[str, object]]] = field(default_factory=dict)
+    memory_snapshot: dict[str, object] | None = None
 
 
 def build_conversation_context(
@@ -52,28 +60,27 @@ def build_conversation_context(
     message_content: str,
     preferred_file_ids: list[str] | None = None,
 ) -> ConversationContextBundle:
-    current_message = _load_message(db, session_id=session_id, message_id=message_id)
-    current_message_created_at = current_message.created_at if current_message else None
-
-    latest_active_task, latest_active_revision = _load_latest_active_revision(db, session_id=session_id)
-    latest_active_revision_summary = (
-        latest_active_revision.understanding_summary if latest_active_revision else None
-    )
-
-    selected_upload_records = _select_recent_uploads(
+    snapshot, latest_active_task, latest_active_revision = _resolve_snapshot_context(
         db,
         session_id=session_id,
-        before_created_at=current_message_created_at,
-        preferred_file_ids=preferred_file_ids or [],
     )
-    selected_message_records = _select_relevant_messages(
-        db,
+    retrieval_result = SessionMemoryRetrievalService(db).retrieve(
         session_id=session_id,
         message_id=message_id,
-        current_message_created_at=current_message_created_at,
-        latest_active_task=latest_active_task,
-        latest_active_revision=latest_active_revision,
         message_content=message_content,
+        snapshot=snapshot,
+        preferred_file_ids=preferred_file_ids,
+    )
+    if latest_active_revision is None:
+        latest_active_revision = _resolve_active_revision_from_retrieval(
+            db,
+            retrieval_result=retrieval_result,
+        )
+    if latest_active_task is None and latest_active_revision is not None:
+        latest_active_task = db.get(TaskRunRecord, latest_active_revision.task_id)
+
+    latest_active_revision_summary = (
+        latest_active_revision.understanding_summary if latest_active_revision is not None else None
     )
 
     explicit_signals = _build_explicit_signals(
@@ -81,45 +88,16 @@ def build_conversation_context(
         latest_active_revision=latest_active_revision,
     )
 
-    trace = {
-        "session_id": session_id,
-        "message_id": message_id,
-        "latest_active_task": (
-            {
-                "task_id": latest_active_task.id,
-                "revision_id": latest_active_revision.id if latest_active_revision else None,
-                "reason": (
-                    "latest session task backfilled from legacy task_spec"
-                    if latest_active_revision is not None
-                    and latest_active_revision.change_type == "legacy_backfill"
-                    else "latest session task with an active revision"
-                ),
-            }
-            if latest_active_task is not None
-            else None
-        ),
-        "latest_active_revision": (
-            {
-                "revision_id": latest_active_revision.id,
-                "task_id": latest_active_revision.task_id,
-                "summary": latest_active_revision.understanding_summary,
-                "reason": (
-                    "lazy backfill from the latest legacy task_spec"
-                    if latest_active_revision.change_type == "legacy_backfill"
-                    else "most recent active revision in the session"
-                ),
-            }
-            if latest_active_revision is not None
-            else None
-        ),
-        "selected_files": [_serialize_upload_trace(record, preferred_file_ids or []) for record in selected_upload_records],
-        "selected_messages": [_serialize_message_trace(record, latest_active_task, latest_active_revision, message_id) for record in selected_message_records],
-        "signal_evidence": _build_signal_evidence(
-            message_content=message_content,
-            latest_active_revision=latest_active_revision,
-            explicit_signals=explicit_signals,
-        ),
-    }
+    trace = _build_context_trace(
+        session_id=session_id,
+        message_id=message_id,
+        snapshot=snapshot,
+        latest_active_task=latest_active_task,
+        latest_active_revision=latest_active_revision,
+        retrieval_result=retrieval_result,
+        explicit_signals=explicit_signals,
+        message_content=message_content,
+    )
 
     return ConversationContextBundle(
         session_id=session_id,
@@ -127,10 +105,13 @@ def build_conversation_context(
         latest_active_task_id=latest_active_task.id if latest_active_task is not None else None,
         latest_active_revision_id=latest_active_revision.id if latest_active_revision is not None else None,
         latest_active_revision_summary=latest_active_revision_summary,
-        uploaded_files=[_serialize_uploaded_file(record) for record in selected_upload_records],
-        relevant_messages=[_serialize_message(record) for record in selected_message_records],
+        uploaded_files=list(retrieval_result.uploads),
+        relevant_messages=list(retrieval_result.messages),
         explicit_signals=explicit_signals,
         trace=trace,
+        retrieved_revisions=list(retrieval_result.revisions),
+        field_value_history=dict(retrieval_result.field_value_history),
+        memory_snapshot=_serialize_snapshot(snapshot),
     )
 
 
@@ -182,6 +163,131 @@ def _load_latest_session_task_with_spec(
         .order_by(TaskRunRecord.created_at.desc(), TaskRunRecord.id.desc())
         .first()
     )
+
+
+def _resolve_snapshot_context(
+    db: Session,
+    *,
+    session_id: str,
+) -> tuple[object | None, TaskRunRecord | None, TaskSpecRevisionRecord | None]:
+    session_memory = SessionMemoryService(db)
+    snapshot = session_memory.get_latest_snapshot(session_id)
+    latest_active_task = db.get(TaskRunRecord, snapshot.active_task_id) if snapshot and snapshot.active_task_id else None
+    latest_active_revision = (
+        db.get(TaskSpecRevisionRecord, snapshot.active_revision_id)
+        if snapshot and snapshot.active_revision_id
+        else None
+    )
+
+    if latest_active_task is None and latest_active_revision is not None:
+        latest_active_task = db.get(TaskRunRecord, latest_active_revision.task_id)
+
+    if latest_active_revision is None and latest_active_task is not None:
+        latest_active_revision = (
+            db.query(TaskSpecRevisionRecord)
+            .filter(
+                TaskSpecRevisionRecord.task_id == latest_active_task.id,
+                TaskSpecRevisionRecord.is_active.is_(True),
+            )
+            .order_by(TaskSpecRevisionRecord.revision_number.desc())
+            .first()
+        )
+        if latest_active_revision is not None:
+            snapshot = session_memory.refresh_snapshot(
+                session_id,
+                task_id=latest_active_task.id,
+                revision_id=latest_active_revision.id,
+            )
+
+    if snapshot is None or (latest_active_task is None and latest_active_revision is None):
+        legacy_task, legacy_revision = _load_latest_active_revision(db, session_id=session_id)
+        if legacy_task is None and legacy_revision is None:
+            return snapshot, latest_active_task, latest_active_revision
+        snapshot = session_memory.refresh_snapshot(
+            session_id,
+            task_id=legacy_task.id if legacy_task is not None else None,
+            revision_id=legacy_revision.id if legacy_revision is not None else None,
+        )
+        return snapshot, legacy_task, legacy_revision
+
+    return snapshot, latest_active_task, latest_active_revision
+
+
+def _resolve_active_revision_from_retrieval(
+    db: Session,
+    *,
+    retrieval_result: SessionMemoryRetrievalResult,
+) -> TaskSpecRevisionRecord | None:
+    for payload in retrieval_result.revisions:
+        revision_id = payload.get("id")
+        if isinstance(revision_id, str) and revision_id:
+            revision = db.get(TaskSpecRevisionRecord, revision_id)
+            if revision is not None:
+                return revision
+    return None
+
+
+def _build_context_trace(
+    *,
+    session_id: str,
+    message_id: str,
+    snapshot: object | None,
+    latest_active_task: TaskRunRecord | None,
+    latest_active_revision: TaskSpecRevisionRecord | None,
+    retrieval_result: SessionMemoryRetrievalResult,
+    explicit_signals: dict[str, object],
+    message_content: str,
+) -> dict[str, object]:
+    retrieval_trace = dict(retrieval_result.trace or {})
+    upload_scoring = _build_scoring_lookup(retrieval_trace, "uploads")
+    message_scoring = _build_scoring_lookup(retrieval_trace, "messages")
+    return {
+        "session_id": session_id,
+        "message_id": message_id,
+        "snapshot": _serialize_snapshot(snapshot),
+        "latest_active_task": (
+            {
+                "task_id": latest_active_task.id,
+                "revision_id": latest_active_revision.id if latest_active_revision else None,
+                "reason": (
+                    "latest session task backfilled from legacy task_spec"
+                    if latest_active_revision is not None
+                    and latest_active_revision.change_type == "legacy_backfill"
+                    else "snapshot active task anchor"
+                ),
+            }
+            if latest_active_task is not None
+            else None
+        ),
+        "latest_active_revision": (
+            {
+                "revision_id": latest_active_revision.id,
+                "task_id": latest_active_revision.task_id,
+                "summary": latest_active_revision.understanding_summary,
+                "reason": (
+                    "lazy backfill from the latest legacy task_spec"
+                    if latest_active_revision.change_type == "legacy_backfill"
+                    else "snapshot active revision anchor"
+                ),
+            }
+            if latest_active_revision is not None
+            else None
+        ),
+        "selected_files": [
+            _serialize_upload_trace_from_payload(payload, upload_scoring.get(str(payload.get("id"))))
+            for payload in retrieval_result.uploads
+        ],
+        "selected_messages": [
+            _serialize_message_trace_from_payload(payload, message_scoring.get(str(payload.get("id"))))
+            for payload in retrieval_result.messages
+        ],
+        "signal_evidence": _build_signal_evidence(
+            message_content=message_content,
+            latest_active_revision=latest_active_revision,
+            explicit_signals=explicit_signals,
+        ),
+        "retrieval": retrieval_trace,
+    }
 
 
 def _select_recent_uploads(
@@ -383,10 +489,10 @@ def _build_revision_field_overlap(
     matched_fields: list[str] = []
     matched_signals: list[str] = []
 
-    def add_fields(*fields: str) -> None:
-        for field in fields:
-            if field in raw_spec and field not in matched_fields:
-                matched_fields.append(field)
+    def add_fields(*field_names: str) -> None:
+        for field_name in field_names:
+            if field_name in raw_spec and field_name not in matched_fields:
+                matched_fields.append(field_name)
 
     if upload_file_hint:
         add_fields("aoi_input", "aoi_source_type", "upload_slots")
@@ -471,6 +577,76 @@ def _build_signal_evidence(
             evidence.setdefault("latest_active_revision", []).append(summary)
 
     return evidence
+
+
+def _build_scoring_lookup(
+    retrieval_trace: dict[str, object],
+    section: str,
+) -> dict[str, dict[str, object]]:
+    scoring = retrieval_trace.get("scoring")
+    if not isinstance(scoring, dict):
+        return {}
+    items = scoring.get(section)
+    if not isinstance(items, list):
+        return {}
+    lookup: dict[str, dict[str, object]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_id = item.get("id")
+        if isinstance(item_id, str) and item_id:
+            lookup[item_id] = item
+    return lookup
+
+
+def _serialize_snapshot(snapshot: object | None) -> dict[str, object] | None:
+    if snapshot is None:
+        return None
+    payload = {
+        "snapshot_id": getattr(snapshot, "id", None),
+        "active_task_id": getattr(snapshot, "active_task_id", None),
+        "active_revision_id": getattr(snapshot, "active_revision_id", None),
+        "active_revision_number": getattr(snapshot, "active_revision_number", None),
+        "active_understanding_id": getattr(snapshot, "active_understanding_id", None),
+        "blocked_reason": getattr(snapshot, "blocked_reason", None),
+        "snapshot_version": getattr(snapshot, "snapshot_version", None),
+    }
+    open_missing_fields = getattr(snapshot, "open_missing_fields_json", None)
+    if isinstance(open_missing_fields, list):
+        payload["open_missing_fields"] = list(open_missing_fields)
+    else:
+        payload["open_missing_fields"] = []
+    return payload
+
+
+def _serialize_upload_trace_from_payload(
+    payload: dict[str, object],
+    scored: dict[str, object] | None,
+) -> dict[str, object]:
+    evidence = list(scored.get("evidence", [])) if isinstance(scored, dict) else []
+    reason = str(evidence[0]) if evidence else "retrieval ranking"
+    return {
+        "file_id": payload.get("id"),
+        "original_name": payload.get("original_name"),
+        "file_type": payload.get("file_type"),
+        "reason": reason,
+        "created_at": payload.get("created_at"),
+    }
+
+
+def _serialize_message_trace_from_payload(
+    payload: dict[str, object],
+    scored: dict[str, object] | None,
+) -> dict[str, object]:
+    evidence = list(scored.get("evidence", [])) if isinstance(scored, dict) else []
+    reason = str(evidence[0]) if evidence else "retrieval ranking"
+    return {
+        "message_id": payload.get("id"),
+        "role": payload.get("role"),
+        "linked_task_id": payload.get("linked_task_id"),
+        "reason": reason,
+        "created_at": payload.get("created_at"),
+    }
 
 
 def _serialize_uploaded_file(record: UploadedFileRecord) -> dict[str, object]:

@@ -15,6 +15,8 @@ from packages.domain.models import (
     UploadedFileRecord,
 )
 from packages.domain.services.conversation_context import build_conversation_context
+from packages.domain.services.session_memory import SessionMemoryService
+from packages.domain.services.session_memory_retrieval import SessionMemoryRetrievalResult
 from packages.domain.services.task_revisions import get_active_revision
 from packages.domain.utils import make_id
 
@@ -436,3 +438,108 @@ def test_build_conversation_context_returns_empty_bundle_for_minimal_session(
     assert bundle.explicit_signals["correction_hint"] is False
     assert bundle.trace["selected_files"] == []
     assert bundle.trace["selected_messages"] == []
+
+
+def test_build_conversation_context_consumes_snapshot_and_retrieval_result(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _create_session(db_session)
+    source_message = _create_message(
+        db_session,
+        session_id=session.id,
+        content="请基于我刚上传的边界文件分析 2024 年 6 月 NDVI。",
+    )
+    task, revision = _seed_active_task(db_session, session=session, source_message=source_message)
+    current_message = _create_message(
+        db_session,
+        session_id=session.id,
+        content="继续用之前那个上传文件。",
+        created_at=datetime.now(timezone.utc) + timedelta(minutes=1),
+    )
+
+    snapshot = SessionMemoryService(db_session).refresh_snapshot(
+        session.id,
+        task_id=task.id,
+        revision_id=revision.id,
+    )
+
+    calls: list[dict[str, object]] = []
+
+    class _FakeRetrievalService:
+        def __init__(self, db: Session) -> None:
+            self._db = db
+
+        def retrieve(
+            self,
+            *,
+            session_id: str,
+            message_id: str,
+            message_content: str,
+            snapshot,
+            preferred_file_ids=None,
+        ) -> SessionMemoryRetrievalResult:
+            calls.append(
+                {
+                    "session_id": session_id,
+                    "message_id": message_id,
+                    "message_content": message_content,
+                    "active_task_id": getattr(snapshot, "active_task_id", None),
+                }
+            )
+            return SessionMemoryRetrievalResult(
+                messages=[
+                    {
+                        "id": source_message.id,
+                        "role": "user",
+                        "content": source_message.content,
+                        "linked_task_id": task.id,
+                        "created_at": source_message.created_at.isoformat(),
+                    }
+                ],
+                revisions=[
+                    {
+                        "id": revision.id,
+                        "task_id": task.id,
+                        "revision_number": revision.revision_number,
+                        "understanding_summary": revision.understanding_summary,
+                        "created_at": revision.created_at.isoformat() if revision.created_at else None,
+                    }
+                ],
+                uploads=[
+                    {
+                        "id": "file_retrieved",
+                        "original_name": "retrieved.shp",
+                        "file_type": "shp",
+                        "storage_key": "/tmp/retrieved.shp",
+                        "size_bytes": 10,
+                        "created_at": current_message.created_at.isoformat(),
+                    }
+                ],
+                field_value_history={"aoi_input": [{"revision_id": revision.id, "value": "uploaded_aoi"}]},
+                trace={
+                    "selected_message_ids": [source_message.id],
+                    "selected_upload_ids": ["file_retrieved"],
+                    "selected_revision_ids": [revision.id],
+                },
+            )
+
+    monkeypatch.setattr(
+        "packages.domain.services.conversation_context.SessionMemoryRetrievalService",
+        _FakeRetrievalService,
+    )
+
+    bundle = build_conversation_context(
+        db_session,
+        session_id=session.id,
+        message_id=current_message.id,
+        message_content=current_message.content,
+    )
+
+    assert calls
+    assert calls[0]["active_task_id"] == snapshot.active_task_id
+    assert bundle.latest_active_task_id == task.id
+    assert bundle.latest_active_revision_id == revision.id
+    assert bundle.uploaded_files[0]["id"] == "file_retrieved"
+    assert bundle.relevant_messages[0]["id"] == source_message.id
+    assert bundle.trace["retrieval"]["selected_upload_ids"] == ["file_retrieved"]

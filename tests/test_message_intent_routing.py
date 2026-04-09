@@ -13,8 +13,13 @@ from packages.domain.models import (
     ArtifactRecord,
     DatasetCandidateRecord,
     MessageRecord,
+    SessionMemoryEventRecord,
+    SessionMemoryLinkRecord,
+    SessionMemoryRetrievalCacheRecord,
+    SessionMemorySummaryRecord,
     MessageUnderstandingRecord,
     SessionRecord,
+    SessionStateSnapshotRecord,
     TaskEventRecord,
     TaskRunRecord,
     TaskSpecRecord,
@@ -36,6 +41,7 @@ from packages.domain.services.task_state import (
 )
 from packages.domain.services.understanding import EvidenceItem, FieldConfidence, MessageUnderstanding
 from packages.schemas.task import ParsedTaskSpec
+from packages.domain.utils import make_id
 
 
 TASK_REQUEST = "帮我分析 2024 年 6 月 bbox(116.1,39.8,116.5,40.1) 的 NDVI，并先生成计划。"
@@ -178,6 +184,22 @@ def client() -> TestClient:
 
 def _cleanup_session(session_id: str) -> None:
     with SessionLocal() as db:
+        db.query(SessionMemoryEventRecord).filter(
+            SessionMemoryEventRecord.session_id == session_id
+        ).delete(synchronize_session=False)
+        db.query(SessionMemoryLinkRecord).filter(
+            SessionMemoryLinkRecord.session_id == session_id
+        ).delete(synchronize_session=False)
+        db.query(SessionMemoryRetrievalCacheRecord).filter(
+            SessionMemoryRetrievalCacheRecord.session_id == session_id
+        ).delete(synchronize_session=False)
+        db.query(SessionMemorySummaryRecord).filter(
+            SessionMemorySummaryRecord.session_id == session_id
+        ).delete(synchronize_session=False)
+        db.query(SessionStateSnapshotRecord).filter(
+            SessionStateSnapshotRecord.session_id == session_id
+        ).delete(synchronize_session=False)
+
         task_ids = [
             task_id
             for (task_id,) in db.query(TaskRunRecord.id)
@@ -652,6 +674,33 @@ def test_chat_with_uploaded_files_keeps_chat_mode_until_user_confirms_execution(
             assert (
                 db.query(TaskRunRecord).filter(TaskRunRecord.session_id == session_id).count() == 0
             )
+    finally:
+        _cleanup_session(session_id)
+
+
+def test_message_understanding_trace_contains_retrieval_context_builder_section(
+    client: TestClient,
+) -> None:
+    session_id = _create_session()
+    try:
+        file_id = _create_uploaded_vector_file(session_id, file_id=make_id("file"))
+        payload = _post_message(
+            client,
+            session_id,
+            "你能读到我上传的文件吗？",
+            file_ids=[file_id],
+        )
+
+        with SessionLocal() as db:
+            row = (
+                db.query(MessageUnderstandingRecord)
+                .filter(MessageUnderstandingRecord.message_id == payload["message_id"])
+                .one_or_none()
+            )
+            assert row is not None
+            builder_trace = dict(row.context_trace_json or {}).get("context_builder", {})
+            assert "retrieval" in builder_trace
+            assert file_id in builder_trace["retrieval"].get("selected_upload_ids", [])
     finally:
         _cleanup_session(session_id)
 
