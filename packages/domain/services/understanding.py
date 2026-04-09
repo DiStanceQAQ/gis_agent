@@ -8,12 +8,13 @@ from typing import Any, Literal
 from sqlalchemy.orm import Session
 
 from packages.domain.config import get_settings
-from packages.domain.models import MessageUnderstandingRecord
+from packages.domain.models import MessageUnderstandingRecord, TaskSpecRevisionRecord
 from packages.domain.services.conversation_context import ConversationContextBundle
 from packages.domain.services.session_memory_confidence import (
     build_history_features,
     compute_field_confidence,
 )
+from packages.domain.services.session_memory import SessionMemoryService
 from packages.domain.services.intent import IntentResult, classify_message_intent
 from packages.domain.services.parser import parse_task_message
 from packages.domain.utils import make_id
@@ -168,6 +169,7 @@ def understand_message(
             "latest_active_revision_id": context.latest_active_revision_id,
             "latest_active_revision_summary": context.latest_active_revision_summary,
             "explicit_signals": context.explicit_signals,
+            "history_features": context.history_features,
         },
         "context_builder": deepcopy(context.trace),
         "classifier": {
@@ -239,6 +241,10 @@ def persist_message_understanding(
         "session_id": session_id,
         "task_id": resolved_task_id,
         "derived_revision_id": resolved_revision_id,
+        "history_features_json": _extract_context_object(
+            understanding.trace,
+            ("context", "history_features"),
+        ),
         "intent": understanding.intent,
         "intent_confidence": understanding.intent_confidence,
         "understanding_summary": understanding.understanding_summary,
@@ -261,6 +267,21 @@ def persist_message_understanding(
             setattr(record, key, value)
 
     db_session.flush()
+    if resolved_revision_id:
+        SessionMemoryService(db_session).link_entities(
+            session_id=session_id,
+            source_type="understanding",
+            source_id=record.id,
+            target_type="revision",
+            target_id=resolved_revision_id,
+            link_type="derived_from",
+            weight=1.0,
+        )
+        revision = db_session.get(TaskSpecRevisionRecord, resolved_revision_id)
+        if revision is not None:
+            revision.parent_message_understanding_id = record.id
+            revision.history_features_json = dict(record.history_features_json or {})
+            db_session.flush()
     return record
 
 
@@ -762,6 +783,17 @@ def _extract_context_value(trace: dict[str, object], path: tuple[str, str]) -> s
     if isinstance(current, str) and current:
         return current
     return None
+
+
+def _extract_context_object(trace: dict[str, object], path: tuple[str, str]) -> dict[str, object]:
+    current: object = trace
+    for key in path:
+        if not isinstance(current, dict):
+            return {}
+        current = current.get(key)
+    if isinstance(current, dict):
+        return dict(current)
+    return {}
 
 
 def _apply_history_confidence(

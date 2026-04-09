@@ -23,6 +23,7 @@ from packages.domain.models import (
     TaskEventRecord,
     TaskRunRecord,
     TaskSpecRecord,
+    TaskSpecRevisionRecord,
     TaskStepRecord,
     UploadedFileRecord,
 )
@@ -208,6 +209,9 @@ def _cleanup_session(session_id: str) -> None:
         ]
 
         if task_ids:
+            db.query(TaskSpecRevisionRecord).filter(
+                TaskSpecRevisionRecord.task_id.in_(task_ids)
+            ).delete(synchronize_session=False)
             db.query(MessageUnderstandingRecord).filter(
                 MessageUnderstandingRecord.task_id.in_(task_ids)
             ).delete(synchronize_session=False)
@@ -262,6 +266,9 @@ def _create_uploaded_vector_file(
     created_at: datetime | None = None,
 ) -> str:
     with SessionLocal() as db:
+        db.query(UploadedFileRecord).filter(UploadedFileRecord.id == file_id).delete(
+            synchronize_session=False
+        )
         record = UploadedFileRecord(
             id=file_id,
             session_id=session_id,

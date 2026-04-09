@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from packages.domain.database import SessionLocal
 from packages.domain.models import (
     MessageRecord,
+    SessionMemoryLinkRecord,
     MessageUnderstandingRecord,
     SessionRecord,
     TaskRunRecord,
@@ -680,6 +681,84 @@ def test_persist_message_understanding_writes_and_upserts_row(
     assert row2.id == rows[0].id
     assert rows[0].intent == "task_followup"
     assert rows[0].derived_revision_id == "rev_002"
+
+
+def test_persist_message_understanding_stores_history_features_and_link(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: Session,
+) -> None:
+    session = _create_session(db_session)
+    message = _create_message(
+        db_session,
+        session_id=session.id,
+        content="继续用江西。",
+    )
+
+    monkeypatch.setattr(
+        "packages.domain.services.understanding.classify_message_intent",
+        lambda *args, **kwargs: IntentResult(intent="task", confidence=0.91, reason="task-like"),
+    )
+    monkeypatch.setattr(
+        "packages.domain.services.understanding.parse_task_message",
+        lambda *args, **kwargs: ParsedTaskSpec(
+            aoi_input="江西",
+            aoi_source_type="admin_name",
+            analysis_type="NDVI",
+        ),
+    )
+
+    understanding = understand_message(
+        message.content,
+        context=_bundle(
+            session_id=session.id,
+            message_id=message.id,
+            latest_active_task_id=None,
+            latest_active_revision_id=None,
+            latest_active_revision_summary=None,
+            explicit_signals={
+                "upload_file_hint": False,
+                "bbox_hint": False,
+                "admin_region_hint": True,
+                "confirmation_hint": False,
+                "correction_hint": True,
+                "revision_field_overlap": {
+                    "revision_id": "rev_prior",
+                    "fields": ["aoi_input"],
+                    "matched_signals": ["correction_hint"],
+                },
+            },
+            history_features={
+                "aoi_input": {
+                    "correction_count": 2,
+                    "accepted_count": 3,
+                    "contradiction_count": 0,
+                    "last_confirmed_revision_number": 3,
+                }
+            },
+        ),
+        db_session=db_session,
+    )
+
+    row = persist_message_understanding(
+        db_session,
+        message_id=message.id,
+        session_id=session.id,
+        derived_revision_id="rev_010",
+        understanding=understanding,
+    )
+
+    assert row.history_features_json["aoi_input"]["accepted_count"] == 3
+    link = (
+        db_session.query(SessionMemoryLinkRecord)
+        .filter(
+            SessionMemoryLinkRecord.source_type == "understanding",
+            SessionMemoryLinkRecord.source_id == row.id,
+            SessionMemoryLinkRecord.target_type == "revision",
+            SessionMemoryLinkRecord.target_id == "rev_010",
+        )
+        .one_or_none()
+    )
+    assert link is not None
 
 
 def test_chat_like_message_persists_without_parsed_spec(

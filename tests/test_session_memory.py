@@ -178,6 +178,28 @@ def test_session_memory_model_relationship_accessors_exist() -> None:
     assert "message" in retrieval_relationships
 
 
+def test_session_memory_link_entities_make_revision_queries_bidirectional(
+    db_session: Session,
+) -> None:
+    session = SessionRecord(id=make_id("ses"), title="link-test", status="active")
+    db_session.add(session)
+    db_session.flush()
+
+    service = SessionMemoryService(db_session)
+    service.link_entities(
+        session_id=session.id,
+        source_type="understanding",
+        source_id="und_1",
+        target_type="revision",
+        target_id="rev_1",
+        link_type="derived_from",
+        weight=1.0,
+    )
+
+    linked = service.list_links_for_target(target_type="revision", target_id="rev_1")
+    assert any(item.source_id == "und_1" for item in linked)
+
+
 def test_session_memory_schema_payload_models_validate() -> None:
     event = SessionMemoryEventPayload.model_validate(
         {

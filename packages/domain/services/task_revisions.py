@@ -137,7 +137,8 @@ def activate_revision(
     if mirror_legacy_task_spec:
         _mirror_revision_to_task_spec(db, task=locked_task, revision=revision)
     db.flush()
-    SessionMemoryService(db).record_event(
+    memory = SessionMemoryService(db)
+    memory.record_event(
         session_id=locked_task.session_id,
         event_type="revision_activated",
         message_id=revision.source_message_id,
@@ -147,6 +148,16 @@ def activate_revision(
             "revision_number": revision.revision_number,
             "change_type": revision.change_type,
         },
+    )
+    memory.link_entities(
+        session_id=locked_task.session_id,
+        source_type="message",
+        source_id=revision.source_message_id,
+        target_type="revision",
+        target_id=revision.id,
+        link_type="derived_from",
+        weight=1.0,
+        payload={"revision_number": revision.revision_number},
     )
     return RevisionActivationResult(
         revision_id=revision.id,

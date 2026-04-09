@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from packages.domain.models import (
     MessageUnderstandingRecord,
     SessionMemoryEventRecord,
+    SessionMemoryLinkRecord,
     SessionStateSnapshotRecord,
     TaskSpecRevisionRecord,
 )
@@ -50,6 +51,72 @@ class SessionMemoryService:
             self._db.query(SessionStateSnapshotRecord)
             .filter(SessionStateSnapshotRecord.session_id == session_id)
             .one_or_none()
+        )
+
+    def link_entities(
+        self,
+        *,
+        session_id: str,
+        source_type: str,
+        source_id: str,
+        target_type: str,
+        target_id: str,
+        link_type: str,
+        weight: float | None = None,
+        payload: dict[str, object] | None = None,
+    ) -> SessionMemoryLinkRecord:
+        existing = (
+            self._db.query(SessionMemoryLinkRecord)
+            .filter(
+                SessionMemoryLinkRecord.session_id == session_id,
+                SessionMemoryLinkRecord.source_type == source_type,
+                SessionMemoryLinkRecord.source_id == source_id,
+                SessionMemoryLinkRecord.target_type == target_type,
+                SessionMemoryLinkRecord.target_id == target_id,
+                SessionMemoryLinkRecord.link_type == link_type,
+            )
+            .one_or_none()
+        )
+        if existing is not None:
+            existing.weight = weight
+            existing.payload_json = dict(payload or {})
+            self._db.flush()
+            return existing
+
+        record = SessionMemoryLinkRecord(
+            id=make_id("lnk"),
+            session_id=session_id,
+            source_type=source_type,
+            source_id=source_id,
+            target_type=target_type,
+            target_id=target_id,
+            link_type=link_type,
+            weight=weight,
+            payload_json=dict(payload or {}),
+        )
+        self._db.add(record)
+        self._db.flush()
+        return record
+
+    def list_links_for_target(
+        self,
+        *,
+        target_type: str,
+        target_id: str,
+        session_id: str | None = None,
+    ) -> list[SessionMemoryLinkRecord]:
+        query = self._db.query(SessionMemoryLinkRecord).filter(
+            SessionMemoryLinkRecord.target_type == target_type,
+            SessionMemoryLinkRecord.target_id == target_id,
+        )
+        if session_id is not None:
+            query = query.filter(SessionMemoryLinkRecord.session_id == session_id)
+        return (
+            query.order_by(
+                SessionMemoryLinkRecord.created_at.desc(),
+                SessionMemoryLinkRecord.id.desc(),
+            )
+            .all()
         )
 
     def refresh_snapshot(
