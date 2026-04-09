@@ -36,6 +36,7 @@ _ANALYSIS_TYPE_ALIASES: dict[str, AnalysisType] = {
     "crop": "CLIP",
 }
 
+_TEMPORAL_ANALYSIS_TYPES: set[AnalysisType] = {"NDVI", "NDWI"}
 _FILTER_METHODS = {"median", "mean", "gaussian"}
 _SLOPE_PRODUCTS = {"slope", "aspect", "slope_aspect"}
 
@@ -68,6 +69,10 @@ def normalize_analysis_type(value: Any) -> AnalysisType:
     raise ValueError(
         "analysis_type must be one of workflow/ndvi/ndwi/band_math/filter/slope_aspect/buffer/clip"
     )
+
+
+def analysis_type_requires_time_range(analysis_type: AnalysisType) -> bool:
+    return analysis_type in _TEMPORAL_ANALYSIS_TYPES
 
 
 def normalize_operation_params(analysis_type: AnalysisType, value: Any) -> dict[str, Any]:

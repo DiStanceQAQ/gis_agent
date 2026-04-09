@@ -439,6 +439,82 @@ def test_parse_task_message_accepts_llm_clip_payload_without_time_range(
     get_settings.cache_clear()
 
 
+def test_parse_task_message_filters_llm_time_range_missing_hint_for_clip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GIS_AGENT_LLM_API_KEY", "test_key")
+    monkeypatch.setenv("GIS_AGENT_LLM_PARSER_ENABLED", "true")
+    monkeypatch.setenv("GIS_AGENT_LLM_PARSER_LEGACY_FALLBACK", "false")
+    get_settings.cache_clear()
+
+    def _fake_chat_json(self, **kwargs):  # noqa: ANN001
+        del self, kwargs
+        return _mock_llm_response(
+            {
+                "aoi_input": None,
+                "aoi_source_type": None,
+                "time_range": None,
+                "requested_dataset": None,
+                "analysis_type": "clip",
+                "preferred_output": "geotiff",
+                "user_priority": None,
+                "need_confirmation": True,
+                "missing_fields": ["time_range"],
+                "clarification_message": "请补充时间范围。",
+                "operation_params": {
+                    "source_path": "/Users/ljn/gis_data/CACD-2020.tif",
+                    "clip_path": "/Users/ljn/gis_data/区划/xinjiang.geojson",
+                },
+            }
+        )
+
+    monkeypatch.setattr("packages.domain.services.parser.LLMClient.chat_json", _fake_chat_json)
+    parsed = parse_task_message("把 tif 裁剪到新疆范围。", has_upload=False)
+
+    assert parsed.analysis_type == "CLIP"
+    assert parsed.need_confirmation is False
+    assert parsed.missing_fields == []
+    get_settings.cache_clear()
+
+
+def test_parse_task_message_filters_llm_time_range_missing_hint_for_workflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GIS_AGENT_LLM_API_KEY", "test_key")
+    monkeypatch.setenv("GIS_AGENT_LLM_PARSER_ENABLED", "true")
+    monkeypatch.setenv("GIS_AGENT_LLM_PARSER_LEGACY_FALLBACK", "false")
+    get_settings.cache_clear()
+
+    def _fake_chat_json(self, **kwargs):  # noqa: ANN001
+        del self, kwargs
+        return _mock_llm_response(
+            {
+                "aoi_input": "uploaded_aoi",
+                "aoi_source_type": "file_upload",
+                "time_range": None,
+                "requested_dataset": None,
+                "analysis_type": "workflow",
+                "preferred_output": ["geotiff"],
+                "user_priority": "balanced",
+                "need_confirmation": True,
+                "missing_fields": ["time_range"],
+                "clarification_message": "请补充时间范围。",
+                "operation_params": {
+                    "operations": ["raster.reproject", "raster.resample"],
+                    "source_path": "/Users/ljn/gis_data/CACD-2020.tif",
+                },
+            }
+        )
+
+    monkeypatch.setattr("packages.domain.services.parser.LLMClient.chat_json", _fake_chat_json)
+    parsed = parse_task_message("请基于上传文件做重投影并重采样。", has_upload=True)
+
+    assert parsed.analysis_type == "WORKFLOW"
+    assert parsed.need_confirmation is False
+    assert parsed.missing_fields == []
+    get_settings.cache_clear()
+
+
 def test_parse_task_message_llm_clip_payload_empty_paths_falls_back_to_message_paths(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

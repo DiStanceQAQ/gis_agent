@@ -49,6 +49,7 @@ TASK_REQUEST = "帮我分析 2024 年 6 月 bbox(116.1,39.8,116.5,40.1) 的 NDVI
 FOLLOWUP_REQUEST = "改成 2023 年 6 月"
 UPLOAD_TASK_REQUEST = "请基于我刚上传的边界文件分析 2024 年 6 月 NDVI。"
 CLIP_TASK_REQUEST = "请把 /Users/ljn/gis_data/CACD-2020.tif 裁剪到新疆范围，并先给我计划。"
+WORKFLOW_TASK_REQUEST = "请基于上传文件做重投影并重采样。"
 
 
 @pytest.fixture(autouse=True)
@@ -64,7 +65,7 @@ def _patched_message_flow(monkeypatch: pytest.MonkeyPatch) -> None:
         del kwargs
         if is_task_confirmation_message(message):
             return IntentResult(intent="task", confidence=0.99, reason="用户已明确确认执行任务。")
-        if "NDVI" in message or "改成" in message or "裁剪" in message:
+        if "NDVI" in message or "改成" in message or "裁剪" in message or "重投影" in message:
             return IntentResult(intent="task", confidence=0.95, reason="用户正在发起遥感分析任务。")
         return IntentResult(intent="chat", confidence=0.91, reason="用户正在进行普通对话。")
 
@@ -124,6 +125,25 @@ def _patched_message_flow(monkeypatch: pytest.MonkeyPatch) -> None:
                 need_confirmation=True,
                 missing_fields=["aoi", "time_range"],
                 clarification_message="请补充 AOI 和时间范围。",
+                created_from="tests",
+            )
+        if message == WORKFLOW_TASK_REQUEST:
+            assert has_upload is True
+            return ParsedTaskSpec(
+                aoi_input="uploaded_aoi",
+                aoi_source_type="file_upload",
+                time_range=None,
+                requested_dataset=None,
+                analysis_type="WORKFLOW",
+                preferred_output=["geotiff"],
+                user_priority="balanced",
+                operation_params={
+                    "operations": ["raster.reproject", "raster.resample"],
+                    "source_path": "/Users/ljn/gis_data/CACD-2020.tif",
+                },
+                need_confirmation=False,
+                missing_fields=[],
+                clarification_message=None,
                 created_from="tests",
             )
         assert message == UPLOAD_TASK_REQUEST
@@ -788,6 +808,25 @@ def test_incomplete_request_surfaces_missing_fields_without_legacy_confirmation_
         assert payload["mode"] == "chat"
         assert payload["task_id"] is None
         assert payload["awaiting_task_confirmation"] is False
+    finally:
+        _cleanup_session(session_id)
+
+
+def test_workflow_request_does_not_surface_time_range_when_operations_are_ready(
+    client: TestClient,
+) -> None:
+    session_id = _create_session()
+    try:
+        file_id = _create_uploaded_vector_file(session_id)
+        payload = _post_message(
+            client,
+            session_id,
+            WORKFLOW_TASK_REQUEST,
+            file_ids=[file_id],
+        )
+
+        assert payload["response_mode"] != "ask_missing_fields"
+        assert "time_range" not in payload["response_payload"].get("missing_fields", [])
     finally:
         _cleanup_session(session_id)
 

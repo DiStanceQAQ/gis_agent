@@ -5,6 +5,7 @@ from typing import Protocol
 
 from packages.domain.config import get_settings
 from packages.domain.services.understanding import MessageUnderstanding, ResponseMode
+from packages.schemas.analysis import analysis_type_requires_time_range, normalize_analysis_type
 
 
 KEY_FIELDS: tuple[str, ...] = ("aoi_input", "aoi_source_type", "time_range", "analysis_type")
@@ -365,10 +366,11 @@ def _required_fields(
     understanding: MessageUnderstanding,
     active_revision: ActiveRevisionLike | None,
 ) -> list[str]:
-    analysis_type = _analysis_type(understanding, active_revision)
-    if analysis_type == "CLIP":
-        return ["aoi_input", "aoi_source_type", "analysis_type"]
-    return list(KEY_FIELDS)
+    analysis_type = normalize_analysis_type(_analysis_type(understanding, active_revision))
+    required_fields = ["aoi_input", "aoi_source_type", "analysis_type"]
+    if analysis_type_requires_time_range(analysis_type):
+        return ["aoi_input", "aoi_source_type", "time_range", "analysis_type"]
+    return required_fields
 
 
 def _analysis_type(

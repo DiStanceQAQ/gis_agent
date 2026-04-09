@@ -7,8 +7,9 @@
 1. 从用户输入提取 `analysis_type` 与可执行参数：`aoi_input`、`aoi_source_type`、`time_range`、`operation_params`、`preferred_output`。  
 2. 按任务类型判断缺失信息：  
    - 当 `analysis_type=clip`：优先要求 `operation_params.source_path` 与 `operation_params.clip_path`，不强制要求 `time_range`。  
-   - 当 `analysis_type=workflow`：优先要求 `operation_params.operations`（由操作名组成）。  
-   - 其他分析类型：默认要求 `aoi_input` 与 `time_range`。  
+   - 当 `analysis_type=workflow`：优先要求 `operation_params.operations`（由操作名组成），不默认追问 `time_range`。  
+   - 当 `analysis_type` 属于 `ndvi`、`ndwi` 这类时序分析：默认要求 `aoi_input`、`aoi_source_type` 与 `time_range`。  
+   - 当 `analysis_type` 属于 `band_math`、`filter`、`slope_aspect`、`buffer` 这类地理处理：默认优先要求空间/操作参数，不默认追问 `time_range`。  
    若缺失则设置 `need_confirmation=true` 并提供 `missing_fields` 与 `clarification_message`。  
 3. 保留 `requested_dataset`、`user_priority`、`operation_params`。
 

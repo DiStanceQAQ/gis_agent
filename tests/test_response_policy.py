@@ -154,7 +154,7 @@ def test_task_correction_with_structure_shows_revision() -> None:
     assert decision.execution_blocked is False
     assert decision.requires_revision_creation is True
     assert decision.requires_execution is False
-    assert decision.editable_fields == list(KEY_FIELDS)
+    assert decision.editable_fields == ["aoi_input", "aoi_source_type", "analysis_type"]
     assert decision.response_payload["revision_number"] == 1
 
 
@@ -314,6 +314,34 @@ def test_clip_does_not_require_time_range_when_other_required_fields_are_high() 
     assert decision.response_payload["required_fields"] == ["aoi_input", "aoi_source_type", "analysis_type"]
 
 
+def test_workflow_does_not_require_time_range_when_operations_are_ready() -> None:
+    understanding = _understanding(
+        intent="new_task",
+        field_scores={
+            "aoi_input": 0.93,
+            "aoi_source_type": 0.92,
+            "time_range": 0.0,
+            "analysis_type": 0.95,
+        },
+        parsed_spec=ParsedTaskSpec(
+            aoi_input="uploaded_aoi",
+            aoi_source_type="file_upload",
+            analysis_type="WORKFLOW",
+            operation_params={"operations": ["raster.reproject", "raster.resample"]},
+        ),
+    )
+
+    decision = decide_response(
+        understanding,
+        active_revision=None,
+        require_approval=False,
+    )
+
+    assert decision.mode == "execute_now"
+    assert "time_range" not in decision.response_payload["missing_fields"]
+    assert decision.response_payload["required_fields"] == ["aoi_input", "aoi_source_type", "analysis_type"]
+
+
 def test_blocked_active_revision_forces_non_executable_response() -> None:
     understanding = _understanding(
         intent="new_task",
@@ -354,4 +382,4 @@ def test_blocked_active_revision_forces_non_executable_response() -> None:
     assert decision.requires_execution is False
     assert decision.response_payload["execution_blocked"] is True
     assert decision.response_payload["blocked_reason"] == "AOI normalization failed: uploaded boundary is invalid"
-    assert decision.editable_fields == list(KEY_FIELDS)
+    assert decision.editable_fields == ["aoi_input", "aoi_source_type", "analysis_type"]

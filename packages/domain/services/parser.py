@@ -17,7 +17,11 @@ from packages.domain.errors import ErrorCode
 from packages.domain.logging import get_logger
 from packages.domain.services.llm_client import LLMClient, LLMClientError
 from packages.domain.services.aoi import parse_bbox_text
-from packages.schemas.analysis import AnalysisType, normalize_analysis_type
+from packages.schemas.analysis import (
+    AnalysisType,
+    analysis_type_requires_time_range,
+    normalize_analysis_type,
+)
 from packages.schemas.agent import LLMParsedSpec
 from packages.schemas.task import ParsedTaskSpec
 
@@ -473,6 +477,15 @@ def _normalize_missing_field_hints(fields: list[str]) -> list[str]:
     return list(dict.fromkeys(cleaned))
 
 
+def _filter_missing_fields_for_analysis_type(
+    fields: list[str], *, analysis_type: AnalysisType
+) -> list[str]:
+    filtered = list(fields)
+    if not analysis_type_requires_time_range(analysis_type):
+        filtered = [field for field in filtered if field != "time_range"]
+    return filtered
+
+
 def _collect_missing_fields(
     *,
     analysis_type: AnalysisType,
@@ -530,7 +543,7 @@ def _collect_missing_fields(
     missing_fields: list[str] = []
     if not aoi_input:
         missing_fields.append("aoi")
-    if time_range is None:
+    if analysis_type_requires_time_range(analysis_type) and time_range is None:
         missing_fields.append("time_range")
 
     if settings.local_files_only_mode:
@@ -713,7 +726,8 @@ def _build_parser_user_prompt(
         "required_fields_hint": {
             "clip": ["analysis_type", "operation_params.source_path", "operation_params.clip_path"],
             "workflow": ["analysis_type", "operation_params.operations"],
-            "other": ["aoi_input", "aoi_source_type", "time_range"],
+            "temporal": ["aoi_input", "aoi_source_type", "time_range"],
+            "geoprocessing": ["aoi_input", "aoi_source_type"],
         },
         "required_fields": [
             "aoi_input",
@@ -866,7 +880,10 @@ def _normalize_llm_parsed_spec(
     operation_params = payload.operation_params or {}
     preferred_output = list(dict.fromkeys(payload.preferred_output or ["png_map", "methods_text"]))
     user_priority = payload.user_priority
-    missing_fields = _normalize_missing_field_hints(list(payload.missing_fields))
+    missing_fields = _filter_missing_fields_for_analysis_type(
+        _normalize_missing_field_hints(list(payload.missing_fields)),
+        analysis_type=analysis_type,
+    )
 
     if analysis_type == "CLIP":
         inferred_operation_params = _extract_clip_operation_params(
@@ -918,7 +935,10 @@ def _normalize_llm_parsed_spec(
             has_upload=has_upload,
         )
     )
-    missing_fields = _normalize_missing_field_hints(missing_fields)
+    missing_fields = _filter_missing_fields_for_analysis_type(
+        _normalize_missing_field_hints(missing_fields),
+        analysis_type=analysis_type,
+    )
     need_confirmation = bool(missing_fields)
 
     return ParsedTaskSpec(
