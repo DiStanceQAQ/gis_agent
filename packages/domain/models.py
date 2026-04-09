@@ -155,6 +155,12 @@ class TaskSpecRevisionRecord(Base):
     revision_number: Mapped[int] = mapped_column(Integer)
     base_revision_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     source_message_id: Mapped[str] = mapped_column(ForeignKey("messages.id"), index=True)
+    lineage_root_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    parent_message_understanding_id: Mapped[str | None] = mapped_column(
+        ForeignKey("message_understandings.id"),
+        nullable=True,
+        index=True,
+    )
     change_type: Mapped[str] = mapped_column(String(32))
     is_active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     understanding_intent: Mapped[str] = mapped_column(String(32))
@@ -167,6 +173,7 @@ class TaskSpecRevisionRecord(Base):
     execution_blocked: Mapped[bool] = mapped_column(Boolean, default=False)
     execution_blocked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     understanding_trace_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    history_features_json: Mapped[dict] = mapped_column(JSON, default=dict)
     user_revision_count: Mapped[int] = mapped_column(Integer, default=0)
     user_last_revision_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -187,6 +194,17 @@ class MessageUnderstandingRecord(Base):
     session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id"), index=True)
     task_id: Mapped[str | None] = mapped_column(ForeignKey("task_runs.id"), nullable=True, index=True)
     derived_revision_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    snapshot_id: Mapped[str | None] = mapped_column(
+        ForeignKey("session_state_snapshots.id"),
+        nullable=True,
+        index=True,
+    )
+    summary_id: Mapped[str | None] = mapped_column(
+        ForeignKey("session_memory_summaries.id"),
+        nullable=True,
+        index=True,
+    )
+    lineage_root_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     intent: Mapped[str] = mapped_column(String(32))
     intent_confidence: Mapped[float] = mapped_column(Float)
     understanding_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -194,6 +212,7 @@ class MessageUnderstandingRecord(Base):
     field_confidences_json: Mapped[dict] = mapped_column(JSON, default=dict)
     field_evidence_json: Mapped[dict] = mapped_column(JSON, default=dict)
     context_trace_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    history_features_json: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     message: Mapped[MessageRecord] = relationship(back_populates="understanding")
@@ -227,6 +246,78 @@ class AOIRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     task: Mapped[TaskRunRecord] = relationship(back_populates="aoi")
+
+
+class SessionMemoryEventRecord(Base):
+    __tablename__ = "session_memory_events"
+    __table_args__ = (
+        Index("ix_session_memory_events_session_created", "session_id", "created_at"),
+        Index("ix_session_memory_events_message_id", "message_id"),
+        Index("ix_session_memory_events_revision_id", "revision_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id"), nullable=False)
+    message_id: Mapped[str | None] = mapped_column(ForeignKey("messages.id"), nullable=True)
+    revision_id: Mapped[str | None] = mapped_column(ForeignKey("task_spec_revisions.id"), nullable=True)
+    event_type: Mapped[str] = mapped_column(String(64))
+    payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SessionStateSnapshotRecord(Base):
+    __tablename__ = "session_state_snapshots"
+    __table_args__ = (
+        Index("ux_session_state_snapshots_session", "session_id", unique=True),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id"), nullable=False)
+    lineage_root_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    active_revision_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    active_summary_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    state_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    history_features_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class SessionMemorySummaryRecord(Base):
+    __tablename__ = "session_memory_summaries"
+    __table_args__ = (
+        Index("ix_session_memory_summaries_session_created", "session_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id"), nullable=False)
+    summary_type: Mapped[str] = mapped_column(String(32))
+    summary_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    summary_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    source_event_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SessionMemoryLinkRecord(Base):
+    __tablename__ = "session_memory_links"
+    __table_args__ = (
+        Index("ix_session_memory_links_session_source", "session_id", "source_type", "source_id"),
+        Index("ix_session_memory_links_session_target", "session_id", "target_type", "target_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id"), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(32))
+    source_id: Mapped[str] = mapped_column(String(32))
+    target_type: Mapped[str] = mapped_column(String(32))
+    target_id: Mapped[str] = mapped_column(String(32))
+    link_type: Mapped[str] = mapped_column(String(32))
+    payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    weight: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class DatasetCandidateRecord(Base):
