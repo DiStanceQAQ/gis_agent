@@ -15,6 +15,7 @@ from packages.domain.models import (
     SessionRecord,
     SessionStateSnapshotRecord,
     TaskRunRecord,
+    TaskSpecRecord,
     TaskSpecRevisionRecord,
 )
 from packages.domain.services.session_memory import SessionMemoryService
@@ -50,6 +51,9 @@ def _cleanup_session_memory(session_id: str) -> None:
         db.query(SessionStateSnapshotRecord).filter(
             SessionStateSnapshotRecord.session_id == session_id
         ).delete(synchronize_session=False)
+        db.query(TaskSpecRecord).filter(TaskSpecRecord.task_id.in_(task_ids)).delete(
+            synchronize_session=False
+        )
         db.query(TaskRunRecord).filter(TaskRunRecord.session_id == session_id).delete(
             synchronize_session=False
         )
@@ -219,5 +223,66 @@ def test_get_session_memory_lazily_backfills_snapshot_for_legacy_session() -> No
         payload = response.json()
         assert payload["snapshot"]["active_revision_id"] == revision_id
         assert payload["latest_summary"]["summary_kind"] == "rolling_context"
+    finally:
+        _cleanup_session_memory(session_id)
+
+
+def test_get_session_memory_materializes_legacy_task_spec_without_revision() -> None:
+    with SessionLocal() as db:
+        session = SessionRecord(id=make_id("ses"), title="legacy-task-spec-memory", status="active")
+        message = MessageRecord(
+            id=make_id("msg"),
+            session_id=session.id,
+            role="user",
+            content="分析江西",
+            created_at=datetime.now(timezone.utc),
+        )
+        task = TaskRunRecord(
+            id=make_id("task"),
+            session_id=session.id,
+            user_message_id=message.id,
+            status="queued",
+            current_step="planning",
+            analysis_type="WORKFLOW",
+        )
+        task_spec = TaskSpecRecord(
+            task_id=task.id,
+            aoi_input="江西",
+            aoi_source_type="admin_name",
+            preferred_output=["png_map"],
+            user_priority="balanced",
+            need_confirmation=True,
+            raw_spec_json={
+                "aoi_input": "江西",
+                "aoi_source_type": "admin_name",
+                "analysis_type": "WORKFLOW",
+                "missing_fields": ["time_range"],
+                "preferred_output": ["png_map"],
+                "user_priority": "balanced",
+                "need_confirmation": True,
+            },
+        )
+        task.task_spec = task_spec
+        db.add_all([session, message, task, task_spec])
+        db.commit()
+        session_id = session.id
+        task_id = task.id
+
+    try:
+        with TestClient(app) as client:
+            response = client.get(f"/api/v1/sessions/{session_id}/memory")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["snapshot"]["active_revision_id"] is not None
+        assert payload["latest_summary"]["summary_kind"] == "rolling_context"
+
+        with SessionLocal() as db:
+            revisions = (
+                db.query(TaskSpecRevisionRecord)
+                .filter(TaskSpecRevisionRecord.task_id == task_id)
+                .all()
+            )
+            assert len(revisions) == 1
+            assert revisions[0].change_type == "legacy_backfill"
     finally:
         _cleanup_session_memory(session_id)
