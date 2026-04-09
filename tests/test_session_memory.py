@@ -10,6 +10,11 @@ from packages.schemas.session_memory import (
 )
 
 
+def _fk_targets(table_name: str, column_name: str) -> set[str]:
+    table = Base.metadata.tables[table_name]
+    return {fk.target_fullname for fk in table.c[column_name].foreign_keys}
+
+
 def test_session_memory_tables_are_registered() -> None:
     expected = {
         "session_memory_events",
@@ -109,6 +114,46 @@ def test_lineage_columns_added_to_understandings_and_revisions() -> None:
         assert column in revisions.c
 
 
+def test_session_memory_foreign_key_wiring() -> None:
+    assert _fk_targets("session_memory_events", "session_id") == {"sessions.id"}
+    assert _fk_targets("session_memory_events", "message_id") == {"messages.id"}
+    assert _fk_targets("session_memory_events", "task_id") == {"task_runs.id"}
+    assert _fk_targets("session_memory_events", "revision_id") == {"task_spec_revisions.id"}
+
+    assert _fk_targets("message_understandings", "snapshot_id") == {"session_state_snapshots.id"}
+    assert _fk_targets("message_understandings", "summary_id") == {"session_memory_summaries.id"}
+    assert _fk_targets("task_spec_revisions", "parent_message_understanding_id") == {"message_understandings.id"}
+
+    assert _fk_targets("session_memory_retrieval_cache", "session_id") == {"sessions.id"}
+    assert _fk_targets("session_memory_retrieval_cache", "message_id") == {"messages.id"}
+
+
+def test_session_memory_model_relationship_accessors_exist() -> None:
+    session_relationships = set(models.SessionRecord.__mapper__.relationships.keys())
+    assert "session_memory_events" in session_relationships
+    assert "session_state_snapshots" in session_relationships
+    assert "session_memory_summaries" in session_relationships
+    assert "session_memory_links" in session_relationships
+    assert "session_memory_retrieval_cache_entries" in session_relationships
+
+    understanding_relationships = set(models.MessageUnderstandingRecord.__mapper__.relationships.keys())
+    assert "snapshot" in understanding_relationships
+    assert "summary" in understanding_relationships
+
+    revision_relationships = set(models.TaskSpecRevisionRecord.__mapper__.relationships.keys())
+    assert "parent_message_understanding" in revision_relationships
+
+    event_relationships = set(models.SessionMemoryEventRecord.__mapper__.relationships.keys())
+    assert "session" in event_relationships
+    assert "message" in event_relationships
+    assert "task" in event_relationships
+    assert "revision" in event_relationships
+
+    retrieval_relationships = set(models.SessionMemoryRetrievalCacheRecord.__mapper__.relationships.keys())
+    assert "session" in retrieval_relationships
+    assert "message" in retrieval_relationships
+
+
 def test_session_memory_schema_payload_models_validate() -> None:
     event = SessionMemoryEventPayload.model_validate(
         {
@@ -165,3 +210,28 @@ def test_session_memory_schema_payload_models_validate() -> None:
     )
     assert link.link_type == "derived_revision"
     assert link.weight == 0.8
+
+
+def test_session_memory_schema_payload_model_defaults() -> None:
+    event = SessionMemoryEventPayload(event_type="message_understanding_created")
+    assert event.event_payload == {}
+
+    snapshot = SessionStateSnapshotPayload()
+    assert snapshot.open_missing_fields == []
+    assert snapshot.field_history_rollup == {}
+    assert snapshot.user_preference_profile == {}
+    assert snapshot.risk_profile == {}
+    assert snapshot.snapshot_version == 1
+
+    summary = SessionMemorySummaryPayload(summary_kind="rolling_context")
+    assert summary.summary == {}
+    assert summary.source_event_range == {}
+
+    link = LineageLinkPayload(
+        source_type="message_understanding",
+        source_id="mu_001",
+        target_type="task_spec_revision",
+        target_id="rev_001",
+        link_type="derived_revision",
+    )
+    assert link.attributes == {}

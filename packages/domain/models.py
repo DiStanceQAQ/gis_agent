@@ -26,6 +26,13 @@ class SessionRecord(Base):
     messages: Mapped[list[MessageRecord]] = relationship(back_populates="session")
     tasks: Mapped[list[TaskRunRecord]] = relationship(back_populates="session")
     message_understandings: Mapped[list[MessageUnderstandingRecord]] = relationship(back_populates="session")
+    session_memory_events: Mapped[list[SessionMemoryEventRecord]] = relationship(back_populates="session")
+    session_state_snapshots: Mapped[list[SessionStateSnapshotRecord]] = relationship(back_populates="session")
+    session_memory_summaries: Mapped[list[SessionMemorySummaryRecord]] = relationship(back_populates="session")
+    session_memory_links: Mapped[list[SessionMemoryLinkRecord]] = relationship(back_populates="session")
+    session_memory_retrieval_cache_entries: Mapped[list[SessionMemoryRetrievalCacheRecord]] = relationship(
+        back_populates="session"
+    )
 
 
 class MessageRecord(Base):
@@ -40,6 +47,10 @@ class MessageRecord(Base):
 
     session: Mapped[SessionRecord] = relationship(back_populates="messages")
     understanding: Mapped[MessageUnderstandingRecord | None] = relationship(back_populates="message", uselist=False)
+    session_memory_events: Mapped[list[SessionMemoryEventRecord]] = relationship(back_populates="message")
+    session_memory_retrieval_cache_entries: Mapped[list[SessionMemoryRetrievalCacheRecord]] = relationship(
+        back_populates="message"
+    )
 
 
 class UploadedFileRecord(Base):
@@ -96,6 +107,7 @@ class TaskRunRecord(Base):
     llm_calls: Mapped[list[LLMCallLogRecord]] = relationship(back_populates="task")
     revisions: Mapped[list[TaskSpecRevisionRecord]] = relationship(back_populates="task")
     message_understandings: Mapped[list[MessageUnderstandingRecord]] = relationship(back_populates="task")
+    session_memory_events: Mapped[list[SessionMemoryEventRecord]] = relationship(back_populates="task")
 
 
 class LLMCallLogRecord(Base):
@@ -180,6 +192,10 @@ class TaskSpecRevisionRecord(Base):
 
     task: Mapped[TaskRunRecord] = relationship(back_populates="revisions")
     source_message: Mapped[MessageRecord] = relationship()
+    parent_message_understanding: Mapped[MessageUnderstandingRecord | None] = relationship(
+        back_populates="parent_revisions"
+    )
+    session_memory_events: Mapped[list[SessionMemoryEventRecord]] = relationship(back_populates="revision")
 
 
 class MessageUnderstandingRecord(Base):
@@ -218,6 +234,9 @@ class MessageUnderstandingRecord(Base):
     message: Mapped[MessageRecord] = relationship(back_populates="understanding")
     session: Mapped[SessionRecord] = relationship(back_populates="message_understandings")
     task: Mapped[TaskRunRecord | None] = relationship(back_populates="message_understandings")
+    snapshot: Mapped[SessionStateSnapshotRecord | None] = relationship(back_populates="message_understandings")
+    summary: Mapped[SessionMemorySummaryRecord | None] = relationship(back_populates="message_understandings")
+    parent_revisions: Mapped[list[TaskSpecRevisionRecord]] = relationship(back_populates="parent_message_understanding")
 
 
 class AOIRecord(Base):
@@ -265,6 +284,11 @@ class SessionMemoryEventRecord(Base):
     event_payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+    session: Mapped[SessionRecord] = relationship(back_populates="session_memory_events")
+    message: Mapped[MessageRecord | None] = relationship(back_populates="session_memory_events")
+    task: Mapped[TaskRunRecord | None] = relationship(back_populates="session_memory_events")
+    revision: Mapped[TaskSpecRevisionRecord | None] = relationship(back_populates="session_memory_events")
+
 
 class SessionStateSnapshotRecord(Base):
     __tablename__ = "session_state_snapshots"
@@ -287,6 +311,9 @@ class SessionStateSnapshotRecord(Base):
     snapshot_version: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+    session: Mapped[SessionRecord] = relationship(back_populates="session_state_snapshots")
+    message_understandings: Mapped[list[MessageUnderstandingRecord]] = relationship(back_populates="snapshot")
+
 
 class SessionMemorySummaryRecord(Base):
     __tablename__ = "session_memory_summaries"
@@ -301,6 +328,9 @@ class SessionMemorySummaryRecord(Base):
     summary_json: Mapped[dict] = mapped_column(JSON, default=dict)
     source_event_range_json: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    session: Mapped[SessionRecord] = relationship(back_populates="session_memory_summaries")
+    message_understandings: Mapped[list[MessageUnderstandingRecord]] = relationship(back_populates="summary")
 
 
 class SessionMemoryLinkRecord(Base):
@@ -321,6 +351,8 @@ class SessionMemoryLinkRecord(Base):
     weight: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+    session: Mapped[SessionRecord] = relationship(back_populates="session_memory_links")
+
 
 class SessionMemoryRetrievalCacheRecord(Base):
     __tablename__ = "session_memory_retrieval_cache"
@@ -336,6 +368,9 @@ class SessionMemoryRetrievalCacheRecord(Base):
     query_fingerprint: Mapped[str] = mapped_column(String(128))
     retrieval_result_json: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    session: Mapped[SessionRecord] = relationship(back_populates="session_memory_retrieval_cache_entries")
+    message: Mapped[MessageRecord] = relationship(back_populates="session_memory_retrieval_cache_entries")
 
 
 class DatasetCandidateRecord(Base):
