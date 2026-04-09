@@ -6,7 +6,13 @@ import re
 
 from sqlalchemy.orm import Session
 
-from packages.domain.models import MessageRecord, TaskRunRecord, TaskSpecRevisionRecord, UploadedFileRecord
+from packages.domain.models import (
+    MessageRecord,
+    SessionMemorySummaryRecord,
+    TaskRunRecord,
+    TaskSpecRevisionRecord,
+    UploadedFileRecord,
+)
 from packages.domain.services.aoi import parse_bbox_text
 from packages.domain.services.intent import is_task_confirmation_message
 from packages.domain.services.session_memory import SessionMemoryService
@@ -50,6 +56,10 @@ class ConversationContextBundle:
     retrieved_revisions: list[dict[str, object]] = field(default_factory=list)
     field_value_history: dict[str, list[dict[str, object]]] = field(default_factory=dict)
     memory_snapshot: dict[str, object] | None = None
+    summaries: list[dict[str, object]] = field(default_factory=list)
+    history_features: dict[str, object] = field(default_factory=dict)
+    user_preference_profile: dict[str, object] = field(default_factory=dict)
+    risk_profile: dict[str, object] = field(default_factory=dict)
 
 
 def build_conversation_context(
@@ -112,6 +122,10 @@ def build_conversation_context(
         retrieved_revisions=list(retrieval_result.revisions),
         field_value_history=dict(retrieval_result.field_value_history),
         memory_snapshot=_serialize_snapshot(snapshot),
+        summaries=_load_memory_summaries(db, snapshot=snapshot),
+        history_features=_snapshot_json(snapshot, "field_history_rollup_json"),
+        user_preference_profile=_snapshot_json(snapshot, "user_preference_profile_json"),
+        risk_profile=_snapshot_json(snapshot, "risk_profile_json"),
     )
 
 
@@ -288,6 +302,45 @@ def _build_context_trace(
         ),
         "retrieval": retrieval_trace,
     }
+
+
+def _load_memory_summaries(
+    db: Session,
+    *,
+    snapshot: object | None,
+) -> list[dict[str, object]]:
+    if snapshot is None:
+        return []
+
+    summary_ids: list[str] = []
+    latest_summary_id = getattr(snapshot, "latest_summary_id", None)
+    if isinstance(latest_summary_id, str) and latest_summary_id:
+        summary_ids.append(latest_summary_id)
+
+    summaries: list[dict[str, object]] = []
+    for summary_id in summary_ids:
+        record = db.get(SessionMemorySummaryRecord, summary_id)
+        if record is None:
+            continue
+        summaries.append(
+            {
+                "id": record.id,
+                "summary_kind": record.summary_kind,
+                "summary_text": record.summary_text,
+                "summary_json": dict(record.summary_json or {}),
+                "created_at": record.created_at.isoformat() if record.created_at else None,
+            }
+        )
+    return summaries
+
+
+def _snapshot_json(snapshot: object | None, attribute: str) -> dict[str, object]:
+    if snapshot is None:
+        return {}
+    value = getattr(snapshot, attribute, None)
+    if isinstance(value, dict):
+        return dict(value)
+    return {}
 
 
 def _select_recent_uploads(
@@ -609,7 +662,11 @@ def _serialize_snapshot(snapshot: object | None) -> dict[str, object] | None:
         "active_revision_number": getattr(snapshot, "active_revision_number", None),
         "active_understanding_id": getattr(snapshot, "active_understanding_id", None),
         "blocked_reason": getattr(snapshot, "blocked_reason", None),
+        "latest_summary_id": getattr(snapshot, "latest_summary_id", None),
         "snapshot_version": getattr(snapshot, "snapshot_version", None),
+        "field_history_rollup": _snapshot_json(snapshot, "field_history_rollup_json"),
+        "user_preference_profile": _snapshot_json(snapshot, "user_preference_profile_json"),
+        "risk_profile": _snapshot_json(snapshot, "risk_profile_json"),
     }
     open_missing_fields = getattr(snapshot, "open_missing_fields_json", None)
     if isinstance(open_missing_fields, list):

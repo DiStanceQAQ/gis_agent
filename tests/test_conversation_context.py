@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from packages.domain.database import SessionLocal
 from packages.domain.models import (
     MessageRecord,
+    SessionMemorySummaryRecord,
     SessionRecord,
     TaskRunRecord,
     TaskSpecRecord,
@@ -463,6 +464,21 @@ def test_build_conversation_context_consumes_snapshot_and_retrieval_result(
         task_id=task.id,
         revision_id=revision.id,
     )
+    summary = SessionMemorySummaryRecord(
+        id=make_id("sum"),
+        session_id=session.id,
+        summary_kind="session_memory",
+        summary_text="用户持续沿用上传边界。",
+        summary_json={"focus": "uploaded_aoi"},
+        source_event_range_json={},
+    )
+    db_session.add(summary)
+    db_session.flush()
+    snapshot.latest_summary_id = summary.id
+    snapshot.field_history_rollup_json = {"aoi_input": {"accepted_count": 2, "correction_count": 1}}
+    snapshot.user_preference_profile_json = {"preferred_output": ["png_map"], "user_priority": "balanced"}
+    snapshot.risk_profile_json = {"execution_blocked": False, "risk_level": "low"}
+    db_session.flush()
 
     calls: list[dict[str, object]] = []
 
@@ -543,3 +559,8 @@ def test_build_conversation_context_consumes_snapshot_and_retrieval_result(
     assert bundle.uploaded_files[0]["id"] == "file_retrieved"
     assert bundle.relevant_messages[0]["id"] == source_message.id
     assert bundle.trace["retrieval"]["selected_upload_ids"] == ["file_retrieved"]
+    assert bundle.summaries[0]["id"] == summary.id
+    assert bundle.history_features["aoi_input"]["accepted_count"] == 2
+    assert bundle.user_preference_profile["preferred_output"] == ["png_map"]
+    assert bundle.risk_profile["risk_level"] == "low"
+    assert bundle.memory_snapshot["field_history_rollup"]["aoi_input"]["correction_count"] == 1
