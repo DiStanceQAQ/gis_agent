@@ -1,13 +1,37 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
+import pytest
+
 from packages.domain import models  # noqa: F401
+from packages.domain.database import SessionLocal
 from packages.domain.database import Base
+from packages.domain.models import (
+    MessageRecord,
+    MessageUnderstandingRecord,
+    SessionMemoryEventRecord,
+    SessionRecord,
+    TaskRunRecord,
+    TaskSpecRecord,
+    TaskSpecRevisionRecord,
+)
+from packages.domain.services.session_memory import SessionMemoryService
+from packages.domain.services.task_revisions import activate_revision
+from packages.domain.utils import make_id
 from packages.schemas.session_memory import (
     LineageLinkPayload,
     SessionMemoryEventPayload,
     SessionMemorySummaryPayload,
     SessionStateSnapshotPayload,
 )
+from sqlalchemy.orm import Session
+
+
+@pytest.fixture
+def db_session() -> Session:
+    with SessionLocal() as db:
+        yield db
 
 
 def _fk_targets(table_name: str, column_name: str) -> set[str]:
@@ -235,3 +259,194 @@ def test_session_memory_schema_payload_model_defaults() -> None:
         link_type="derived_revision",
     )
     assert link.attributes == {}
+
+
+def test_session_memory_service_record_event_persists_event_and_snapshot(
+    db_session: Session,
+) -> None:
+    session = SessionRecord(id=make_id("ses"), title="memory-service", status="active")
+    message = MessageRecord(id=make_id("msg"), session_id=session.id, role="user", content="请分析江西")
+    task = TaskRunRecord(
+        id=make_id("task"),
+        session_id=session.id,
+        user_message_id=message.id,
+        status="waiting_clarification",
+    )
+    task.task_spec = TaskSpecRecord(
+        task_id=task.id,
+        aoi_input="江西",
+        aoi_source_type="admin_name",
+        preferred_output=["png_map"],
+        user_priority="speed",
+        need_confirmation=True,
+        raw_spec_json={
+            "aoi_input": "江西",
+            "aoi_source_type": "admin_name",
+            "missing_fields": ["time_range"],
+            "preferred_output": ["png_map"],
+            "user_priority": "speed",
+        },
+    )
+    revision = TaskSpecRevisionRecord(
+        id=make_id("rev"),
+        task_id=task.id,
+        revision_number=2,
+        base_revision_id=None,
+        source_message_id=message.id,
+        change_type="correction",
+        is_active=True,
+        understanding_intent="task_correction",
+        understanding_summary="缺少时间范围",
+        raw_spec_json=dict(task.task_spec.raw_spec_json),
+        field_confidences_json={"aoi_input": {"score": 0.92}},
+        ranked_candidates_json={},
+        response_mode="ask_missing_fields",
+        understanding_trace_json={},
+        execution_blocked=True,
+        execution_blocked_reason="need_time_range",
+    )
+    understanding = MessageUnderstandingRecord(
+        id=make_id("mu"),
+        message_id=message.id,
+        session_id=session.id,
+        task_id=task.id,
+        intent="task_correction",
+        intent_confidence=0.99,
+        understanding_summary="用户补充任务",
+        response_mode="ask_missing_fields",
+        field_confidences_json={},
+        field_evidence_json={},
+        context_trace_json={},
+        history_features_json={},
+        created_at=datetime.now(timezone.utc),
+    )
+    db_session.add_all([session, message, task, revision, understanding])
+    db_session.flush()
+
+    service = SessionMemoryService(db_session)
+    service.record_event(
+        session_id=session.id,
+        event_type="message_received",
+        message_id=message.id,
+        task_id=task.id,
+        revision_id=revision.id,
+        event_payload={"source": "user_ingestion"},
+    )
+
+    event = db_session.query(SessionMemoryEventRecord).filter_by(session_id=session.id).one()
+    snapshot = service.get_latest_snapshot(session.id)
+
+    assert event.event_type == "message_received"
+    assert event.event_payload_json == {"source": "user_ingestion"}
+    assert snapshot is not None
+    assert snapshot.active_task_id == task.id
+    assert snapshot.active_revision_id == revision.id
+    assert snapshot.active_understanding_id == understanding.id
+    assert snapshot.open_missing_fields_json == ["time_range"]
+    assert snapshot.blocked_reason == "need_time_range"
+    assert snapshot.field_history_rollup_json == {"aoi_input": {"score": 0.92}}
+    assert snapshot.user_preference_profile_json == {
+        "preferred_output": ["png_map"],
+        "user_priority": "speed",
+    }
+    assert snapshot.risk_profile_json == {"execution_blocked": True}
+    assert snapshot.snapshot_version == 1
+
+
+def test_session_memory_service_refresh_snapshot_increments_snapshot_version(
+    db_session: Session,
+) -> None:
+    session = SessionRecord(id=make_id("ses"), title="memory-version", status="active")
+    message = MessageRecord(id=make_id("msg"), session_id=session.id, role="user", content="任务")
+    task = TaskRunRecord(id=make_id("task"), session_id=session.id, user_message_id=message.id)
+    revision = TaskSpecRevisionRecord(
+        id=make_id("rev"),
+        task_id=task.id,
+        revision_number=1,
+        base_revision_id=None,
+        source_message_id=message.id,
+        change_type="initial_parse",
+        is_active=True,
+        understanding_intent="new_task",
+        understanding_summary=None,
+        raw_spec_json={},
+        field_confidences_json={},
+        ranked_candidates_json={},
+        response_mode="confirm_understanding",
+        understanding_trace_json={},
+    )
+    db_session.add_all([session, message, task, revision])
+    db_session.flush()
+
+    service = SessionMemoryService(db_session)
+    first = service.refresh_snapshot(session.id, task_id=task.id, revision_id=revision.id)
+    first_version = first.snapshot_version
+    second = service.refresh_snapshot(session.id, task_id=task.id, revision_id=revision.id)
+
+    assert first_version == 1
+    assert second.snapshot_version == 2
+
+
+def test_activate_revision_records_revision_activated_session_memory_event(
+    db_session: Session,
+) -> None:
+    session = SessionRecord(id=make_id("ses"), title="activate-revision", status="active")
+    first_message = MessageRecord(id=make_id("msg"), session_id=session.id, role="user", content="江西")
+    second_message = MessageRecord(id=make_id("msg"), session_id=session.id, role="user", content="改成北京")
+    task = TaskRunRecord(id=make_id("task"), session_id=session.id, user_message_id=first_message.id)
+    task.task_spec = TaskSpecRecord(
+        task_id=task.id,
+        aoi_input="江西",
+        aoi_source_type="admin_name",
+        preferred_output=["png_map"],
+        user_priority="balanced",
+        need_confirmation=False,
+        raw_spec_json={"aoi_input": "江西", "aoi_source_type": "admin_name"},
+    )
+    rev1 = TaskSpecRevisionRecord(
+        id=make_id("rev"),
+        task_id=task.id,
+        revision_number=1,
+        base_revision_id=None,
+        source_message_id=first_message.id,
+        change_type="initial_parse",
+        is_active=True,
+        understanding_intent="new_task",
+        understanding_summary="江西",
+        raw_spec_json={"aoi_input": "江西", "aoi_source_type": "admin_name"},
+        field_confidences_json={},
+        ranked_candidates_json={},
+        response_mode="confirm_understanding",
+        understanding_trace_json={},
+    )
+    rev2 = TaskSpecRevisionRecord(
+        id=make_id("rev"),
+        task_id=task.id,
+        revision_number=2,
+        base_revision_id=rev1.id,
+        source_message_id=second_message.id,
+        change_type="correction",
+        is_active=False,
+        understanding_intent="task_correction",
+        understanding_summary="北京",
+        raw_spec_json={"aoi_input": "北京", "aoi_source_type": "admin_name"},
+        field_confidences_json={},
+        ranked_candidates_json={},
+        response_mode="show_revision",
+        understanding_trace_json={},
+    )
+    db_session.add_all([session, first_message, second_message, task, rev1, rev2])
+    db_session.flush()
+
+    activate_revision(db_session, task=task, revision=rev2)
+
+    event = (
+        db_session.query(SessionMemoryEventRecord)
+        .filter(
+            SessionMemoryEventRecord.session_id == session.id,
+            SessionMemoryEventRecord.event_type == "revision_activated",
+            SessionMemoryEventRecord.revision_id == rev2.id,
+        )
+        .one_or_none()
+    )
+    assert event is not None

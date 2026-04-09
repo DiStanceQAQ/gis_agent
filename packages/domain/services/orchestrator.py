@@ -47,6 +47,7 @@ from packages.domain.services.parser import (
 )
 from packages.domain.services.plan_guard import validate_operation_plan
 from packages.domain.services.response_policy import ResponseDecision, decide_response
+from packages.domain.services.session_memory import SessionMemoryService
 from packages.domain.services.storage import (
     build_artifact_path,
     detect_file_type,
@@ -1543,6 +1544,12 @@ def create_message_and_task(
             role="user",
             content=payload.content,
         )
+        SessionMemoryService(db).record_event(
+            session_id=payload.session_id,
+            event_type="message_received",
+            message_id=message.id,
+            event_payload={"role": "user"},
+        )
     else:
         message = existing_user_message
 
@@ -1673,6 +1680,12 @@ def create_message(
         session_id=payload.session_id,
         role="user",
         content=payload.content,
+    )
+    SessionMemoryService(db).record_event(
+        session_id=payload.session_id,
+        event_type="message_received",
+        message_id=message.id,
+        event_payload={"role": "user"},
     )
     history = _load_message_history(
         db,

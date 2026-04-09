@@ -9,6 +9,7 @@ from packages.domain.database import SessionLocal
 from packages.domain.models import (
     AOIRecord,
     MessageRecord,
+    SessionMemoryEventRecord,
     SessionRecord,
     TaskRunRecord,
     TaskSpecRecord,
@@ -653,3 +654,53 @@ def test_create_message_and_task_surfaces_blocked_uploaded_aoi_as_clarification(
     assert detail.interaction_state == "execution_blocked"
     assert detail.active_revision is not None
     assert detail.active_revision.execution_blocked is True
+
+
+def test_create_message_and_task_records_message_received_session_memory_event(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = SessionRecord(id=make_id("ses"), title="message-ingestion", status="active")
+    db_session.add(session)
+    db_session.commit()
+
+    monkeypatch.setattr(
+        "packages.domain.services.orchestrator.parse_task_message",
+        lambda message, has_upload, task_id=None, db_session=None: ParsedTaskSpec(  # noqa: ARG005
+            aoi_input="江西",
+            aoi_source_type="admin_name",
+            analysis_type="WORKFLOW",
+            preferred_output=["png_map"],
+            user_priority="balanced",
+        ),
+    )
+    monkeypatch.setattr(
+        "packages.domain.services.orchestrator.build_task_plan",
+        lambda parsed, task_id=None, db_session=None: TaskPlan(  # noqa: ARG005
+            version="agent-v2",
+            mode="llm_plan_execute_gis_workspace",
+            status="ready",
+            objective="ndvi",
+            reasoning_summary="ndvi",
+            missing_fields=[],
+            steps=[],
+        ),
+    )
+
+    response = create_message_and_task(
+        db_session,
+        MessageCreateRequest(session_id=session.id, content="请分析江西植被"),
+        require_approval=False,
+    )
+
+    assert response.message_id is not None
+    event = (
+        db_session.query(SessionMemoryEventRecord)
+        .filter(
+            SessionMemoryEventRecord.session_id == session.id,
+            SessionMemoryEventRecord.message_id == response.message_id,
+            SessionMemoryEventRecord.event_type == "message_received",
+        )
+        .one_or_none()
+    )
+    assert event is not None

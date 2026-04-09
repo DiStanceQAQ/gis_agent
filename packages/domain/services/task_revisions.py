@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from packages.domain.models import TaskRunRecord, TaskSpecRecord, TaskSpecRevisionRecord
+from packages.domain.services.session_memory import SessionMemoryService
 from packages.domain.utils import make_id
 from packages.schemas.task import ParsedTaskSpec
 
@@ -136,6 +137,17 @@ def activate_revision(
     if mirror_legacy_task_spec:
         _mirror_revision_to_task_spec(db, task=locked_task, revision=revision)
     db.flush()
+    SessionMemoryService(db).record_event(
+        session_id=locked_task.session_id,
+        event_type="revision_activated",
+        message_id=revision.source_message_id,
+        task_id=locked_task.id,
+        revision_id=revision.id,
+        event_payload={
+            "revision_number": revision.revision_number,
+            "change_type": revision.change_type,
+        },
+    )
     return RevisionActivationResult(
         revision_id=revision.id,
         revision_number=revision.revision_number,
