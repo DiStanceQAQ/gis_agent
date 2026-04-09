@@ -328,6 +328,70 @@ def test_build_conversation_context_keeps_preferred_uploads_even_when_older(
     assert bundle.trace["selected_files"][0]["file_id"] == preferred_upload.id
 
 
+def test_build_conversation_context_preserves_active_revision_in_long_session_noise(
+    db_session: Session,
+) -> None:
+    session = _create_session(db_session)
+    base_time = datetime.now(timezone.utc) - timedelta(days=2)
+    source_message = _create_message(
+        db_session,
+        session_id=session.id,
+        content="请基于江西范围分析 2024 年 NDVI。",
+        created_at=base_time,
+    )
+    task, revision = _seed_active_task(
+        db_session,
+        session=session,
+        source_message=source_message,
+        summary="江西 AOI 作为当前有效版本。",
+        raw_spec_json={
+            "aoi_input": "江西",
+            "aoi_source_type": "admin_name",
+            "time_range": {"start": "2024-06-01", "end": "2024-06-30"},
+            "analysis_type": "NDVI",
+            "preferred_output": ["png_map"],
+            "user_priority": "balanced",
+        },
+    )
+    SessionMemoryService(db_session).refresh_snapshot(
+        session.id,
+        task_id=task.id,
+        revision_id=revision.id,
+    )
+
+    for idx in range(18):
+        role = "assistant" if idx % 2 else "user"
+        _create_message(
+            db_session,
+            session_id=session.id,
+            role=role,
+            content=f"无关闲聊 {idx}",
+            created_at=base_time + timedelta(hours=idx + 1),
+        )
+
+    current_message = _create_message(
+        db_session,
+        session_id=session.id,
+        content="还是用前面那个 AOI，继续吧。",
+        created_at=base_time + timedelta(days=2, minutes=5),
+    )
+
+    bundle = build_conversation_context(
+        db_session,
+        session_id=session.id,
+        message_id=current_message.id,
+        message_content=current_message.content,
+    )
+
+    assert bundle.latest_active_task_id == task.id
+    assert bundle.latest_active_revision_id == revision.id
+    assert bundle.latest_active_revision_summary == "江西 AOI 作为当前有效版本。"
+    assert bundle.summaries
+    assert bundle.summaries[0]["summary_kind"] == "rolling_context"
+    assert bundle.memory_snapshot is not None
+    assert bundle.memory_snapshot["active_revision_id"] == revision.id
+
+
 def test_build_conversation_context_sets_explicit_signals_and_overlap(
     db_session: Session,
 ) -> None:
