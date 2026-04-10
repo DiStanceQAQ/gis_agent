@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from apps.api.deps import get_db
-from packages.domain.services.orchestrator import (
+from packages.domain.services.session_queries import (
     create_session,
     get_session_memory,
     list_session_messages,

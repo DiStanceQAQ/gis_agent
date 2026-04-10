@@ -10,7 +10,7 @@ from packages.domain.services.file_preview import (
     build_uploaded_file_preview,
     read_uploaded_file_preview_image,
 )
-from packages.domain.services.orchestrator import create_uploaded_file
+from packages.domain.services.upload_handler import create_uploaded_file
 from packages.schemas.common import ErrorResponse
 from packages.schemas.file import UploadedFilePreviewResponse, UploadedFileResponse
 
