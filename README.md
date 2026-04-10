@@ -27,6 +27,29 @@ GIS Agent 的第一版工程骨架。当前这套代码优先解决三件事：
 - [packages/domain/services/agent_runtime.py](/Users/ljn/gis_agent/packages/domain/services/agent_runtime.py) 现在是兼容层入口，不再作为主编排入口。
 - 任务终态统一为 `success`、`failed`、`waiting_clarification`。
 
+### ReAct 决策模型
+
+当前 runtime 里的 ReAct 不是“自由选工具并循环调用”的 agent loop，而是固定 LangGraph 管道里的 **per-step go/no-go gate**：
+
+- LangGraph 图拓扑是固定步骤：`parse -> plan -> normalize_aoi -> search_candidates -> recommend_dataset -> run_processing_pipeline -> generate_outputs`
+- 每个 runtime step 内部会生成一个 ReAct 决策，但只允许 `continue`、`skip`、`fail`
+- step 的 `function_name` 必须匹配当前步骤绑定的预定义工具，不支持运行时自由选择任意工具
+- GIS operation（例如 `raster.clip`、`vector.buffer`、`artifact.export`）是在 `run_processing_pipeline` 内按 operation plan 批量执行的
+
+这意味着当前 LLM 的职责更接近“判断这一步是否应该执行”，而不是“动态规划整条工具调用链”。
+
+### 审计粒度
+
+当前系统有两层审计：
+
+- **LangGraph step 级别**：`normalize_aoi`、`search_candidates`、`recommend_dataset`、`run_processing_pipeline`、`generate_outputs` 等 runtime step 都会写入 task events
+- **Operation node 级别**：`run_processing_pipeline` 内的每个 operation node 都会写入 `operation_node_started`、`operation_node_completed`、`operation_node_failed` 事件
+
+这让排查失败时可以同时看到：
+
+- 是哪一个 runtime step 进入失败路径
+- 以及 processing pipeline 内具体是哪一个 operation node 失败
+
 ## 目录
 
 ```text
