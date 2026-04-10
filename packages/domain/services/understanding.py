@@ -99,10 +99,7 @@ class MessageUnderstanding:
 
     def field_evidence_dump(self) -> dict[str, list[str]]:
         return {
-            field: [
-                _format_field_evidence(item)
-                for item in confidence.evidence
-            ]
+            field: [_format_field_evidence(item) for item in confidence.evidence]
             for field, confidence in self.field_confidences.items()
         }
 
@@ -273,26 +270,37 @@ def persist_message_understanding(
         else None
     )
     memory = SessionMemoryService(db_session)
-    memory.record_event(
-        session_id=session_id,
-        event_type="message_understanding_created",
-        message_id=message_id,
+    if (
+        resolved_revision is not None
+        and getattr(resolved_revision, "change_type", None) != "initial_parse"
+    ):
+        memory.record_event(
+            session_id=session_id,
+            event_type="message_understanding_created",
+            message_id=message_id,
+            task_id=resolved_task_id,
+            revision_id=resolved_revision.id if resolved_revision is not None else None,
+            event_payload={
+                "intent": understanding.intent,
+                "response_mode": resolved_response_mode,
+            },
+        )
+    snapshot = memory.refresh_snapshot(
+        session_id,
         task_id=resolved_task_id,
-        revision_id=resolved_revision.id if resolved_revision is not None else None,
-        event_payload={
-            "intent": understanding.intent,
-            "response_mode": resolved_response_mode,
-        },
+        revision_id=resolved_revision_id,
+        understanding_id=record.id,
     )
-    snapshot = memory.get_latest_snapshot(session_id)
-    if snapshot is not None:
-        record.snapshot_id = snapshot.id
-        record.summary_id = snapshot.latest_summary_id
-        if resolved_revision_id:
-            record.lineage_root_id = resolved_revision_id
-        db_session.flush()
-
+    record.snapshot_id = snapshot.id
+    record.summary_id = snapshot.latest_summary_id
     if resolved_revision_id:
+        record.lineage_root_id = resolved_revision_id
+    db_session.flush()
+
+    if resolved_revision_id and (
+        resolved_revision is None
+        or getattr(resolved_revision, "change_type", None) != "initial_parse"
+    ):
         memory.link_entities(
             session_id=session_id,
             source_type="understanding",
@@ -304,7 +312,8 @@ def persist_message_understanding(
         )
         revision = resolved_revision
         if revision is not None:
-            revision.parent_message_understanding_id = record.id
+            if getattr(revision, "change_type", None) == "correction":
+                revision.parent_message_understanding_id = record.id
             revision.history_features_json = dict(record.history_features_json or {})
             if revision.lineage_root_id is None:
                 revision.lineage_root_id = revision.id
@@ -325,11 +334,7 @@ def _expand_intent(
     overlap = signals.get("revision_field_overlap")
     overlap_fields: list[str] = []
     if isinstance(overlap, dict):
-        overlap_fields = [
-            str(field)
-            for field in overlap.get("fields", [])
-            if str(field).strip()
-        ]
+        overlap_fields = [str(field) for field in overlap.get("fields", []) if str(field).strip()]
 
     confirmation_hint = bool(signals.get("confirmation_hint"))
     correction_hint = bool(signals.get("correction_hint"))
@@ -440,7 +445,9 @@ def _score_aoi_input(
 
     signals = context.explicit_signals
     overlap = signals.get("revision_field_overlap")
-    if isinstance(overlap, dict) and "aoi_input" in {str(item) for item in overlap.get("fields", [])}:
+    if isinstance(overlap, dict) and "aoi_input" in {
+        str(item) for item in overlap.get("fields", [])
+    }:
         score = max(score, 0.86)
         evidence.append(
             EvidenceItem(
@@ -621,7 +628,9 @@ def _score_time_range(
         )
 
     overlap = context.explicit_signals.get("revision_field_overlap")
-    if isinstance(overlap, dict) and "time_range" in {str(item) for item in overlap.get("fields", [])}:
+    if isinstance(overlap, dict) and "time_range" in {
+        str(item) for item in overlap.get("fields", [])
+    }:
         score = max(score, 0.86)
         evidence.append(
             EvidenceItem(
@@ -768,7 +777,11 @@ def _parser_context_summary(context: ConversationContextBundle) -> str:
     if context.latest_active_revision_summary:
         parts.append(f"active_revision={context.latest_active_revision_summary}")
     if context.uploaded_files:
-        upload_names = ",".join(str(item.get("original_name") or "") for item in context.uploaded_files[:3] if item.get("original_name"))
+        upload_names = ",".join(
+            str(item.get("original_name") or "")
+            for item in context.uploaded_files[:3]
+            if item.get("original_name")
+        )
         if upload_names:
             parts.append(f"uploads={upload_names}")
     for field_name, entries in sorted(context.field_value_history.items()):
@@ -915,7 +928,9 @@ def _has_upload_context(context: ConversationContextBundle) -> bool:
 
 
 def _looks_like_time_message(message: str) -> bool:
-    return any(token in message for token in ("年", "月", "日", "季度", "春季", "夏季", "秋季", "冬季"))
+    return any(
+        token in message for token in ("年", "月", "日", "季度", "春季", "夏季", "秋季", "冬季")
+    )
 
 
 def _looks_like_analysis_message(message: str, analysis_type: str | None) -> bool:

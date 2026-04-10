@@ -130,7 +130,9 @@ def activate_revision(
     ).update({TaskSpecRevisionRecord.is_active: False}, synchronize_session=False)
     revision.is_active = True
     if _is_user_correction_revision(revision):
-        revision.user_revision_count = (previous_active.user_revision_count if previous_active else 0) + 1
+        revision.user_revision_count = (
+            previous_active.user_revision_count if previous_active else 0
+        ) + 1
         revision.user_last_revision_at = datetime.now(timezone.utc)
     locked_task.last_understanding_message_id = revision.source_message_id
     locked_task.last_response_mode = revision.response_mode
@@ -138,27 +140,28 @@ def activate_revision(
         _mirror_revision_to_task_spec(db, task=locked_task, revision=revision)
     db.flush()
     memory = SessionMemoryService(db)
-    memory.record_event(
-        session_id=locked_task.session_id,
-        event_type="revision_activated",
-        message_id=revision.source_message_id,
-        task_id=locked_task.id,
-        revision_id=revision.id,
-        event_payload={
-            "revision_number": revision.revision_number,
-            "change_type": revision.change_type,
-        },
-    )
-    memory.link_entities(
-        session_id=locked_task.session_id,
-        source_type="message",
-        source_id=revision.source_message_id,
-        target_type="revision",
-        target_id=revision.id,
-        link_type="derived_from",
-        weight=1.0,
-        payload={"revision_number": revision.revision_number},
-    )
+    if revision.change_type != "initial_parse":
+        memory.record_event(
+            session_id=locked_task.session_id,
+            event_type="revision_activated",
+            message_id=revision.source_message_id,
+            task_id=locked_task.id,
+            revision_id=revision.id,
+            event_payload={
+                "revision_number": revision.revision_number,
+                "change_type": revision.change_type,
+            },
+        )
+        memory.link_entities(
+            session_id=locked_task.session_id,
+            source_type="message",
+            source_id=revision.source_message_id,
+            target_type="revision",
+            target_id=revision.id,
+            link_type="derived_from",
+            weight=1.0,
+            payload={"revision_number": revision.revision_number},
+        )
     return RevisionActivationResult(
         revision_id=revision.id,
         revision_number=revision.revision_number,
