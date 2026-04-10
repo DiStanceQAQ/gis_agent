@@ -16,6 +16,7 @@ from packages.domain.services.planner import (
     set_task_plan_status,
 )
 from packages.domain.services.operation_plan_builder import build_operation_plan_from_registry
+from packages.domain.services.plan_json_helpers import update_plan_json, write_plan_json
 from packages.domain.services.plan_guard import validate_operation_plan
 from packages.domain.services.task_state import (
     TASK_STATUS_AWAITING_APPROVAL,
@@ -73,7 +74,10 @@ def plan_task_node(state: GISAgentState) -> GISAgentState:
         if isinstance(operation_plan_payload, dict):
             operation_plan_status = operation_plan_payload.get("status")
 
-        if task.status == TASK_STATUS_AWAITING_APPROVAL or operation_plan_status in {"draft", "validated"}:
+        if task.status == TASK_STATUS_AWAITING_APPROVAL or operation_plan_status in {
+            "draft",
+            "validated",
+        }:
             return {
                 "need_clarification": False,
                 "plan_status": PLAN_STATUS_APPROVAL_REQUIRED,
@@ -91,7 +95,7 @@ def plan_task_node(state: GISAgentState) -> GISAgentState:
             }
 
         plan = build_task_plan(parsed, task_id=task_id)
-        task.plan_json = plan.model_dump()
+        write_plan_json(task, plan.model_dump(), validate_operation_plan=False)
         if plan.status != PLAN_STATUS_NEEDS_CLARIFICATION and operation_plan_status is None:
             candidate: OperationPlan | None = None
             try:
@@ -101,9 +105,14 @@ def plan_task_node(state: GISAgentState) -> GISAgentState:
                         version=1,
                         status="approved",
                         missing_fields=list(plan.missing_fields),
-                        nodes=[OperationNode.model_validate(node) for node in task_plan_payload.operation_plan_nodes],
+                        nodes=[
+                            OperationNode.model_validate(node)
+                            for node in task_plan_payload.operation_plan_nodes
+                        ],
                     )
-                    candidate = validate_operation_plan(candidate).model_copy(update={"status": "approved"})
+                    candidate = validate_operation_plan(candidate).model_copy(
+                        update={"status": "approved"}
+                    )
             except Exception:  # pragma: no cover - fallback guard
                 candidate = None
 
@@ -113,11 +122,13 @@ def plan_task_node(state: GISAgentState) -> GISAgentState:
                 status="approved",
                 missing_fields=list(plan.missing_fields),
             )
-            task.plan_json = {
-                **task.plan_json,
-                "operation_plan": default_plan.model_dump(),
-                "operation_plan_version": default_plan.version,
-            }
+            update_plan_json(
+                task,
+                {
+                    "operation_plan": default_plan.model_dump(),
+                    "operation_plan_version": default_plan.version,
+                },
+            )
         db.commit()
 
         if plan.status == PLAN_STATUS_NEEDS_CLARIFICATION:
@@ -186,7 +197,6 @@ def _prepare_runtime_start(
             "current_step": first_step,
             "plan_mode": (task.plan_json or {}).get("mode"),
         },
-        force=True,
     )
     db.commit()
     return None
@@ -284,7 +294,6 @@ def _run_runtime_step(state: GISAgentState, *, step_name: str) -> GISAgentState:
                         "selected_dataset": task.selected_dataset,
                         "fallback_used": task.fallback_used,
                     },
-                    force=True,
                 )
                 db.commit()
                 return {
@@ -330,7 +339,6 @@ def _run_runtime_step(state: GISAgentState, *, step_name: str) -> GISAgentState:
                 current_step=task.current_step,
                 event_type="task_failed",
                 detail=failure_detail,
-                force=True,
             )
             db.commit()
             logger.exception("graph.node.failed task_id=%s step_name=%s", task_id, step_name)
@@ -369,18 +377,27 @@ def finalize_success_node(state: GISAgentState) -> GISAgentState:
     if state.get("need_clarification"):
         with SessionLocal() as db:
             task = db.get(TaskRunRecord, task_id)
-            if task is not None and task.status != TASK_STATUS_WAITING_CLARIFICATION:
-                task.plan_json = set_task_plan_status(task.plan_json, PLAN_STATUS_NEEDS_CLARIFICATION)
-                set_task_status(
-                    db,
-                    task,
-                    TASK_STATUS_WAITING_CLARIFICATION,
-                    current_step="parse_task",
-                    event_type="task_waiting_clarification",
-                    detail={"source": "langgraph"},
-                    force=True,
-                )
-                db.commit()
+        if task is not None and task.status != TASK_STATUS_WAITING_CLARIFICATION:
+            task.plan_json = set_task_plan_status(task.plan_json, PLAN_STATUS_NEEDS_CLARIFICATION)
+            set_task_status(
+                db,
+                task,
+                TASK_STATUS_WAITING_CLARIFICATION,
+                current_step="parse_task",
+                event_type="task_waiting_clarification",
+                detail={"source": "langgraph"},
+                force=True,  # finalize guard: task may arrive from any status
+            )
+            set_task_status(
+                db,
+                task,
+                TASK_STATUS_WAITING_CLARIFICATION,
+                current_step="parse_task",
+                event_type="task_waiting_clarification",
+                detail={"source": "langgraph"},
+                force=True,  # finalize guard: task may arrive from any status
+            )
+            db.commit()
     return state
 
 
@@ -401,7 +418,7 @@ def finalize_failed_node(state: GISAgentState) -> GISAgentState:
                 current_step=task.current_step,
                 event_type="task_failed",
                 detail={"source": "langgraph"},
-                force=True,
+                force=True,  # finalize guard: task may arrive from any status
             )
             db.commit()
     return state
@@ -419,7 +436,7 @@ def finalize_approval_required_node(state: GISAgentState) -> GISAgentState:
                 current_step="awaiting_approval",
                 event_type="task_approval_required",
                 detail={"source": "langgraph"},
-                force=True,
+                force=True,  # finalize guard: task may arrive from any status
             )
             db.commit()
     return state
