@@ -1,0 +1,255 @@
+"""Adjust session-memory foreign key ownership semantics."""
+
+from __future__ import annotations
+
+from alembic import op
+
+
+revision = "20260410_0008"
+down_revision = "20260410_0007"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.drop_constraint(
+        "session_memory_events_session_id_fkey",
+        "session_memory_events",
+        type_="foreignkey",
+    )
+    op.drop_constraint(
+        "session_memory_events_message_id_fkey",
+        "session_memory_events",
+        type_="foreignkey",
+    )
+    op.drop_constraint(
+        "session_memory_events_task_id_fkey",
+        "session_memory_events",
+        type_="foreignkey",
+    )
+    op.drop_constraint(
+        "session_memory_events_revision_id_fkey",
+        "session_memory_events",
+        type_="foreignkey",
+    )
+    op.drop_constraint(
+        "fk_task_spec_revisions_parent_message_understanding_id",
+        "task_spec_revisions",
+        type_="foreignkey",
+    )
+    op.drop_constraint(
+        "session_state_snapshots_session_id_fkey",
+        "session_state_snapshots",
+        type_="foreignkey",
+    )
+    op.drop_constraint(
+        "session_memory_summaries_session_id_fkey",
+        "session_memory_summaries",
+        type_="foreignkey",
+    )
+    op.drop_constraint(
+        "session_memory_links_session_id_fkey",
+        "session_memory_links",
+        type_="foreignkey",
+    )
+    op.drop_constraint(
+        "session_memory_retrieval_cache_session_id_fkey",
+        "session_memory_retrieval_cache",
+        type_="foreignkey",
+    )
+    op.drop_constraint(
+        "session_memory_retrieval_cache_message_id_fkey",
+        "session_memory_retrieval_cache",
+        type_="foreignkey",
+    )
+
+    op.create_foreign_key(
+        "session_memory_events_session_id_fkey",
+        "session_memory_events",
+        "sessions",
+        ["session_id"],
+        ["id"],
+        ondelete="CASCADE",
+    )
+    op.create_foreign_key(
+        "session_memory_events_message_id_fkey",
+        "session_memory_events",
+        "messages",
+        ["message_id"],
+        ["id"],
+        ondelete="SET NULL",
+    )
+    op.create_foreign_key(
+        "session_memory_events_task_id_fkey",
+        "session_memory_events",
+        "task_runs",
+        ["task_id"],
+        ["id"],
+        ondelete="SET NULL",
+    )
+    op.create_foreign_key(
+        "session_memory_events_revision_id_fkey",
+        "session_memory_events",
+        "task_spec_revisions",
+        ["revision_id"],
+        ["id"],
+        ondelete="SET NULL",
+    )
+    op.create_foreign_key(
+        "fk_task_spec_revisions_parent_message_understanding_id",
+        "task_spec_revisions",
+        "message_understandings",
+        ["parent_message_understanding_id"],
+        ["id"],
+        ondelete="SET NULL",
+    )
+    op.create_foreign_key(
+        "session_state_snapshots_session_id_fkey",
+        "session_state_snapshots",
+        "sessions",
+        ["session_id"],
+        ["id"],
+        ondelete="CASCADE",
+    )
+    op.create_foreign_key(
+        "session_memory_summaries_session_id_fkey",
+        "session_memory_summaries",
+        "sessions",
+        ["session_id"],
+        ["id"],
+        ondelete="CASCADE",
+    )
+    op.create_foreign_key(
+        "session_memory_links_session_id_fkey",
+        "session_memory_links",
+        "sessions",
+        ["session_id"],
+        ["id"],
+        ondelete="CASCADE",
+    )
+    op.create_foreign_key(
+        "session_memory_retrieval_cache_session_id_fkey",
+        "session_memory_retrieval_cache",
+        "sessions",
+        ["session_id"],
+        ["id"],
+        ondelete="CASCADE",
+    )
+    op.create_foreign_key(
+        "session_memory_retrieval_cache_message_id_fkey",
+        "session_memory_retrieval_cache",
+        "messages",
+        ["message_id"],
+        ["id"],
+        ondelete="CASCADE",
+    )
+
+
+def downgrade() -> None:
+    op.drop_constraint(
+        "session_memory_retrieval_cache_message_id_fkey",
+        "session_memory_retrieval_cache",
+        type_="foreignkey",
+    )
+    op.drop_constraint(
+        "session_memory_retrieval_cache_session_id_fkey",
+        "session_memory_retrieval_cache",
+        type_="foreignkey",
+    )
+    op.drop_constraint(
+        "session_memory_links_session_id_fkey", "session_memory_links", type_="foreignkey"
+    )
+    op.drop_constraint(
+        "session_memory_summaries_session_id_fkey", "session_memory_summaries", type_="foreignkey"
+    )
+    op.drop_constraint(
+        "session_state_snapshots_session_id_fkey", "session_state_snapshots", type_="foreignkey"
+    )
+    op.drop_constraint(
+        "fk_task_spec_revisions_parent_message_understanding_id",
+        "task_spec_revisions",
+        type_="foreignkey",
+    )
+    op.drop_constraint(
+        "session_memory_events_revision_id_fkey", "session_memory_events", type_="foreignkey"
+    )
+    op.drop_constraint(
+        "session_memory_events_task_id_fkey", "session_memory_events", type_="foreignkey"
+    )
+    op.drop_constraint(
+        "session_memory_events_message_id_fkey", "session_memory_events", type_="foreignkey"
+    )
+    op.drop_constraint(
+        "session_memory_events_session_id_fkey", "session_memory_events", type_="foreignkey"
+    )
+
+    op.create_foreign_key(
+        "session_memory_events_session_id_fkey",
+        "session_memory_events",
+        "sessions",
+        ["session_id"],
+        ["id"],
+    )
+    op.create_foreign_key(
+        "session_memory_events_message_id_fkey",
+        "session_memory_events",
+        "messages",
+        ["message_id"],
+        ["id"],
+    )
+    op.create_foreign_key(
+        "session_memory_events_task_id_fkey",
+        "session_memory_events",
+        "task_runs",
+        ["task_id"],
+        ["id"],
+    )
+    op.create_foreign_key(
+        "session_memory_events_revision_id_fkey",
+        "session_memory_events",
+        "task_spec_revisions",
+        ["revision_id"],
+        ["id"],
+    )
+    op.create_foreign_key(
+        "fk_task_spec_revisions_parent_message_understanding_id",
+        "task_spec_revisions",
+        "message_understandings",
+        ["parent_message_understanding_id"],
+        ["id"],
+    )
+    op.create_foreign_key(
+        "session_state_snapshots_session_id_fkey",
+        "session_state_snapshots",
+        "sessions",
+        ["session_id"],
+        ["id"],
+    )
+    op.create_foreign_key(
+        "session_memory_summaries_session_id_fkey",
+        "session_memory_summaries",
+        "sessions",
+        ["session_id"],
+        ["id"],
+    )
+    op.create_foreign_key(
+        "session_memory_links_session_id_fkey",
+        "session_memory_links",
+        "sessions",
+        ["session_id"],
+        ["id"],
+    )
+    op.create_foreign_key(
+        "session_memory_retrieval_cache_session_id_fkey",
+        "session_memory_retrieval_cache",
+        "sessions",
+        ["session_id"],
+        ["id"],
+    )
+    op.create_foreign_key(
+        "session_memory_retrieval_cache_message_id_fkey",
+        "session_memory_retrieval_cache",
+        "messages",
+        ["message_id"],
+        ["id"],
+    )
