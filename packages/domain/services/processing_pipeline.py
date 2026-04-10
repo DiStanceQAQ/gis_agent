@@ -6,7 +6,7 @@ import sqlite3
 import struct
 import zlib
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import numpy as np
 import rasterio
@@ -220,7 +220,9 @@ def _valid_data_mask(data: np.ndarray, nodata: float | None) -> np.ndarray:
     return mask
 
 
-def _compute_slope_and_aspect(*, data: np.ndarray, x_res: float, y_res: float) -> tuple[np.ndarray, np.ndarray]:
+def _compute_slope_and_aspect(
+    *, data: np.ndarray, x_res: float, y_res: float
+) -> tuple[np.ndarray, np.ndarray]:
     safe_x = abs(float(x_res)) if x_res else 1.0
     safe_y = abs(float(y_res)) if y_res else 1.0
     grad_y, grad_x = np.gradient(data.astype("float32"), safe_y, safe_x)
@@ -257,7 +259,9 @@ def _resolve_raster_sources(
             sources.append(Path(str(item)))
 
     if not sources:
-        sources.append(_resolve_raster_source(node=node, references=references, working_dir=working_dir))
+        sources.append(
+            _resolve_raster_source(node=node, references=references, working_dir=working_dir)
+        )
 
     resolved: list[Path] = []
     for path in sources:
@@ -626,8 +630,8 @@ def _write_gpkg(path: Path, geometries: list[dict[str, Any]], *, crs: str) -> No
                 4326,
                 "EPSG",
                 4326,
-                "GEOGCS[\"WGS 84\",DATUM[\"WGS_1984\",SPHEROID[\"WGS 84\",6378137,298.257223563]],"
-                "PRIMEM[\"Greenwich\",0],UNIT[\"degree\",0.0174532925199433]]",
+                'GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563]],'
+                'PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433]]',
                 "WGS84",
             ),
         )
@@ -820,7 +824,25 @@ def preflight_processing_pipeline_inputs(
             raise ValueError(f"Operation plan contains unresolved dependencies: {unresolved_ids}")
 
 
-def run_processing_pipeline(*, task_id: str, plan_nodes: list[dict[str, Any]], working_dir: Path) -> dict[str, Any]:
+class PipelineEventCallback(Protocol):
+    def __call__(
+        self,
+        *,
+        event_type: str,
+        step_id: str,
+        op_name: str,
+        status: str,
+        detail: dict[str, object] | None = None,
+    ) -> None: ...
+
+
+def run_processing_pipeline(
+    *,
+    task_id: str,
+    plan_nodes: list[dict[str, Any]],
+    working_dir: Path,
+    on_event: PipelineEventCallback | None = None,
+) -> dict[str, Any]:
     del task_id
     if not plan_nodes:
         raise ValueError("Operation plan nodes must not be empty.")
@@ -846,751 +868,895 @@ def run_processing_pipeline(*, task_id: str, plan_nodes: list[dict[str, Any]], w
             inputs = node.get("inputs") or {}
             params = node.get("params") or {}
 
-            if op_name == "input.upload_raster":
-                output_ref = str(outputs.get("raster") or step_id or "uploaded_raster")
-                source_path = _resolve_raster_source(node=node, references=references, working_dir=working_dir)
-                references[output_ref] = str(source_path)
-            elif op_name == "input.upload_vector":
-                output_ref = str(outputs.get("vector") or step_id or "uploaded_vector")
-                source_path = _resolve_vector_source(node=node, references=references, working_dir=working_dir)
-                references[output_ref] = str(source_path)
-            elif op_name == "raster.clip":
-                output_ref = str(outputs.get("raster") or step_id or "raster_clip")
-                output_path = working_dir / f"{step_id or output_ref}.tif"
-                source_path = _resolve_raster_source(node=node, references=references, working_dir=working_dir)
-                clip_geometries, clip_crs, has_explicit_clip_input = _resolve_explicit_geometries(
-                    node=node,
-                    references=references,
-                    input_keys=("aoi", "clip_vector", "vector"),
-                    path_param_keys=("aoi_path", "clip_path", "vector_path"),
-                    geometry_param_keys=("geometry", "clip_geometry"),
-                    geometries_param_keys=("geometries", "clip_geometries"),
-                    bbox_param_keys=("bbox", "clip_bbox"),
-                    crs_param_keys=("aoi_crs", "clip_crs", "source_crs"),
+            if on_event:
+                on_event(
+                    event_type="operation_node_started",
+                    step_id=step_id,
+                    op_name=op_name,
+                    status="running",
+                    detail={"depends_on": depends_on},
                 )
-                if has_explicit_clip_input and not clip_geometries:
-                    raise ValueError(f"{step_id or output_ref} cannot resolve clip geometry from explicit inputs.")
-                if clip_geometries:
-                    with rasterio.open(source_path) as src:
-                        clip_shapes = clip_geometries
-                        source_crs_name = str(clip_crs or "EPSG:4326")
-                        target_crs_name = str(src.crs) if src.crs else "EPSG:4326"
-                        if source_crs_name != target_crs_name:
-                            clip_shapes = [
-                                transform_geom(source_crs_name, target_crs_name, geometry)
-                                for geometry in clip_geometries
-                            ]
 
-                        clipped_data, clipped_transform = rasterio_mask(
-                            src,
-                            clip_shapes,
-                            crop=bool(params.get("crop", True)),
-                            all_touched=bool(params.get("all_touched", False)),
+            try:
+                if op_name == "input.upload_raster":
+                    output_ref = str(outputs.get("raster") or step_id or "uploaded_raster")
+                    source_path = _resolve_raster_source(
+                        node=node, references=references, working_dir=working_dir
+                    )
+                    references[output_ref] = str(source_path)
+                elif op_name == "input.upload_vector":
+                    output_ref = str(outputs.get("vector") or step_id or "uploaded_vector")
+                    source_path = _resolve_vector_source(
+                        node=node, references=references, working_dir=working_dir
+                    )
+                    references[output_ref] = str(source_path)
+                elif op_name == "raster.clip":
+                    output_ref = str(outputs.get("raster") or step_id or "raster_clip")
+                    output_path = working_dir / f"{step_id or output_ref}.tif"
+                    source_path = _resolve_raster_source(
+                        node=node, references=references, working_dir=working_dir
+                    )
+                    clip_geometries, clip_crs, has_explicit_clip_input = _resolve_explicit_geometries(
+                        node=node,
+                        references=references,
+                        input_keys=("aoi", "clip_vector", "vector"),
+                        path_param_keys=("aoi_path", "clip_path", "vector_path"),
+                        geometry_param_keys=("geometry", "clip_geometry"),
+                        geometries_param_keys=("geometries", "clip_geometries"),
+                        bbox_param_keys=("bbox", "clip_bbox"),
+                        crs_param_keys=("aoi_crs", "clip_crs", "source_crs"),
+                    )
+                    if has_explicit_clip_input and not clip_geometries:
+                        raise ValueError(
+                            f"{step_id or output_ref} cannot resolve clip geometry from explicit inputs."
+                        )
+                    if clip_geometries:
+                        with rasterio.open(source_path) as src:
+                            clip_shapes = clip_geometries
+                            source_crs_name = str(clip_crs or "EPSG:4326")
+                            target_crs_name = str(src.crs) if src.crs else "EPSG:4326"
+                            if source_crs_name != target_crs_name:
+                                clip_shapes = [
+                                    transform_geom(source_crs_name, target_crs_name, geometry)
+                                    for geometry in clip_geometries
+                                ]
+
+                            clipped_data, clipped_transform = rasterio_mask(
+                                src,
+                                clip_shapes,
+                                crop=bool(params.get("crop", True)),
+                                all_touched=bool(params.get("all_touched", False)),
+                            )
+                            profile = src.profile.copy()
+                            profile.update(
+                                height=clipped_data.shape[1],
+                                width=clipped_data.shape[2],
+                                transform=clipped_transform,
+                            )
+                            with rasterio.open(output_path, "w", **profile) as dst:
+                                dst.write(clipped_data)
+                    else:
+                        _write_raster_copy(source_path=source_path, output_path=output_path)
+                    references[output_ref] = str(output_path)
+                elif op_name == "raster.reproject":
+                    output_ref = str(outputs.get("raster") or step_id or "raster_reproject")
+                    output_path = working_dir / f"{step_id or output_ref}.tif"
+                    source_path = _resolve_raster_source(
+                        node=node, references=references, working_dir=working_dir
+                    )
+                    target_crs = str(params.get("target_crs") or "EPSG:4326")
+                    with rasterio.open(source_path) as src:
+                        transform, width, height = calculate_default_transform(
+                            src.crs,
+                            target_crs,
+                            src.width,
+                            src.height,
+                            *src.bounds,
                         )
                         profile = src.profile.copy()
-                        profile.update(
-                            height=clipped_data.shape[1],
-                            width=clipped_data.shape[2],
-                            transform=clipped_transform,
-                        )
+                        profile.update(crs=target_crs, transform=transform, width=width, height=height)
                         with rasterio.open(output_path, "w", **profile) as dst:
-                            dst.write(clipped_data)
-                else:
-                    _write_raster_copy(source_path=source_path, output_path=output_path)
-                references[output_ref] = str(output_path)
-            elif op_name == "raster.reproject":
-                output_ref = str(outputs.get("raster") or step_id or "raster_reproject")
-                output_path = working_dir / f"{step_id or output_ref}.tif"
-                source_path = _resolve_raster_source(node=node, references=references, working_dir=working_dir)
-                target_crs = str(params.get("target_crs") or "EPSG:4326")
-                with rasterio.open(source_path) as src:
-                    transform, width, height = calculate_default_transform(
-                        src.crs,
-                        target_crs,
-                        src.width,
-                        src.height,
-                        *src.bounds,
-                    )
-                    profile = src.profile.copy()
-                    profile.update(crs=target_crs, transform=transform, width=width, height=height)
-                    with rasterio.open(output_path, "w", **profile) as dst:
-                        for band_index in range(1, src.count + 1):
-                            reproject(
-                                source=rasterio.band(src, band_index),
-                                destination=rasterio.band(dst, band_index),
-                                src_transform=src.transform,
-                                src_crs=src.crs,
-                                dst_transform=transform,
-                                dst_crs=target_crs,
-                                resampling=Resampling.bilinear,
-                            )
-                references[output_ref] = str(output_path)
-            elif op_name == "raster.resample":
-                output_ref = str(outputs.get("raster") or step_id or "raster_resample")
-                output_path = working_dir / f"{step_id or output_ref}.tif"
-                source_path = _resolve_raster_source(node=node, references=references, working_dir=working_dir)
-                with rasterio.open(source_path) as src:
-                    target_resolution = params.get("resolution")
-                    if target_resolution is not None and src.res:
-                        target = float(target_resolution)
-                        scale_x = float(src.res[0]) / target if target > 0 else 1.0
-                        scale_y = float(src.res[1]) / target if target > 0 else 1.0
-                    else:
-                        scale = float(params.get("scale") or 1.0)
-                        scale_x = scale
-                        scale_y = scale
-                    width = max(1, int(round(src.width * scale_x)))
-                    height = max(1, int(round(src.height * scale_y)))
-                    data = src.read(
-                        out_shape=(src.count, height, width),
-                        resampling=Resampling.bilinear,
-                    )
-                    transform = src.transform * src.transform.scale(src.width / width, src.height / height)
-                    profile = src.profile.copy()
-                    profile.update(width=width, height=height, transform=transform)
-                    with rasterio.open(output_path, "w", **profile) as dst:
-                        dst.write(data)
-                references[output_ref] = str(output_path)
-            elif op_name == "raster.band_math":
-                output_ref = str(outputs.get("raster") or step_id or "raster_math")
-                output_path = working_dir / f"{step_id or output_ref}.tif"
-                source_path = _resolve_raster_source(node=node, references=references, working_dir=working_dir)
-                expression = str(params.get("expression") or "b1")
-                with rasterio.open(source_path) as src:
-                    bands = src.read().astype("float32")
-                    eval_locals: dict[str, Any] = {"np": np}
-                    for band_index in range(src.count):
-                        eval_locals[f"b{band_index + 1}"] = bands[band_index]
-                    if src.count >= 1:
-                        # Keep band aliases resilient for single-band rasters so
-                        # NDVI/NDWI-style expressions degrade gracefully in demo data.
-                        eval_locals["red"] = bands[0]
-                        eval_locals["green"] = bands[0]
-                        eval_locals["nir"] = bands[1] if src.count >= 2 else bands[0]
-
-                    result = eval(expression, {"__builtins__": {}}, eval_locals)  # noqa: S307
-                    if not isinstance(result, np.ndarray):
-                        result = np.full_like(bands[0], float(result), dtype="float32")
-                    result = np.asarray(result, dtype="float32")
-                    if result.shape != bands[0].shape:
-                        raise ValueError("band_math expression output shape mismatch with source raster")
-
-                    profile = src.profile.copy()
-                    profile.update(count=1, dtype="float32")
-                    with rasterio.open(output_path, "w", **profile) as dst:
-                        dst.write(result, 1)
-                references[output_ref] = str(output_path)
-            elif op_name == "raster.zonal_stats":
-                table_ref = str(outputs.get("table") or step_id or "zonal_stats")
-                output_path = working_dir / f"{step_id or table_ref}.csv"
-                source_path = _resolve_raster_source(node=node, references=references, working_dir=working_dir)
-                stats = [str(item).lower() for item in (params.get("stats") or ["mean", "min", "max"])]
-                zone_geometries, zone_crs, has_explicit_zone_input = _resolve_explicit_geometries(
-                    node=node,
-                    references=references,
-                    input_keys=("zones", "vector", "aoi"),
-                    path_param_keys=("zones_path", "zone_path"),
-                    geometry_param_keys=("zones_geometry", "zone_geometry", "geometry"),
-                    geometries_param_keys=("zones_geometries", "geometries"),
-                    bbox_param_keys=("zones_bbox",),
-                    crs_param_keys=("zones_crs", "zone_crs", "source_crs"),
-                )
-                if has_explicit_zone_input and not zone_geometries:
-                    raise ValueError(f"{step_id or table_ref} cannot resolve zone geometries from explicit inputs.")
-                with rasterio.open(source_path) as src:
-                    data = src.read(1).astype("float32")
-                    nodata = src.nodata
-                    valid_mask = _valid_data_mask(data, nodata)
-                    rows: list[list[float | None | str]] = []
-                    if zone_geometries:
-                        target_crs_name = str(src.crs) if src.crs else "EPSG:4326"
-                        zones_for_raster = zone_geometries
-                        source_crs_name = str(zone_crs or "EPSG:4326")
-                        if source_crs_name != target_crs_name:
-                            zones_for_raster = [
-                                transform_geom(source_crs_name, target_crs_name, geometry)
-                                for geometry in zone_geometries
-                            ]
-                        for index, zone_geometry in enumerate(zones_for_raster, start=1):
-                            zone_mask = rasterize(
-                                [(zone_geometry, 1)],
-                                out_shape=(src.height, src.width),
-                                transform=src.transform,
-                                fill=0,
-                                all_touched=bool(params.get("all_touched", False)),
-                                dtype="uint8",
-                            ).astype(bool)
-                            zone_values = data[zone_mask & valid_mask]
-                            rows.append([str(index), *_compute_zone_stats(zone_values, stats)])
-                    else:
-                        values = data[valid_mask]
-                        rows.append(["all", *_compute_zone_stats(values, stats)])
-
-                with output_path.open("w", newline="", encoding="utf-8") as csv_file:
-                    writer = csv.writer(csv_file)
-                    writer.writerow(["zone_id", *stats])
-                    for row in rows:
-                        writer.writerow(row)
-                references[table_ref] = str(output_path)
-            elif op_name == "raster.terrain_slope":
-                output_ref = str(outputs.get("raster") or step_id or "raster_terrain_slope")
-                output_path = working_dir / f"{step_id or output_ref}.tif"
-                source_path = _resolve_raster_source(node=node, references=references, working_dir=working_dir)
-                with rasterio.open(source_path) as src:
-                    data = src.read(1).astype("float32")
-                    x_res = float(src.res[0]) if src.res else 1.0
-                    y_res = float(src.res[1]) if src.res else 1.0
-                    slope, _ = _compute_slope_and_aspect(data=data, x_res=x_res, y_res=y_res)
-                    profile = src.profile.copy()
-                    profile.update(count=1, dtype="float32")
-                    with rasterio.open(output_path, "w", **profile) as dst:
-                        dst.write(slope, 1)
-                references[output_ref] = str(output_path)
-            elif op_name == "raster.terrain_aspect":
-                output_ref = str(outputs.get("raster") or step_id or "raster_terrain_aspect")
-                output_path = working_dir / f"{step_id or output_ref}.tif"
-                source_path = _resolve_raster_source(node=node, references=references, working_dir=working_dir)
-                with rasterio.open(source_path) as src:
-                    data = src.read(1).astype("float32")
-                    x_res = float(src.res[0]) if src.res else 1.0
-                    y_res = float(src.res[1]) if src.res else 1.0
-                    _, aspect = _compute_slope_and_aspect(data=data, x_res=x_res, y_res=y_res)
-                    profile = src.profile.copy()
-                    profile.update(count=1, dtype="float32")
-                    with rasterio.open(output_path, "w", **profile) as dst:
-                        dst.write(aspect, 1)
-                references[output_ref] = str(output_path)
-            elif op_name == "raster.hillshade":
-                output_ref = str(outputs.get("raster") or step_id or "raster_hillshade")
-                output_path = working_dir / f"{step_id or output_ref}.tif"
-                source_path = _resolve_raster_source(node=node, references=references, working_dir=working_dir)
-                altitude = float(params.get("altitude") or 45.0)
-                azimuth = float(params.get("azimuth") or 315.0)
-                with rasterio.open(source_path) as src:
-                    data = src.read(1).astype("float32")
-                    x_res = float(src.res[0]) if src.res else 1.0
-                    y_res = float(src.res[1]) if src.res else 1.0
-                    slope_deg, aspect_deg = _compute_slope_and_aspect(data=data, x_res=x_res, y_res=y_res)
-                    slope_rad = np.radians(slope_deg)
-                    aspect_rad = np.radians(aspect_deg)
-
-                    zenith_rad = np.radians(90.0 - altitude)
-                    azimuth_rad = np.radians(360.0 - azimuth + 90.0)
-                    shaded = np.cos(zenith_rad) * np.cos(slope_rad) + np.sin(zenith_rad) * np.sin(
-                        slope_rad
-                    ) * np.cos(azimuth_rad - aspect_rad)
-                    shaded = np.clip(shaded, 0.0, 1.0)
-                    hillshade = (255.0 * shaded).astype("uint8")
-
-                    profile = src.profile.copy()
-                    profile.update(count=1, dtype="uint8", nodata=0)
-                    with rasterio.open(output_path, "w", **profile) as dst:
-                        dst.write(hillshade, 1)
-                references[output_ref] = str(output_path)
-            elif op_name == "raster.mosaic":
-                output_ref = str(outputs.get("raster") or step_id or "raster_mosaic")
-                output_path = working_dir / f"{step_id or output_ref}.tif"
-                source_paths = _resolve_raster_sources(node=node, references=references, working_dir=working_dir)
-                if not source_paths:
-                    raise ValueError("raster.mosaic requires at least one source raster")
-
-                with rasterio.open(source_paths[0]) as base:
-                    profile = base.profile.copy()
-                    mosaic = base.read(1).astype("float32")
-                    mosaic_nodata = base.nodata
-                    mosaic_valid = _valid_data_mask(mosaic, mosaic_nodata)
-
-                    for src_path in source_paths[1:]:
-                        with rasterio.open(src_path) as src:
-                            src_band = src.read(1).astype("float32")
-                            if (
-                                src.width != base.width
-                                or src.height != base.height
-                                or src.crs != base.crs
-                                or src.transform != base.transform
-                            ):
-                                projected = np.empty((base.height, base.width), dtype="float32")
+                            for band_index in range(1, src.count + 1):
                                 reproject(
-                                    source=src_band,
-                                    destination=projected,
+                                    source=rasterio.band(src, band_index),
+                                    destination=rasterio.band(dst, band_index),
                                     src_transform=src.transform,
                                     src_crs=src.crs,
-                                    dst_transform=base.transform,
-                                    dst_crs=base.crs,
+                                    dst_transform=transform,
+                                    dst_crs=target_crs,
                                     resampling=Resampling.bilinear,
                                 )
-                                candidate = projected
-                            else:
-                                candidate = src_band
-
-                            candidate_valid = _valid_data_mask(candidate, src.nodata)
-                            fill_mask = (~mosaic_valid) & candidate_valid
-                            mosaic[fill_mask] = candidate[fill_mask]
-                            mosaic_valid |= candidate_valid
-
-                    if mosaic_nodata is not None:
-                        mosaic[~mosaic_valid] = float(mosaic_nodata)
-
-                profile.update(count=1, dtype="float32")
-                with rasterio.open(output_path, "w", **profile) as dst:
-                    dst.write(mosaic.astype("float32"), 1)
-
-                references[output_ref] = str(output_path)
-            elif op_name == "raster.reclassify":
-                output_ref = str(outputs.get("raster") or step_id or "raster_reclassify")
-                output_path = working_dir / f"{step_id or output_ref}.tif"
-                source_path = _resolve_raster_source(node=node, references=references, working_dir=working_dir)
-                rules = params.get("rules") or []
-                if not isinstance(rules, list) or not rules:
-                    raise ValueError("raster.reclassify requires non-empty rules list")
-
-                default_value = float(params.get("default_value", 0.0))
-                output_dtype = str(params.get("dtype") or "float32")
-                with rasterio.open(source_path) as src:
-                    data = src.read(1).astype("float32")
-                    reclassified = np.full(data.shape, default_value, dtype="float32")
-                    for rule in rules:
-                        if isinstance(rule, dict):
-                            min_value = float(rule.get("min", float("-inf")))
-                            max_value = float(rule.get("max", float("inf")))
-                            target_value = float(rule["value"])
-                            include_min = bool(rule.get("include_min", True))
-                            include_max = bool(rule.get("include_max", False))
-                        elif isinstance(rule, (list, tuple)) and len(rule) == 3:
-                            min_value = float(rule[0])
-                            max_value = float(rule[1])
-                            target_value = float(rule[2])
-                            include_min = True
-                            include_max = False
+                    references[output_ref] = str(output_path)
+                elif op_name == "raster.resample":
+                    output_ref = str(outputs.get("raster") or step_id or "raster_resample")
+                    output_path = working_dir / f"{step_id or output_ref}.tif"
+                    source_path = _resolve_raster_source(
+                        node=node, references=references, working_dir=working_dir
+                    )
+                    with rasterio.open(source_path) as src:
+                        target_resolution = params.get("resolution")
+                        if target_resolution is not None and src.res:
+                            target = float(target_resolution)
+                            scale_x = float(src.res[0]) / target if target > 0 else 1.0
+                            scale_y = float(src.res[1]) / target if target > 0 else 1.0
                         else:
-                            raise ValueError("raster.reclassify rules must be dict or [min,max,value]")
-
-                        min_mask = data >= min_value if include_min else data > min_value
-                        max_mask = data <= max_value if include_max else data < max_value
-                        reclassified[min_mask & max_mask] = target_value
-
-                    profile = src.profile.copy()
-                    profile.update(count=1, dtype=output_dtype)
-                    with rasterio.open(output_path, "w", **profile) as dst:
-                        dst.write(reclassified.astype(output_dtype), 1)
-                references[output_ref] = str(output_path)
-            elif op_name == "raster.mask":
-                output_ref = str(outputs.get("raster") or step_id or "raster_mask")
-                output_path = working_dir / f"{step_id or output_ref}.tif"
-                source_path = _resolve_raster_source(node=node, references=references, working_dir=working_dir)
-                geometries = _resolve_geometry_shapes(node=node, references=references)
-                invert = bool(params.get("invert", False))
-                with rasterio.open(source_path) as src:
-                    all_touched = bool(params.get("all_touched", False))
-                    mask_uint8 = rasterize(
-                        [(geometry, 1) for geometry in geometries],
-                        out_shape=(src.height, src.width),
-                        transform=src.transform,
-                        fill=0,
-                        all_touched=all_touched,
-                        dtype="uint8",
-                    )
-                    mask_bool = mask_uint8.astype(bool)
-                    if invert:
-                        mask_bool = ~mask_bool
-
-                    profile = src.profile.copy()
-                    output_data = src.read()
-                    nodata = (
-                        float(params.get("nodata"))
-                        if params.get("nodata") is not None
-                        else src.nodata
-                    )
-                    if nodata is None:
-                        nodata = -9999.0 if np.issubdtype(output_data.dtype, np.floating) else 0
-
-                    for band_idx in range(output_data.shape[0]):
-                        band = output_data[band_idx]
-                        band[~mask_bool] = nodata
-                        output_data[band_idx] = band
-
-                    profile.update(nodata=nodata)
-                    with rasterio.open(output_path, "w", **profile) as dst:
-                        dst.write(output_data)
-                references[output_ref] = str(output_path)
-            elif op_name == "raster.rasterize":
-                output_ref = str(outputs.get("raster") or step_id or "raster_rasterize")
-                output_path = working_dir / f"{step_id or output_ref}.tif"
-                geometries = _resolve_geometry_shapes(node=node, references=references)
-                burn_value = float(params.get("burn_value", 1.0))
-                nodata = float(params.get("nodata", 0.0))
-                output_dtype = str(params.get("dtype") or "float32")
-
-                template_ref = str(inputs.get("raster") or "")
-                template_path = (
-                    Path(references[template_ref])
-                    if template_ref and template_ref in references
-                    else None
-                )
-                if template_path is None and params.get("template_raster_path"):
-                    template_path = Path(str(params.get("template_raster_path")))
-
-                if template_path is not None and _is_supported_raster(template_path):
-                    with rasterio.open(template_path) as src:
-                        width = src.width
-                        height = src.height
-                        transform = src.transform
-                        crs = src.crs
-                else:
-                    width = int(params.get("width") or 256)
-                    height = int(params.get("height") or 256)
-                    if width <= 0 or height <= 0:
-                        raise ValueError("raster.rasterize width/height must be positive")
-
-                    if isinstance(params.get("bounds"), list) and len(params["bounds"]) == 4:
-                        minx, miny, maxx, maxy = [float(value) for value in params["bounds"]]
-                    else:
-                        minx, miny, maxx, maxy = 116.0, 39.9, 116.1, 40.0
-                    x_res = (maxx - minx) / width
-                    y_res = (maxy - miny) / height
-                    transform = from_origin(minx, maxy, x_res, y_res)
-                    crs = str(params.get("target_crs") or "EPSG:4326")
-
-                burned = rasterize(
-                    [(geometry, burn_value) for geometry in geometries],
-                    out_shape=(height, width),
-                    transform=transform,
-                    fill=nodata,
-                    all_touched=bool(params.get("all_touched", False)),
-                    dtype=output_dtype,
-                )
-                with rasterio.open(
-                    output_path,
-                    "w",
-                    driver="GTiff",
-                    height=height,
-                    width=width,
-                    count=1,
-                    dtype=output_dtype,
-                    crs=crs,
-                    transform=transform,
-                    nodata=nodata,
-                ) as dst:
-                    dst.write(burned, 1)
-                references[output_ref] = str(output_path)
-            elif op_name == "vector.buffer":
-                output_ref = str(outputs.get("vector") or step_id or "vector_buffer")
-                output_path = working_dir / f"{step_id or output_ref}.geojson"
-                geometries, source_crs = _resolve_vector_geometries(node=node, references=references)
-                buffer_m = params.get("distance_m")
-                distance = float(params.get("distance") if params.get("distance") is not None else 0.0)
-                if buffer_m is not None:
-                    buffer_m_value = float(buffer_m)
-                    if source_crs.upper().endswith("4326"):
-                        distance = buffer_m_value / 111320.0
-                    else:
-                        distance = buffer_m_value
-                if distance <= 0:
-                    raise ValueError("vector.buffer requires a positive distance or distance_m")
-
-                source_shapes = _geometry_dicts_to_shapes(geometries)
-                buffered_geometries: list[dict[str, Any]] = []
-                for geom in source_shapes:
-                    buffered_geometries.extend(_shape_to_geometry_list(geom.buffer(distance)))
-                if not buffered_geometries:
-                    buffered_geometries = [_default_geometry()]
-                _write_geojson(output_path, buffered_geometries, crs=source_crs)
-                references[output_ref] = str(output_path)
-            elif op_name == "vector.clip":
-                output_ref = str(outputs.get("vector") or step_id or "vector_clip")
-                output_path = working_dir / f"{step_id or output_ref}.geojson"
-                primary_geometries, source_crs = _resolve_vector_geometries(node=node, references=references)
-                overlay_geometries, _ = _resolve_overlay_geometries(node=node, references=references)
-                primary_shapes = _geometry_dicts_to_shapes(primary_geometries)
-                overlay_shapes = _geometry_dicts_to_shapes(overlay_geometries)
-                overlay_union = unary_union(overlay_shapes)
-
-                clipped_geometries: list[dict[str, Any]] = []
-                for geom in primary_shapes:
-                    clipped_geometries.extend(_shape_to_geometry_list(geom.intersection(overlay_union)))
-                if not clipped_geometries:
-                    clipped_geometries = [_default_geometry()]
-                _write_geojson(output_path, clipped_geometries, crs=source_crs)
-                references[output_ref] = str(output_path)
-            elif op_name == "vector.intersection":
-                output_ref = str(outputs.get("vector") or step_id or "vector_intersection")
-                output_path = working_dir / f"{step_id or output_ref}.geojson"
-                left_geometries, source_crs = _resolve_vector_geometries(node=node, references=references)
-                right_geometries, _ = _resolve_overlay_geometries(node=node, references=references)
-                left_shapes = _geometry_dicts_to_shapes(left_geometries)
-                right_shapes = _geometry_dicts_to_shapes(right_geometries)
-
-                intersected_geometries: list[dict[str, Any]] = []
-                for left_shape in left_shapes:
-                    for right_shape in right_shapes:
-                        intersected_geometries.extend(
-                            _shape_to_geometry_list(left_shape.intersection(right_shape))
+                            scale = float(params.get("scale") or 1.0)
+                            scale_x = scale
+                            scale_y = scale
+                        width = max(1, int(round(src.width * scale_x)))
+                        height = max(1, int(round(src.height * scale_y)))
+                        data = src.read(
+                            out_shape=(src.count, height, width),
+                            resampling=Resampling.bilinear,
                         )
-                if not intersected_geometries:
-                    intersected_geometries = [_default_geometry()]
-                _write_geojson(output_path, intersected_geometries, crs=source_crs)
-                references[output_ref] = str(output_path)
-            elif op_name == "vector.dissolve":
-                output_ref = str(outputs.get("vector") or step_id or "vector_dissolve")
-                output_path = working_dir / f"{step_id or output_ref}.geojson"
-                geometries, source_crs = _resolve_vector_geometries(node=node, references=references)
-                source_shapes = _geometry_dicts_to_shapes(geometries)
-                dissolved = unary_union(source_shapes)
-                dissolved_geometries = _shape_to_geometry_list(dissolved)
-                if not dissolved_geometries:
-                    dissolved_geometries = [_default_geometry()]
-                _write_geojson(output_path, dissolved_geometries, crs=source_crs)
-                references[output_ref] = str(output_path)
-            elif op_name == "vector.reproject":
-                output_ref = str(outputs.get("vector") or step_id or "vector_reproject")
-                output_path = working_dir / f"{step_id or output_ref}.geojson"
-                geometries, source_crs = _resolve_vector_geometries(node=node, references=references)
-                target_crs = str(params.get("target_crs") or "EPSG:4326")
-                source_override = params.get("source_crs")
-                source_crs_name = str(source_override or source_crs or "EPSG:4326")
-                reprojected_geometries: list[dict[str, Any]] = []
-                for geometry in geometries:
-                    if source_crs_name == target_crs:
-                        reprojected_geometries.append(geometry)
-                    else:
-                        reprojected_geometries.append(
-                            transform_geom(source_crs_name, target_crs, geometry)
+                        transform = src.transform * src.transform.scale(
+                            src.width / width, src.height / height
                         )
-                if not reprojected_geometries:
-                    reprojected_geometries = [_default_geometry()]
-                _write_geojson(output_path, reprojected_geometries, crs=target_crs)
-                references[output_ref] = str(output_path)
-            elif op_name == "vector.union":
-                output_ref = str(outputs.get("vector") or step_id or "vector_union")
-                output_path = working_dir / f"{step_id or output_ref}.geojson"
-                left_geometries, source_crs = _resolve_vector_geometries(node=node, references=references)
-                right_geometries, right_crs = _resolve_overlay_geometries(node=node, references=references)
-                _require_matching_crs(left_crs=source_crs, right_crs=right_crs, op_name=op_name)
-                all_shapes = _geometry_dicts_to_shapes(left_geometries) + _geometry_dicts_to_shapes(right_geometries)
-                merged = unary_union(all_shapes)
-                merged_geometries = _shape_to_geometry_list(merged)
-                if not merged_geometries:
-                    merged_geometries = [_default_geometry()]
-                _write_geojson(output_path, merged_geometries, crs=source_crs)
-                references[output_ref] = str(output_path)
-            elif op_name == "vector.erase":
-                output_ref = str(outputs.get("vector") or step_id or "vector_erase")
-                output_path = working_dir / f"{step_id or output_ref}.geojson"
-                left_geometries, source_crs = _resolve_vector_geometries(node=node, references=references)
-                right_geometries, right_crs = _resolve_overlay_geometries(node=node, references=references)
-                _require_matching_crs(left_crs=source_crs, right_crs=right_crs, op_name=op_name)
-                left_shapes = _geometry_dicts_to_shapes(left_geometries)
-                right_union = unary_union(_geometry_dicts_to_shapes(right_geometries))
-
-                erased_geometries: list[dict[str, Any]] = []
-                for left_shape in left_shapes:
-                    erased_geometries.extend(_shape_to_geometry_list(left_shape.difference(right_union)))
-                if not erased_geometries:
-                    erased_geometries = [_default_geometry()]
-                _write_geojson(output_path, erased_geometries, crs=source_crs)
-                references[output_ref] = str(output_path)
-            elif op_name == "vector.simplify":
-                output_ref = str(outputs.get("vector") or step_id or "vector_simplify")
-                output_path = working_dir / f"{step_id or output_ref}.geojson"
-                geometries, source_crs = _resolve_vector_geometries(node=node, references=references)
-                tolerance = float(params.get("tolerance") or 0.0)
-                if tolerance <= 0:
-                    raise ValueError("vector.simplify requires positive tolerance")
-                preserve_topology = bool(params.get("preserve_topology", True))
-                source_shapes = _geometry_dicts_to_shapes(geometries)
-
-                simplified_geometries: list[dict[str, Any]] = []
-                for geom in source_shapes:
-                    simplified_geometries.extend(
-                        _shape_to_geometry_list(geom.simplify(tolerance, preserve_topology=preserve_topology))
+                        profile = src.profile.copy()
+                        profile.update(width=width, height=height, transform=transform)
+                        with rasterio.open(output_path, "w", **profile) as dst:
+                            dst.write(data)
+                    references[output_ref] = str(output_path)
+                elif op_name == "raster.band_math":
+                    output_ref = str(outputs.get("raster") or step_id or "raster_math")
+                    output_path = working_dir / f"{step_id or output_ref}.tif"
+                    source_path = _resolve_raster_source(
+                        node=node, references=references, working_dir=working_dir
                     )
-                if not simplified_geometries:
-                    simplified_geometries = [_default_geometry()]
-                _write_geojson(output_path, simplified_geometries, crs=source_crs)
-                references[output_ref] = str(output_path)
-            elif op_name == "vector.spatial_join":
-                output_ref = str(outputs.get("vector") or step_id or "vector_spatial_join")
-                output_path = working_dir / f"{step_id or output_ref}.geojson"
-                left_geometries, source_crs = _resolve_vector_geometries(node=node, references=references)
-                right_geometries, right_crs = _resolve_overlay_geometries(node=node, references=references)
-                _require_matching_crs(left_crs=source_crs, right_crs=right_crs, op_name=op_name)
-                left_shapes = _geometry_dicts_to_shapes(left_geometries)
-                right_shapes = _geometry_dicts_to_shapes(right_geometries)
-                predicate = str(params.get("predicate") or "intersects")
+                    expression = str(params.get("expression") or "b1")
+                    with rasterio.open(source_path) as src:
+                        bands = src.read().astype("float32")
+                        eval_locals: dict[str, Any] = {"np": np}
+                        for band_index in range(src.count):
+                            eval_locals[f"b{band_index + 1}"] = bands[band_index]
+                        if src.count >= 1:
+                            # Keep band aliases resilient for single-band rasters so
+                            # NDVI/NDWI-style expressions degrade gracefully in demo data.
+                            eval_locals["red"] = bands[0]
+                            eval_locals["green"] = bands[0]
+                            eval_locals["nir"] = bands[1] if src.count >= 2 else bands[0]
 
-                output_features: list[dict[str, Any]] = []
-                for left_shape in left_shapes:
-                    if left_shape.is_empty:
-                        continue
-                    join_count = 0
-                    for right_shape in right_shapes:
-                        if right_shape.is_empty:
-                            continue
-                        if predicate == "contains":
-                            matched = left_shape.contains(right_shape)
-                        elif predicate == "within":
-                            matched = left_shape.within(right_shape)
-                        else:
-                            matched = left_shape.intersects(right_shape)
-                        if matched:
-                            join_count += 1
-                    output_features.append(
-                        {
-                            "type": "Feature",
-                            "properties": {"join_count": join_count, "predicate": predicate},
-                            "geometry": mapping(left_shape),
-                        }
+                        result = eval(expression, {"__builtins__": {}}, eval_locals)  # noqa: S307
+                        if not isinstance(result, np.ndarray):
+                            result = np.full_like(bands[0], float(result), dtype="float32")
+                        result = np.asarray(result, dtype="float32")
+                        if result.shape != bands[0].shape:
+                            raise ValueError(
+                                "band_math expression output shape mismatch with source raster"
+                            )
+
+                        profile = src.profile.copy()
+                        profile.update(count=1, dtype="float32")
+                        with rasterio.open(output_path, "w", **profile) as dst:
+                            dst.write(result, 1)
+                    references[output_ref] = str(output_path)
+                elif op_name == "raster.zonal_stats":
+                    table_ref = str(outputs.get("table") or step_id or "zonal_stats")
+                    output_path = working_dir / f"{step_id or table_ref}.csv"
+                    source_path = _resolve_raster_source(
+                        node=node, references=references, working_dir=working_dir
                     )
-
-                if not output_features:
-                    output_features = [
-                        {
-                            "type": "Feature",
-                            "properties": {"join_count": 0, "predicate": predicate},
-                            "geometry": _default_geometry(),
-                        }
+                    stats = [
+                        str(item).lower() for item in (params.get("stats") or ["mean", "min", "max"])
                     ]
+                    zone_geometries, zone_crs, has_explicit_zone_input = _resolve_explicit_geometries(
+                        node=node,
+                        references=references,
+                        input_keys=("zones", "vector", "aoi"),
+                        path_param_keys=("zones_path", "zone_path"),
+                        geometry_param_keys=("zones_geometry", "zone_geometry", "geometry"),
+                        geometries_param_keys=("zones_geometries", "geometries"),
+                        bbox_param_keys=("zones_bbox",),
+                        crs_param_keys=("zones_crs", "zone_crs", "source_crs"),
+                    )
+                    if has_explicit_zone_input and not zone_geometries:
+                        raise ValueError(
+                            f"{step_id or table_ref} cannot resolve zone geometries from explicit inputs."
+                        )
+                    with rasterio.open(source_path) as src:
+                        data = src.read(1).astype("float32")
+                        nodata = src.nodata
+                        valid_mask = _valid_data_mask(data, nodata)
+                        rows: list[list[float | None | str]] = []
+                        if zone_geometries:
+                            target_crs_name = str(src.crs) if src.crs else "EPSG:4326"
+                            zones_for_raster = zone_geometries
+                            source_crs_name = str(zone_crs or "EPSG:4326")
+                            if source_crs_name != target_crs_name:
+                                zones_for_raster = [
+                                    transform_geom(source_crs_name, target_crs_name, geometry)
+                                    for geometry in zone_geometries
+                                ]
+                            for index, zone_geometry in enumerate(zones_for_raster, start=1):
+                                zone_mask = rasterize(
+                                    [(zone_geometry, 1)],
+                                    out_shape=(src.height, src.width),
+                                    transform=src.transform,
+                                    fill=0,
+                                    all_touched=bool(params.get("all_touched", False)),
+                                    dtype="uint8",
+                                ).astype(bool)
+                                zone_values = data[zone_mask & valid_mask]
+                                rows.append([str(index), *_compute_zone_stats(zone_values, stats)])
+                        else:
+                            values = data[valid_mask]
+                            rows.append(["all", *_compute_zone_stats(values, stats)])
 
-                payload = {
-                    "type": "FeatureCollection",
-                    "features": output_features,
-                    "crs": {"type": "name", "properties": {"name": source_crs}},
-                }
-                output_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-                references[output_ref] = str(output_path)
-            elif op_name == "vector.repair":
-                output_ref = str(outputs.get("vector") or step_id or "vector_repair")
-                output_path = working_dir / f"{step_id or output_ref}.geojson"
-                geometries, source_crs = _resolve_vector_geometries(node=node, references=references)
-                source_shapes = _geometry_dicts_to_shapes(geometries)
+                    with output_path.open("w", newline="", encoding="utf-8") as csv_file:
+                        writer = csv.writer(csv_file)
+                        writer.writerow(["zone_id", *stats])
+                        for row in rows:
+                            writer.writerow(row)
+                    references[table_ref] = str(output_path)
+                elif op_name == "raster.terrain_slope":
+                    output_ref = str(outputs.get("raster") or step_id or "raster_terrain_slope")
+                    output_path = working_dir / f"{step_id or output_ref}.tif"
+                    source_path = _resolve_raster_source(
+                        node=node, references=references, working_dir=working_dir
+                    )
+                    with rasterio.open(source_path) as src:
+                        data = src.read(1).astype("float32")
+                        x_res = float(src.res[0]) if src.res else 1.0
+                        y_res = float(src.res[1]) if src.res else 1.0
+                        slope, _ = _compute_slope_and_aspect(data=data, x_res=x_res, y_res=y_res)
+                        profile = src.profile.copy()
+                        profile.update(count=1, dtype="float32")
+                        with rasterio.open(output_path, "w", **profile) as dst:
+                            dst.write(slope, 1)
+                    references[output_ref] = str(output_path)
+                elif op_name == "raster.terrain_aspect":
+                    output_ref = str(outputs.get("raster") or step_id or "raster_terrain_aspect")
+                    output_path = working_dir / f"{step_id or output_ref}.tif"
+                    source_path = _resolve_raster_source(
+                        node=node, references=references, working_dir=working_dir
+                    )
+                    with rasterio.open(source_path) as src:
+                        data = src.read(1).astype("float32")
+                        x_res = float(src.res[0]) if src.res else 1.0
+                        y_res = float(src.res[1]) if src.res else 1.0
+                        _, aspect = _compute_slope_and_aspect(data=data, x_res=x_res, y_res=y_res)
+                        profile = src.profile.copy()
+                        profile.update(count=1, dtype="float32")
+                        with rasterio.open(output_path, "w", **profile) as dst:
+                            dst.write(aspect, 1)
+                    references[output_ref] = str(output_path)
+                elif op_name == "raster.hillshade":
+                    output_ref = str(outputs.get("raster") or step_id or "raster_hillshade")
+                    output_path = working_dir / f"{step_id or output_ref}.tif"
+                    source_path = _resolve_raster_source(
+                        node=node, references=references, working_dir=working_dir
+                    )
+                    altitude = float(params.get("altitude") or 45.0)
+                    azimuth = float(params.get("azimuth") or 315.0)
+                    with rasterio.open(source_path) as src:
+                        data = src.read(1).astype("float32")
+                        x_res = float(src.res[0]) if src.res else 1.0
+                        y_res = float(src.res[1]) if src.res else 1.0
+                        slope_deg, aspect_deg = _compute_slope_and_aspect(
+                            data=data, x_res=x_res, y_res=y_res
+                        )
+                        slope_rad = np.radians(slope_deg)
+                        aspect_rad = np.radians(aspect_deg)
 
-                repaired_geometries: list[dict[str, Any]] = []
-                for geom in source_shapes:
-                    if geom.is_empty:
-                        continue
-                    fixed = geom if geom.is_valid else geom.buffer(0)
-                    repaired_geometries.extend(_shape_to_geometry_list(fixed))
-                if not repaired_geometries:
-                    repaired_geometries = [_default_geometry()]
-                _write_geojson(output_path, repaired_geometries, crs=source_crs)
-                references[output_ref] = str(output_path)
-            elif op_name == "artifact.export":
-                source_ref = str(inputs.get("primary") or "")
-                source_path = references.get(source_ref)
-                if source_path is None and params.get("source_path"):
-                    source_path = str(params.get("source_path"))
-                if source_path is None:
-                    source_path = _pick_primary_raster_reference(references)
-                if source_path is None:
-                    source_path = _pick_primary_vector_reference(references)
-                if source_path is None:
-                    raise ValueError("artifact.export requires a resolvable primary input reference")
+                        zenith_rad = np.radians(90.0 - altitude)
+                        azimuth_rad = np.radians(360.0 - azimuth + 90.0)
+                        shaded = np.cos(zenith_rad) * np.cos(slope_rad) + np.sin(zenith_rad) * np.sin(
+                            slope_rad
+                        ) * np.cos(azimuth_rad - aspect_rad)
+                        shaded = np.clip(shaded, 0.0, 1.0)
+                        hillshade = (255.0 * shaded).astype("uint8")
 
-                export_formats = params.get("formats") or ["geotiff"]
-                requested_output_path = params.get("output_path")
-                produced_artifact_path: str | None = None
-                for fmt in export_formats:
-                    fmt_name = str(fmt).lower()
-                    if fmt_name in {"geotiff", "tif", "tiff"}:
-                        candidate = Path(source_path)
-                        if not _is_supported_raster(candidate):
-                            raster_source = _pick_primary_raster_reference(references)
-                            if raster_source is not None and _is_supported_raster(Path(raster_source)):
-                                candidate = Path(raster_source)
+                        profile = src.profile.copy()
+                        profile.update(count=1, dtype="uint8", nodata=0)
+                        with rasterio.open(output_path, "w", **profile) as dst:
+                            dst.write(hillshade, 1)
+                    references[output_ref] = str(output_path)
+                elif op_name == "raster.mosaic":
+                    output_ref = str(outputs.get("raster") or step_id or "raster_mosaic")
+                    output_path = working_dir / f"{step_id or output_ref}.tif"
+                    source_paths = _resolve_raster_sources(
+                        node=node, references=references, working_dir=working_dir
+                    )
+                    if not source_paths:
+                        raise ValueError("raster.mosaic requires at least one source raster")
+
+                    with rasterio.open(source_paths[0]) as base:
+                        profile = base.profile.copy()
+                        mosaic = base.read(1).astype("float32")
+                        mosaic_nodata = base.nodata
+                        mosaic_valid = _valid_data_mask(mosaic, mosaic_nodata)
+
+                        for src_path in source_paths[1:]:
+                            with rasterio.open(src_path) as src:
+                                src_band = src.read(1).astype("float32")
+                                if (
+                                    src.width != base.width
+                                    or src.height != base.height
+                                    or src.crs != base.crs
+                                    or src.transform != base.transform
+                                ):
+                                    projected = np.empty((base.height, base.width), dtype="float32")
+                                    reproject(
+                                        source=src_band,
+                                        destination=projected,
+                                        src_transform=src.transform,
+                                        src_crs=src.crs,
+                                        dst_transform=base.transform,
+                                        dst_crs=base.crs,
+                                        resampling=Resampling.bilinear,
+                                    )
+                                    candidate = projected
+                                else:
+                                    candidate = src_band
+
+                                candidate_valid = _valid_data_mask(candidate, src.nodata)
+                                fill_mask = (~mosaic_valid) & candidate_valid
+                                mosaic[fill_mask] = candidate[fill_mask]
+                                mosaic_valid |= candidate_valid
+
+                        if mosaic_nodata is not None:
+                            mosaic[~mosaic_valid] = float(mosaic_nodata)
+
+                    profile.update(count=1, dtype="float32")
+                    with rasterio.open(output_path, "w", **profile) as dst:
+                        dst.write(mosaic.astype("float32"), 1)
+
+                    references[output_ref] = str(output_path)
+                elif op_name == "raster.reclassify":
+                    output_ref = str(outputs.get("raster") or step_id or "raster_reclassify")
+                    output_path = working_dir / f"{step_id or output_ref}.tif"
+                    source_path = _resolve_raster_source(
+                        node=node, references=references, working_dir=working_dir
+                    )
+                    rules = params.get("rules") or []
+                    if not isinstance(rules, list) or not rules:
+                        raise ValueError("raster.reclassify requires non-empty rules list")
+
+                    default_value = float(params.get("default_value", 0.0))
+                    output_dtype = str(params.get("dtype") or "float32")
+                    with rasterio.open(source_path) as src:
+                        data = src.read(1).astype("float32")
+                        reclassified = np.full(data.shape, default_value, dtype="float32")
+                        for rule in rules:
+                            if isinstance(rule, dict):
+                                min_value = float(rule.get("min", float("-inf")))
+                                max_value = float(rule.get("max", float("inf")))
+                                target_value = float(rule["value"])
+                                include_min = bool(rule.get("include_min", True))
+                                include_max = bool(rule.get("include_max", False))
+                            elif isinstance(rule, (list, tuple)) and len(rule) == 3:
+                                min_value = float(rule[0])
+                                max_value = float(rule[1])
+                                target_value = float(rule[2])
+                                include_min = True
+                                include_max = False
                             else:
-                                raise ValueError("artifact.export geotiff requires a valid raster source")
-                        if requested_output_path:
-                            desired_path = Path(str(requested_output_path))
-                            desired_path.parent.mkdir(parents=True, exist_ok=True)
-                            if str(candidate) != str(desired_path):
-                                _write_raster_copy(source_path=candidate, output_path=desired_path)
-                            candidate = desired_path
-                        source_path = str(candidate)
-                        artifacts.append(
-                            {"artifact_type": "geotiff", "path": str(source_path), "source_step": step_id}
+                                raise ValueError(
+                                    "raster.reclassify rules must be dict or [min,max,value]"
+                                )
+
+                            min_mask = data >= min_value if include_min else data > min_value
+                            max_mask = data <= max_value if include_max else data < max_value
+                            reclassified[min_mask & max_mask] = target_value
+
+                        profile = src.profile.copy()
+                        profile.update(count=1, dtype=output_dtype)
+                        with rasterio.open(output_path, "w", **profile) as dst:
+                            dst.write(reclassified.astype(output_dtype), 1)
+                    references[output_ref] = str(output_path)
+                elif op_name == "raster.mask":
+                    output_ref = str(outputs.get("raster") or step_id or "raster_mask")
+                    output_path = working_dir / f"{step_id or output_ref}.tif"
+                    source_path = _resolve_raster_source(
+                        node=node, references=references, working_dir=working_dir
+                    )
+                    geometries = _resolve_geometry_shapes(node=node, references=references)
+                    invert = bool(params.get("invert", False))
+                    with rasterio.open(source_path) as src:
+                        all_touched = bool(params.get("all_touched", False))
+                        mask_uint8 = rasterize(
+                            [(geometry, 1) for geometry in geometries],
+                            out_shape=(src.height, src.width),
+                            transform=src.transform,
+                            fill=0,
+                            all_touched=all_touched,
+                            dtype="uint8",
                         )
-                        exported_tif_path = str(source_path)
-                        produced_artifact_path = str(source_path)
-                    elif fmt_name in {"png", "png_map"}:
-                        png_path = working_dir / f"{step_id or 'export'}_preview.png"
-                        raster_source = Path(source_path)
-                        if not _is_supported_raster(raster_source):
-                            primary_raster = _pick_primary_raster_reference(references)
-                            if primary_raster is not None:
-                                raster_source = Path(primary_raster)
-                            else:
-                                raise ValueError("artifact.export png_map requires a valid raster source")
-                        _write_png_preview_from_raster(raster_path=raster_source, png_path=png_path)
-                        artifacts.append(
-                            {"artifact_type": "png_map", "path": str(png_path), "source_step": step_id}
+                        mask_bool = mask_uint8.astype(bool)
+                        if invert:
+                            mask_bool = ~mask_bool
+
+                        profile = src.profile.copy()
+                        output_data = src.read()
+                        nodata = (
+                            float(params.get("nodata"))
+                            if params.get("nodata") is not None
+                            else src.nodata
                         )
-                        exported_png_path = str(png_path)
-                        produced_artifact_path = str(png_path)
-                    elif fmt_name == "csv":
-                        csv_path = Path(source_path)
-                        if csv_path.suffix.lower() != ".csv":
-                            csv_path = working_dir / f"{step_id or 'export'}_table.csv"
-                            with csv_path.open("w", newline="", encoding="utf-8") as csv_file:
-                                writer = csv.writer(csv_file)
-                                writer.writerow(["key", "value"])
-                                writer.writerow(["source", str(source_path)])
-                        artifacts.append(
-                            {"artifact_type": "csv", "path": str(csv_path), "source_step": step_id}
-                        )
-                        produced_artifact_path = str(csv_path)
-                    elif fmt_name in {"geojson", "json"}:
-                        vector_source = Path(source_path)
-                        if vector_source.suffix.lower() not in {".geojson", ".json"}:
-                            picked_vector = _pick_primary_vector_reference(references)
-                            if picked_vector:
-                                vector_source = Path(picked_vector)
-                        if not vector_source.exists() or vector_source.suffix.lower() not in {".geojson", ".json"}:
-                            vector_source = working_dir / f"{step_id or 'export'}_vector.geojson"
-                            _write_geojson(vector_source, [_default_geometry()], crs="EPSG:4326")
-                        artifacts.append(
-                            {"artifact_type": "geojson", "path": str(vector_source), "source_step": step_id}
-                        )
-                        produced_artifact_path = str(vector_source)
-                    elif fmt_name == "gpkg":
-                        vector_source = Path(source_path)
-                        geometries: list[dict[str, Any]] = []
-                        vector_crs = "EPSG:4326"
-                        if vector_source.exists() and vector_source.suffix.lower() in {".geojson", ".json"}:
-                            geometries, parsed_crs = _load_geojson_geometries(vector_source)
-                            if parsed_crs:
-                                vector_crs = parsed_crs
-                        if not geometries:
-                            geometries = [_default_geometry()]
-                        gpkg_path = working_dir / f"{step_id or 'export'}_vector.gpkg"
-                        _write_gpkg(gpkg_path, geometries, crs=vector_crs)
-                        artifacts.append(
-                            {"artifact_type": "gpkg", "path": str(gpkg_path), "source_step": step_id}
-                        )
-                        produced_artifact_path = str(gpkg_path)
-                    elif fmt_name in {"shapefile", "shp"}:
-                        vector_source = Path(source_path)
-                        geometries: list[dict[str, Any]] = []
-                        vector_crs = "EPSG:4326"
-                        if vector_source.exists() and vector_source.suffix.lower() in {".geojson", ".json"}:
-                            geometries, parsed_crs = _load_geojson_geometries(vector_source)
-                            if parsed_crs:
-                                vector_crs = parsed_crs
-                        if not geometries:
-                            geometries = [_default_geometry()]
-                        shp_path = working_dir / f"{step_id or 'export'}_vector.shp"
-                        _write_shapefile(shp_path, geometries, crs=vector_crs)
-                        artifacts.append(
-                            {"artifact_type": "shapefile", "path": str(shp_path), "source_step": step_id}
-                        )
-                        produced_artifact_path = str(shp_path)
+                        if nodata is None:
+                            nodata = -9999.0 if np.issubdtype(output_data.dtype, np.floating) else 0
+
+                        for band_idx in range(output_data.shape[0]):
+                            band = output_data[band_idx]
+                            band[~mask_bool] = nodata
+                            output_data[band_idx] = band
+
+                        profile.update(nodata=nodata)
+                        with rasterio.open(output_path, "w", **profile) as dst:
+                            dst.write(output_data)
+                    references[output_ref] = str(output_path)
+                elif op_name == "raster.rasterize":
+                    output_ref = str(outputs.get("raster") or step_id or "raster_rasterize")
+                    output_path = working_dir / f"{step_id or output_ref}.tif"
+                    geometries = _resolve_geometry_shapes(node=node, references=references)
+                    burn_value = float(params.get("burn_value", 1.0))
+                    nodata = float(params.get("nodata", 0.0))
+                    output_dtype = str(params.get("dtype") or "float32")
+
+                    template_ref = str(inputs.get("raster") or "")
+                    template_path = (
+                        Path(references[template_ref])
+                        if template_ref and template_ref in references
+                        else None
+                    )
+                    if template_path is None and params.get("template_raster_path"):
+                        template_path = Path(str(params.get("template_raster_path")))
+
+                    if template_path is not None and _is_supported_raster(template_path):
+                        with rasterio.open(template_path) as src:
+                            width = src.width
+                            height = src.height
+                            transform = src.transform
+                            crs = src.crs
                     else:
-                        raise ValueError(f"Unsupported artifact export format: {fmt_name}")
+                        width = int(params.get("width") or 256)
+                        height = int(params.get("height") or 256)
+                        if width <= 0 or height <= 0:
+                            raise ValueError("raster.rasterize width/height must be positive")
 
-                artifact_ref = str(outputs.get("artifact") or "")
-                if artifact_ref and produced_artifact_path:
-                    references[artifact_ref] = produced_artifact_path
-            else:
-                raise ValueError(f"Unsupported operation in dispatcher: {op_name}")
+                        if isinstance(params.get("bounds"), list) and len(params["bounds"]) == 4:
+                            minx, miny, maxx, maxy = [float(value) for value in params["bounds"]]
+                        else:
+                            minx, miny, maxx, maxy = 116.0, 39.9, 116.1, 40.0
+                        x_res = (maxx - minx) / width
+                        y_res = (maxy - miny) / height
+                        transform = from_origin(minx, maxy, x_res, y_res)
+                        crs = str(params.get("target_crs") or "EPSG:4326")
+
+                    burned = rasterize(
+                        [(geometry, burn_value) for geometry in geometries],
+                        out_shape=(height, width),
+                        transform=transform,
+                        fill=nodata,
+                        all_touched=bool(params.get("all_touched", False)),
+                        dtype=output_dtype,
+                    )
+                    with rasterio.open(
+                        output_path,
+                        "w",
+                        driver="GTiff",
+                        height=height,
+                        width=width,
+                        count=1,
+                        dtype=output_dtype,
+                        crs=crs,
+                        transform=transform,
+                        nodata=nodata,
+                    ) as dst:
+                        dst.write(burned, 1)
+                    references[output_ref] = str(output_path)
+                elif op_name == "vector.buffer":
+                    output_ref = str(outputs.get("vector") or step_id or "vector_buffer")
+                    output_path = working_dir / f"{step_id or output_ref}.geojson"
+                    geometries, source_crs = _resolve_vector_geometries(
+                        node=node, references=references
+                    )
+                    buffer_m = params.get("distance_m")
+                    distance = float(
+                        params.get("distance") if params.get("distance") is not None else 0.0
+                    )
+                    if buffer_m is not None:
+                        buffer_m_value = float(buffer_m)
+                        if source_crs.upper().endswith("4326"):
+                            distance = buffer_m_value / 111320.0
+                        else:
+                            distance = buffer_m_value
+                    if distance <= 0:
+                        raise ValueError("vector.buffer requires a positive distance or distance_m")
+
+                    source_shapes = _geometry_dicts_to_shapes(geometries)
+                    buffered_geometries: list[dict[str, Any]] = []
+                    for geom in source_shapes:
+                        buffered_geometries.extend(_shape_to_geometry_list(geom.buffer(distance)))
+                    if not buffered_geometries:
+                        buffered_geometries = [_default_geometry()]
+                    _write_geojson(output_path, buffered_geometries, crs=source_crs)
+                    references[output_ref] = str(output_path)
+                elif op_name == "vector.clip":
+                    output_ref = str(outputs.get("vector") or step_id or "vector_clip")
+                    output_path = working_dir / f"{step_id or output_ref}.geojson"
+                    primary_geometries, source_crs = _resolve_vector_geometries(
+                        node=node, references=references
+                    )
+                    overlay_geometries, _ = _resolve_overlay_geometries(
+                        node=node, references=references
+                    )
+                    primary_shapes = _geometry_dicts_to_shapes(primary_geometries)
+                    overlay_shapes = _geometry_dicts_to_shapes(overlay_geometries)
+                    overlay_union = unary_union(overlay_shapes)
+
+                    clipped_geometries: list[dict[str, Any]] = []
+                    for geom in primary_shapes:
+                        clipped_geometries.extend(
+                            _shape_to_geometry_list(geom.intersection(overlay_union))
+                        )
+                    if not clipped_geometries:
+                        clipped_geometries = [_default_geometry()]
+                    _write_geojson(output_path, clipped_geometries, crs=source_crs)
+                    references[output_ref] = str(output_path)
+                elif op_name == "vector.intersection":
+                    output_ref = str(outputs.get("vector") or step_id or "vector_intersection")
+                    output_path = working_dir / f"{step_id or output_ref}.geojson"
+                    left_geometries, source_crs = _resolve_vector_geometries(
+                        node=node, references=references
+                    )
+                    right_geometries, _ = _resolve_overlay_geometries(node=node, references=references)
+                    left_shapes = _geometry_dicts_to_shapes(left_geometries)
+                    right_shapes = _geometry_dicts_to_shapes(right_geometries)
+
+                    intersected_geometries: list[dict[str, Any]] = []
+                    for left_shape in left_shapes:
+                        for right_shape in right_shapes:
+                            intersected_geometries.extend(
+                                _shape_to_geometry_list(left_shape.intersection(right_shape))
+                            )
+                    if not intersected_geometries:
+                        intersected_geometries = [_default_geometry()]
+                    _write_geojson(output_path, intersected_geometries, crs=source_crs)
+                    references[output_ref] = str(output_path)
+                elif op_name == "vector.dissolve":
+                    output_ref = str(outputs.get("vector") or step_id or "vector_dissolve")
+                    output_path = working_dir / f"{step_id or output_ref}.geojson"
+                    geometries, source_crs = _resolve_vector_geometries(
+                        node=node, references=references
+                    )
+                    source_shapes = _geometry_dicts_to_shapes(geometries)
+                    dissolved = unary_union(source_shapes)
+                    dissolved_geometries = _shape_to_geometry_list(dissolved)
+                    if not dissolved_geometries:
+                        dissolved_geometries = [_default_geometry()]
+                    _write_geojson(output_path, dissolved_geometries, crs=source_crs)
+                    references[output_ref] = str(output_path)
+                elif op_name == "vector.reproject":
+                    output_ref = str(outputs.get("vector") or step_id or "vector_reproject")
+                    output_path = working_dir / f"{step_id or output_ref}.geojson"
+                    geometries, source_crs = _resolve_vector_geometries(
+                        node=node, references=references
+                    )
+                    target_crs = str(params.get("target_crs") or "EPSG:4326")
+                    source_override = params.get("source_crs")
+                    source_crs_name = str(source_override or source_crs or "EPSG:4326")
+                    reprojected_geometries: list[dict[str, Any]] = []
+                    for geometry in geometries:
+                        if source_crs_name == target_crs:
+                            reprojected_geometries.append(geometry)
+                        else:
+                            reprojected_geometries.append(
+                                transform_geom(source_crs_name, target_crs, geometry)
+                            )
+                    if not reprojected_geometries:
+                        reprojected_geometries = [_default_geometry()]
+                    _write_geojson(output_path, reprojected_geometries, crs=target_crs)
+                    references[output_ref] = str(output_path)
+                elif op_name == "vector.union":
+                    output_ref = str(outputs.get("vector") or step_id or "vector_union")
+                    output_path = working_dir / f"{step_id or output_ref}.geojson"
+                    left_geometries, source_crs = _resolve_vector_geometries(
+                        node=node, references=references
+                    )
+                    right_geometries, right_crs = _resolve_overlay_geometries(
+                        node=node, references=references
+                    )
+                    _require_matching_crs(left_crs=source_crs, right_crs=right_crs, op_name=op_name)
+                    all_shapes = _geometry_dicts_to_shapes(left_geometries) + _geometry_dicts_to_shapes(
+                        right_geometries
+                    )
+                    merged = unary_union(all_shapes)
+                    merged_geometries = _shape_to_geometry_list(merged)
+                    if not merged_geometries:
+                        merged_geometries = [_default_geometry()]
+                    _write_geojson(output_path, merged_geometries, crs=source_crs)
+                    references[output_ref] = str(output_path)
+                elif op_name == "vector.erase":
+                    output_ref = str(outputs.get("vector") or step_id or "vector_erase")
+                    output_path = working_dir / f"{step_id or output_ref}.geojson"
+                    left_geometries, source_crs = _resolve_vector_geometries(
+                        node=node, references=references
+                    )
+                    right_geometries, right_crs = _resolve_overlay_geometries(
+                        node=node, references=references
+                    )
+                    _require_matching_crs(left_crs=source_crs, right_crs=right_crs, op_name=op_name)
+                    left_shapes = _geometry_dicts_to_shapes(left_geometries)
+                    right_union = unary_union(_geometry_dicts_to_shapes(right_geometries))
+
+                    erased_geometries: list[dict[str, Any]] = []
+                    for left_shape in left_shapes:
+                        erased_geometries.extend(
+                            _shape_to_geometry_list(left_shape.difference(right_union))
+                        )
+                    if not erased_geometries:
+                        erased_geometries = [_default_geometry()]
+                    _write_geojson(output_path, erased_geometries, crs=source_crs)
+                    references[output_ref] = str(output_path)
+                elif op_name == "vector.simplify":
+                    output_ref = str(outputs.get("vector") or step_id or "vector_simplify")
+                    output_path = working_dir / f"{step_id or output_ref}.geojson"
+                    geometries, source_crs = _resolve_vector_geometries(
+                        node=node, references=references
+                    )
+                    tolerance = float(params.get("tolerance") or 0.0)
+                    if tolerance <= 0:
+                        raise ValueError("vector.simplify requires positive tolerance")
+                    preserve_topology = bool(params.get("preserve_topology", True))
+                    source_shapes = _geometry_dicts_to_shapes(geometries)
+
+                    simplified_geometries: list[dict[str, Any]] = []
+                    for geom in source_shapes:
+                        simplified_geometries.extend(
+                            _shape_to_geometry_list(
+                                geom.simplify(tolerance, preserve_topology=preserve_topology)
+                            )
+                        )
+                    if not simplified_geometries:
+                        simplified_geometries = [_default_geometry()]
+                    _write_geojson(output_path, simplified_geometries, crs=source_crs)
+                    references[output_ref] = str(output_path)
+                elif op_name == "vector.spatial_join":
+                    output_ref = str(outputs.get("vector") or step_id or "vector_spatial_join")
+                    output_path = working_dir / f"{step_id or output_ref}.geojson"
+                    left_geometries, source_crs = _resolve_vector_geometries(
+                        node=node, references=references
+                    )
+                    right_geometries, right_crs = _resolve_overlay_geometries(
+                        node=node, references=references
+                    )
+                    _require_matching_crs(left_crs=source_crs, right_crs=right_crs, op_name=op_name)
+                    left_shapes = _geometry_dicts_to_shapes(left_geometries)
+                    right_shapes = _geometry_dicts_to_shapes(right_geometries)
+                    predicate = str(params.get("predicate") or "intersects")
+
+                    output_features: list[dict[str, Any]] = []
+                    for left_shape in left_shapes:
+                        if left_shape.is_empty:
+                            continue
+                        join_count = 0
+                        for right_shape in right_shapes:
+                            if right_shape.is_empty:
+                                continue
+                            if predicate == "contains":
+                                matched = left_shape.contains(right_shape)
+                            elif predicate == "within":
+                                matched = left_shape.within(right_shape)
+                            else:
+                                matched = left_shape.intersects(right_shape)
+                            if matched:
+                                join_count += 1
+                        output_features.append(
+                            {
+                                "type": "Feature",
+                                "properties": {"join_count": join_count, "predicate": predicate},
+                                "geometry": mapping(left_shape),
+                            }
+                        )
+
+                    if not output_features:
+                        output_features = [
+                            {
+                                "type": "Feature",
+                                "properties": {"join_count": 0, "predicate": predicate},
+                                "geometry": _default_geometry(),
+                            }
+                        ]
+
+                    payload = {
+                        "type": "FeatureCollection",
+                        "features": output_features,
+                        "crs": {"type": "name", "properties": {"name": source_crs}},
+                    }
+                    output_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+                    references[output_ref] = str(output_path)
+                elif op_name == "vector.repair":
+                    output_ref = str(outputs.get("vector") or step_id or "vector_repair")
+                    output_path = working_dir / f"{step_id or output_ref}.geojson"
+                    geometries, source_crs = _resolve_vector_geometries(
+                        node=node, references=references
+                    )
+                    source_shapes = _geometry_dicts_to_shapes(geometries)
+
+                    repaired_geometries: list[dict[str, Any]] = []
+                    for geom in source_shapes:
+                        if geom.is_empty:
+                            continue
+                        fixed = geom if geom.is_valid else geom.buffer(0)
+                        repaired_geometries.extend(_shape_to_geometry_list(fixed))
+                    if not repaired_geometries:
+                        repaired_geometries = [_default_geometry()]
+                    _write_geojson(output_path, repaired_geometries, crs=source_crs)
+                    references[output_ref] = str(output_path)
+                elif op_name == "artifact.export":
+                    source_ref = str(inputs.get("primary") or "")
+                    source_path = references.get(source_ref)
+                    if source_path is None and params.get("source_path"):
+                        source_path = str(params.get("source_path"))
+                    if source_path is None:
+                        source_path = _pick_primary_raster_reference(references)
+                    if source_path is None:
+                        source_path = _pick_primary_vector_reference(references)
+                    if source_path is None:
+                        raise ValueError(
+                            "artifact.export requires a resolvable primary input reference"
+                        )
+
+                    export_formats = params.get("formats") or ["geotiff"]
+                    requested_output_path = params.get("output_path")
+                    produced_artifact_path: str | None = None
+                    for fmt in export_formats:
+                        fmt_name = str(fmt).lower()
+                        if fmt_name in {"geotiff", "tif", "tiff"}:
+                            candidate = Path(source_path)
+                            if not _is_supported_raster(candidate):
+                                raster_source = _pick_primary_raster_reference(references)
+                                if raster_source is not None and _is_supported_raster(
+                                    Path(raster_source)
+                                ):
+                                    candidate = Path(raster_source)
+                                else:
+                                    raise ValueError(
+                                        "artifact.export geotiff requires a valid raster source"
+                                    )
+                            if requested_output_path:
+                                desired_path = Path(str(requested_output_path))
+                                desired_path.parent.mkdir(parents=True, exist_ok=True)
+                                if str(candidate) != str(desired_path):
+                                    _write_raster_copy(source_path=candidate, output_path=desired_path)
+                                candidate = desired_path
+                            source_path = str(candidate)
+                            artifacts.append(
+                                {
+                                    "artifact_type": "geotiff",
+                                    "path": str(source_path),
+                                    "source_step": step_id,
+                                }
+                            )
+                            exported_tif_path = str(source_path)
+                            produced_artifact_path = str(source_path)
+                        elif fmt_name in {"png", "png_map"}:
+                            png_path = working_dir / f"{step_id or 'export'}_preview.png"
+                            raster_source = Path(source_path)
+                            if not _is_supported_raster(raster_source):
+                                primary_raster = _pick_primary_raster_reference(references)
+                                if primary_raster is not None:
+                                    raster_source = Path(primary_raster)
+                                else:
+                                    raise ValueError(
+                                        "artifact.export png_map requires a valid raster source"
+                                    )
+                            _write_png_preview_from_raster(raster_path=raster_source, png_path=png_path)
+                            artifacts.append(
+                                {
+                                    "artifact_type": "png_map",
+                                    "path": str(png_path),
+                                    "source_step": step_id,
+                                }
+                            )
+                            exported_png_path = str(png_path)
+                            produced_artifact_path = str(png_path)
+                        elif fmt_name == "csv":
+                            csv_path = Path(source_path)
+                            if csv_path.suffix.lower() != ".csv":
+                                csv_path = working_dir / f"{step_id or 'export'}_table.csv"
+                                with csv_path.open("w", newline="", encoding="utf-8") as csv_file:
+                                    writer = csv.writer(csv_file)
+                                    writer.writerow(["key", "value"])
+                                    writer.writerow(["source", str(source_path)])
+                            artifacts.append(
+                                {"artifact_type": "csv", "path": str(csv_path), "source_step": step_id}
+                            )
+                            produced_artifact_path = str(csv_path)
+                        elif fmt_name in {"geojson", "json"}:
+                            vector_source = Path(source_path)
+                            if vector_source.suffix.lower() not in {".geojson", ".json"}:
+                                picked_vector = _pick_primary_vector_reference(references)
+                                if picked_vector:
+                                    vector_source = Path(picked_vector)
+                            if not vector_source.exists() or vector_source.suffix.lower() not in {
+                                ".geojson",
+                                ".json",
+                            }:
+                                vector_source = working_dir / f"{step_id or 'export'}_vector.geojson"
+                                _write_geojson(vector_source, [_default_geometry()], crs="EPSG:4326")
+                            artifacts.append(
+                                {
+                                    "artifact_type": "geojson",
+                                    "path": str(vector_source),
+                                    "source_step": step_id,
+                                }
+                            )
+                            produced_artifact_path = str(vector_source)
+                        elif fmt_name == "gpkg":
+                            vector_source = Path(source_path)
+                            geometries: list[dict[str, Any]] = []
+                            vector_crs = "EPSG:4326"
+                            if vector_source.exists() and vector_source.suffix.lower() in {
+                                ".geojson",
+                                ".json",
+                            }:
+                                geometries, parsed_crs = _load_geojson_geometries(vector_source)
+                                if parsed_crs:
+                                    vector_crs = parsed_crs
+                            if not geometries:
+                                geometries = [_default_geometry()]
+                            gpkg_path = working_dir / f"{step_id or 'export'}_vector.gpkg"
+                            _write_gpkg(gpkg_path, geometries, crs=vector_crs)
+                            artifacts.append(
+                                {
+                                    "artifact_type": "gpkg",
+                                    "path": str(gpkg_path),
+                                    "source_step": step_id,
+                                }
+                            )
+                            produced_artifact_path = str(gpkg_path)
+                        elif fmt_name in {"shapefile", "shp"}:
+                            vector_source = Path(source_path)
+                            geometries: list[dict[str, Any]] = []
+                            vector_crs = "EPSG:4326"
+                            if vector_source.exists() and vector_source.suffix.lower() in {
+                                ".geojson",
+                                ".json",
+                            }:
+                                geometries, parsed_crs = _load_geojson_geometries(vector_source)
+                                if parsed_crs:
+                                    vector_crs = parsed_crs
+                            if not geometries:
+                                geometries = [_default_geometry()]
+                            shp_path = working_dir / f"{step_id or 'export'}_vector.shp"
+                            _write_shapefile(shp_path, geometries, crs=vector_crs)
+                            artifacts.append(
+                                {
+                                    "artifact_type": "shapefile",
+                                    "path": str(shp_path),
+                                    "source_step": step_id,
+                                }
+                            )
+                            produced_artifact_path = str(shp_path)
+                        else:
+                            raise ValueError(f"Unsupported artifact export format: {fmt_name}")
+
+                    artifact_ref = str(outputs.get("artifact") or "")
+                    if artifact_ref and produced_artifact_path:
+                        references[artifact_ref] = produced_artifact_path
+                else:
+                    raise ValueError(f"Unsupported operation in dispatcher: {op_name}")
+
+            except Exception as _exc:
+                if on_event:
+                    on_event(
+                        event_type="operation_node_failed",
+                        step_id=step_id,
+                        op_name=op_name,
+                        status="failed",
+                        detail={"error": str(_exc)},
+                    )
+                raise
+
+            if on_event:
+                on_event(
+                    event_type="operation_node_completed",
+                    step_id=step_id,
+                    op_name=op_name,
+                    status="success",
+                )
 
             completed_steps.add(step_id)
             pending_nodes.remove(node)

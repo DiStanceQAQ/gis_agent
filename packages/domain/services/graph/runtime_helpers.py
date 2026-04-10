@@ -281,17 +281,39 @@ def _tool_run_processing_pipeline(
     task: TaskRunRecord,
     context: PipelineExecutionContext,
 ) -> dict[str, object]:
-    del db
     if not task.selected_dataset:
         task.selected_dataset = "local_file"
     operation_plan = (task.plan_json or {}).get("operation_plan") or {}
     plan_nodes = list(operation_plan.get("nodes") or [])
+
+    def _on_pipeline_event(
+        *,
+        event_type: str,
+        step_id: str,
+        op_name: str,
+        status: str,
+        detail: dict[str, object] | None = None,
+    ) -> None:
+        append_task_event(
+            db,
+            task_id=task.id,
+            event_type=event_type,
+            step_name=f"pipeline:{step_id}",
+            status=status,
+            detail={
+                "step_id": step_id,
+                "op_name": op_name,
+                **(detail or {}),
+            },
+        )
+        db.flush()
 
     working_dir = Path(build_artifact_path(task.id, "pipeline_tmp")).parent
     pipeline_outputs = run_processing_pipeline(
         task_id=task.id,
         plan_nodes=plan_nodes,
         working_dir=working_dir,
+        on_event=_on_pipeline_event,
     )
     context.pipeline_outputs = pipeline_outputs
     return {
